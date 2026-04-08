@@ -3,18 +3,18 @@ from langgraph.prebuilt import ToolNode
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage
 from packages.agents.core.base import BaseAgent, BaseAgentState
-from packages.agents.core.prompts import GENERAL_SYSTEM_PROMPT
-from packages.agents.general.tools import get_general_tools
+from packages.agents.comms.prompts import COMMS_SYSTEM_PROMPT
+from packages.agents.comms.tools import get_comms_tools
 
 
-class GeneralAgent(BaseAgent):
-    slug = "general"
-    name = "General Assistant"
-    description = "A helpful AI assistant for general tasks, planning, writing, and analysis."
-    model = "claude-haiku-4-5-20251001"
+class CommsAgent(BaseAgent):
+    slug = "comms"
+    name = "Comms Agent"
+    description = "Email marketing, lead generation, and content strategy for Langley Firearms Academy."
+    model = "claude-sonnet-4-6"
 
     def __init__(self):
-        self.tools = get_general_tools()
+        self.tools = get_comms_tools()
         self.llm = ChatAnthropic(model=self.model).bind_tools(self.tools)
         self.tool_node = ToolNode(self.tools)
         super().__init__()
@@ -36,7 +36,7 @@ class GeneralAgent(BaseAgent):
         return graph
 
     async def _agent_node(self, state: BaseAgentState):
-        messages = [SystemMessage(content=GENERAL_SYSTEM_PROMPT)] + state["messages"]
+        messages = [SystemMessage(content=COMMS_SYSTEM_PROMPT)] + state["messages"]
         response = await self.llm.ainvoke(messages)
         return {"messages": [response]}
 
@@ -45,3 +45,4 @@ class GeneralAgent(BaseAgent):
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "tools"
         return "end"
+

@@ -9,7 +9,7 @@ def now_iso() -> str:
 def calculate_cost(input_tokens: int, output_tokens: int, model: str) -> float:
     costs = {
         "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
-        "claude-sonnet-4-6-20260401": {"input": 3.00, "output": 15.00},
+        "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
     }
     model_cost = costs.get(model, {"input": 1.0, "output": 5.0})
     return (input_tokens * model_cost["input"] + output_tokens * model_cost["output"]) / 1_000_000

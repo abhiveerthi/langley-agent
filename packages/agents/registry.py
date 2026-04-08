@@ -1,8 +1,14 @@
 from packages.agents.core.base import BaseAgent
 from packages.agents.general.agent import GeneralAgent
+from packages.agents.research.agent import ResearchAgent
+from packages.agents.intel.agent import IntelAgent
+from packages.agents.comms.agent import CommsAgent
 
 AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
     "general": GeneralAgent,
+    "research": ResearchAgent,
+    "intel": IntelAgent,
+    "comms": CommsAgent,
 }
 
 

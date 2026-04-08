@@ -1,11 +1,12 @@
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from typing import TypedDict, Any
+from langgraph.graph.message import add_messages
+from typing import TypedDict, Annotated, Any
 import os
 
 
 class BaseAgentState(TypedDict):
-    messages: list[dict]
+    messages: Annotated[list, add_messages]
     org_id: str
     user_id: str
     thread_id: str
@@ -21,9 +22,12 @@ class BaseAgent:
     model: str = "claude-haiku-4-5-20251001"
 
     def __init__(self):
+        self._custom_checkpointer = None
         self.graph = self.build_graph()
 
     async def get_checkpointer(self):
+        if self._custom_checkpointer is not None:
+            return self._custom_checkpointer
         return AsyncPostgresSaver.from_conn_string(os.environ["DATABASE_URL"])
 
     async def compile(self):
