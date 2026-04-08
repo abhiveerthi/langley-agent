@@ -1,0 +1,16 @@
+{
+  "name": "agentos",
+  "private": true,
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "db:seed": "tsx scripts/seed.ts"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "packageManager": "pnpm@9.6.0"
+}

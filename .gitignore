@@ -1,0 +1,34 @@
+# dependencies
+node_modules/
+.pnpm-store/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# build
+.next/
+dist/
+.turbo/
+*.egg-info/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# testing
+coverage/
+.pytest_cache/
+htmlcov/
+
+# misc
+*.log
+.vercel
