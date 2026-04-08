@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+// import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
@@ -17,30 +17,22 @@ export default function LoginPage() {
     setError("");
     setLoading(true);
 
-    const supabase = createClient();
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-
-    if (error) {
-      setError(error.message);
-      setLoading(false);
-      return;
-    }
+    // TODO: re-enable Supabase auth
+    // const supabase = createClient();
+    // const { error } = await supabase.auth.signInWithPassword({ email, password });
+    // if (error) { setError(error.message); setLoading(false); return; }
 
     router.push("/chat");
     router.refresh();
   }
 
   async function handleGoogleLogin() {
-    const supabase = createClient();
-    await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: {
-        redirectTo: `${window.location.origin}/auth/callback`,
-      },
-    });
+    // TODO: re-enable Supabase auth
+    // const supabase = createClient();
+    // await supabase.auth.signInWithOAuth({
+    //   provider: "google",
+    //   options: { redirectTo: `${window.location.origin}/auth/callback` },
+    // });
   }
 
   return (

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+// import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
@@ -19,23 +19,14 @@ export default function SignupPage() {
     setError("");
     setLoading(true);
 
-    const supabase = createClient();
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: {
-          full_name: fullName,
-          org_name: orgName || `${fullName}'s Workspace`,
-        },
-      },
-    });
-
-    if (error) {
-      setError(error.message);
-      setLoading(false);
-      return;
-    }
+    // TODO: re-enable Supabase auth
+    // const supabase = createClient();
+    // const { error } = await supabase.auth.signUp({
+    //   email,
+    //   password,
+    //   options: { data: { full_name: fullName, org_name: orgName || `${fullName}'s Workspace` } },
+    // });
+    // if (error) { setError(error.message); setLoading(false); return; }
 
     router.push("/chat");
     router.refresh();
