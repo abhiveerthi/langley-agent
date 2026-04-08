@@ -38,7 +38,7 @@ export default function SignupPage() {
         <div className="text-center">
           <h1 className="text-2xl font-bold">Create your workspace</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Get started with AgentOS
+            Get started with Marcus
           </p>
         </div>
 

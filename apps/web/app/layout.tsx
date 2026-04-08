@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Anthracite",
+  title: "Marcus",
   description: "AI-powered creator platform",
 };
 

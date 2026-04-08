@@ -132,7 +132,7 @@ export function Sidebar() {
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
           <Zap className="h-4 w-4" />
         </div>
-        <span className="text-base font-semibold tracking-tight text-foreground">Anthracite</span>
+        <span className="text-base font-semibold tracking-tight text-foreground">Marcus</span>
       </div>
 
       {/* New Chat CTA */}
@@ -164,11 +164,6 @@ export function Sidebar() {
 
       {/* Nav sections */}
       <nav className="flex-1 overflow-y-auto px-3 pb-3">
-        <SectionLabel>Studio</SectionLabel>
-        {studioItems.map((item) => (
-          <NavItem key={item.href} {...item} />
-        ))}
-
         <SectionLabel>Agents</SectionLabel>
         {agentItems.map((item) => (
           <NavItem key={item.href} {...item} />
@@ -185,6 +180,11 @@ export function Sidebar() {
 
         <SectionLabel>Business</SectionLabel>
         {businessItems.map((item) => (
+          <NavItem key={item.href} {...item} />
+        ))}
+
+        <SectionLabel>Studio</SectionLabel>
+        {studioItems.map((item) => (
           <NavItem key={item.href} {...item} />
         ))}
       </nav>
