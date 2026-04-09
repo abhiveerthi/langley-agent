@@ -32,3 +32,6 @@ htmlcov/
 # misc
 *.log
 .vercel
+
+# MCP config (may contain API keys)
+.mcp.json
