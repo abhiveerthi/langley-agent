@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { cookies } from "next/headers";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -17,13 +18,23 @@ export const metadata: Metadata = {
   description: "AI-powered creator platform",
 };
 
-export default function RootLayout({
+const VALID_THEMES = ["default", "midnight", "ocean", "forest", "sunset", "rose", "gold"];
+
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const cookieStore = await cookies();
+  const theme = cookieStore.get("marcus-theme")?.value ?? "default";
+  const safeTheme = VALID_THEMES.includes(theme) ? theme : "default";
+
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} dark`}>
+    <html
+      lang="en"
+      className={`${geistSans.variable} ${geistMono.variable} dark`}
+      data-theme={safeTheme}
+    >
       <body className="min-h-screen bg-background text-foreground antialiased">
         {children}
       </body>

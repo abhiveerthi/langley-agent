@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-@theme inline {
+@theme {
   --color-background: #09090b;
   --color-foreground: #fafafa;
   --color-muted: #27272a;
@@ -26,6 +26,96 @@
   --radius-lg: 0.75rem;
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+}
+
+/* Midnight — near-black + violet */
+[data-theme="midnight"] {
+  --color-background: #030307;
+  --color-card: #080812;
+  --color-sidebar: #020205;
+  --color-muted: #1e1e2e;
+  --color-border: #1e1e2e;
+  --color-input: #1e1e2e;
+  --color-secondary: #1e1e2e;
+  --color-accent: #1e1e2e;
+  --color-primary: #8b5cf6;
+  --color-ring: #8b5cf6;
+  --color-sidebar-active: #8b5cf6;
+}
+
+/* Ocean — dark navy + cyan */
+[data-theme="ocean"] {
+  --color-background: #040d12;
+  --color-card: #061520;
+  --color-sidebar: #030b0f;
+  --color-muted: #102030;
+  --color-border: #102030;
+  --color-input: #102030;
+  --color-secondary: #102030;
+  --color-accent: #102030;
+  --color-primary: #06b6d4;
+  --color-ring: #06b6d4;
+  --color-sidebar-active: #06b6d4;
+}
+
+/* Forest — dark green + emerald */
+[data-theme="forest"] {
+  --color-background: #060d08;
+  --color-card: #0a1510;
+  --color-sidebar: #050b07;
+  --color-muted: #162318;
+  --color-border: #162318;
+  --color-input: #162318;
+  --color-secondary: #162318;
+  --color-accent: #162318;
+  --color-primary: #10b981;
+  --color-ring: #10b981;
+  --color-sidebar-active: #10b981;
+}
+
+/* Sunset — dark warm + orange */
+[data-theme="sunset"] {
+  --color-background: #0d0804;
+  --color-card: #150e08;
+  --color-sidebar: #0b0703;
+  --color-muted: #271a0e;
+  --color-border: #271a0e;
+  --color-input: #271a0e;
+  --color-secondary: #271a0e;
+  --color-accent: #271a0e;
+  --color-primary: #f97316;
+  --color-ring: #f97316;
+  --color-sidebar-active: #f97316;
+}
+
+/* Rose — dark + rose */
+[data-theme="rose"] {
+  --color-background: #0d0508;
+  --color-card: #15090f;
+  --color-sidebar: #0b040a;
+  --color-muted: #270f18;
+  --color-border: #270f18;
+  --color-input: #270f18;
+  --color-secondary: #270f18;
+  --color-accent: #270f18;
+  --color-primary: #f43f5e;
+  --color-ring: #f43f5e;
+  --color-sidebar-active: #f43f5e;
+}
+
+/* Gold — dark warm + amber */
+[data-theme="gold"] {
+  --color-background: #0d0b04;
+  --color-card: #151208;
+  --color-sidebar: #0b0a03;
+  --color-muted: #271f0a;
+  --color-border: #271f0a;
+  --color-input: #271f0a;
+  --color-secondary: #271f0a;
+  --color-accent: #271f0a;
+  --color-primary: #f59e0b;
+  --color-ring: #f59e0b;
+  --color-sidebar-active: #f59e0b;
 }
 
 body {
