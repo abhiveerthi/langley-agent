@@ -1,3 +1,5 @@
+"use client";
+
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -14,6 +16,7 @@ import {
 } from "lucide-react";
 import { researchReports } from "@/lib/mock-data";
 import { cn } from "@/lib/utils";
+import { MiniChat } from "@/components/chat/MiniChat";
 
 const activityLogs = [
   { time: "Today 8:04 AM", action: "Ran weekly research sweep across all sources", duration: "4m 32s", status: "success" },
@@ -241,6 +244,9 @@ export default function ResearchAgentPage() {
           Run Now
         </button>
       </div>
+
+      {/* Mini Chat */}
+      <MiniChat agentSlug="research" agentName="Trend Scout" />
     </div>
   );
 }

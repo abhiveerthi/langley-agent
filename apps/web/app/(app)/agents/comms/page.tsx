@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { sponsorLeads } from "@/lib/mock-data";
 import { cn } from "@/lib/utils";
+import { MiniChat } from "@/components/chat/MiniChat";
 
 const emailCampaigns = [
   { id: "1", name: "New Video Blast — 'AI Tools Changed My Workflow'", status: "sent", sent: 847, openRate: "38%", date: "Yesterday" },
@@ -322,6 +323,9 @@ export default function CommsAgentPage() {
           Run Lead Search
         </button>
       </div>
+
+      {/* Mini Chat */}
+      <MiniChat agentSlug="comms" agentName="Growth Engine" />
     </div>
   );
 }

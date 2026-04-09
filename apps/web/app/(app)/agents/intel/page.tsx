@@ -1,3 +1,5 @@
+"use client";
+
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -13,6 +15,7 @@ import {
 } from "lucide-react";
 import { brandBriefs } from "@/lib/mock-data";
 import { cn } from "@/lib/utils";
+import { MiniChat } from "@/components/chat/MiniChat";
 
 const videoIdeas = [
   { title: "AI Editor Showdown: Which Tool Actually Saves More Time?", score: 94, tag: "High CTR" },
@@ -255,6 +258,9 @@ export default function IntelAgentPage() {
           Generate Brief Now
         </button>
       </div>
+
+      {/* Mini Chat */}
+      <MiniChat agentSlug="intel" agentName="Content Strategist" />
     </div>
   );
 }
