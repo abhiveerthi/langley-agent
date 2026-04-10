@@ -18,6 +18,8 @@ dependencies = [
     "langchain-community>=0.3.0",
     "psycopg[binary]>=3.2.0",
     "langgraph-checkpoint-postgres>=3.0.0",
+    "yt-dlp>=2025.1.0",
+    "faster-whisper>=1.0.0",
 ]
 
 [dependency-groups]

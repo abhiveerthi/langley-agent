@@ -4,7 +4,7 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
-from app.routers import chat, stream, agents, tasks, projects, runs, approvals, notifications, dashboard
+from app.routers import chat, stream, agents, tasks, projects, runs, approvals, notifications, dashboard, clipper
 
 settings = get_settings()
 
@@ -38,3 +38,4 @@ app.include_router(runs.router, prefix="/api")
 app.include_router(approvals.router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
+app.include_router(clipper.router, prefix="/api")
