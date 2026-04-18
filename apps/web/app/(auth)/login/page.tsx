@@ -1,53 +1,77 @@
 "use client";
 
-import { useState } from "react";
-// import { createClient } from "@/lib/supabase/client";
-import { useRouter } from "next/navigation";
+import { Suspense, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { Zap, Loader2 } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 
-export default function LoginPage() {
+function LoginForm() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const next = searchParams.get("next") ?? "/app/chat";
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const router = useRouter();
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     setError("");
     setLoading(true);
 
-    // TODO: re-enable Supabase auth
-    // const supabase = createClient();
-    // const { error } = await supabase.auth.signInWithPassword({ email, password });
-    // if (error) { setError(error.message); setLoading(false); return; }
+    try {
+      const supabase = createClient();
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
 
-    router.push("/chat");
-    router.refresh();
-  }
+      if (signInError) {
+        setError(signInError.message);
+        setLoading(false);
+        return;
+      }
 
-  async function handleGoogleLogin() {
-    // TODO: re-enable Supabase auth
-    // const supabase = createClient();
-    // await supabase.auth.signInWithOAuth({
-    //   provider: "google",
-    //   options: { redirectTo: `${window.location.origin}/auth/callback` },
-    // });
+      router.push(next.startsWith("/") ? next : "/app/chat");
+      router.refresh();
+    } catch {
+      setError("Unable to sign in right now. Please try again.");
+      setLoading(false);
+    }
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center">
-      <div className="w-full max-w-sm space-y-6 px-4">
+    <div className="flex min-h-screen flex-col items-center justify-center px-4 py-12">
+      <Link
+        href="/"
+        className="mb-8 inline-flex items-center gap-2 text-muted-foreground transition-colors hover:text-foreground"
+      >
+        <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm">
+          <Zap className="h-3.5 w-3.5" strokeWidth={2.5} />
+        </div>
+        <span className="text-[15px] font-semibold tracking-tight text-foreground">
+          Backroom
+        </span>
+      </Link>
+
+      <div className="w-full max-w-sm rounded-xl border border-border bg-card p-6 shadow-xl shadow-black/20 sm:p-8">
         <div className="text-center">
-          <h1 className="text-2xl font-bold">Marcus</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <h1 className="text-xl font-semibold text-foreground sm:text-2xl">
+            Welcome back
+          </h1>
+          <p className="mt-1.5 text-sm text-muted-foreground">
             Sign in to your workspace
           </p>
         </div>
 
-        <form onSubmit={handleLogin} className="space-y-4">
+        <form onSubmit={handleLogin} className="mt-6 space-y-4">
           <div>
-            <label htmlFor="email" className="block text-sm font-medium mb-1">
+            <label
+              htmlFor="email"
+              className="mb-1.5 block text-xs font-medium text-muted-foreground"
+            >
               Email
             </label>
             <input
@@ -55,13 +79,17 @@ export default function LoginPage() {
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+              autoComplete="email"
+              className="h-10 w-full rounded-md border border-border bg-input px-3 text-sm text-foreground outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-primary/30"
               required
             />
           </div>
 
           <div>
-            <label htmlFor="password" className="block text-sm font-medium mb-1">
+            <label
+              htmlFor="password"
+              className="mb-1.5 block text-xs font-medium text-muted-foreground"
+            >
               Password
             </label>
             <input
@@ -69,47 +97,45 @@ export default function LoginPage() {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+              autoComplete="current-password"
+              className="h-10 w-full rounded-md border border-border bg-input px-3 text-sm text-foreground outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-primary/30"
               required
             />
           </div>
 
-          {error && (
-            <p className="text-sm text-destructive">{error}</p>
-          )}
+          {error && <p className="text-sm text-destructive">{error}</p>}
 
           <button
             type="submit"
             disabled={loading}
-            className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {loading ? "Signing in..." : "Sign in"}
+            {loading ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Signing in
+              </>
+            ) : (
+              "Sign in"
+            )}
           </button>
         </form>
 
-        <div className="relative">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-border" />
-          </div>
-          <div className="relative flex justify-center text-xs uppercase">
-            <span className="bg-background px-2 text-muted-foreground">or</span>
-          </div>
-        </div>
-
-        <button
-          onClick={handleGoogleLogin}
-          className="w-full rounded-md border border-border px-4 py-2 text-sm font-medium hover:bg-accent"
-        >
-          Continue with Google
-        </button>
-
-        <p className="text-center text-sm text-muted-foreground">
-          Don&apos;t have an account?{" "}
-          <Link href="/signup" className="text-primary hover:underline">
-            Sign up
+        <p className="mt-6 text-center text-xs text-muted-foreground">
+          Backroom is invite-only during early access.{" "}
+          <Link href="/#waitlist" className="text-primary hover:underline">
+            Request access
           </Link>
         </p>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense>
+      <LoginForm />
+    </Suspense>
   );
 }

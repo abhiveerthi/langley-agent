@@ -6,10 +6,10 @@ import { cn } from "@/lib/utils";
 import { Palette, Bell, Users, Plug } from "lucide-react";
 
 const navItems = [
-  { label: "Appearance", href: "/settings", icon: Palette, exact: true },
-  { label: "Notifications", href: "/settings/notifications", icon: Bell },
-  { label: "Team", href: "/settings/team", icon: Users },
-  { label: "Integrations", href: "/settings/integrations", icon: Plug },
+  { label: "Appearance", href: "/app/settings", icon: Palette, exact: true },
+  { label: "Notifications", href: "/app/settings/notifications", icon: Bell },
+  { label: "Team", href: "/app/settings/team", icon: Users },
+  { label: "Integrations", href: "/app/settings/integrations", icon: Plug },
 ];
 
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {

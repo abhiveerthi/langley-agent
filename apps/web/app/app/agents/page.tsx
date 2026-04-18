@@ -16,8 +16,8 @@ const agentIcons: Record<string, React.ElementType> = {
 };
 
 const activityLog = [
-  { agentId: "research", text: "Trend Scout completed Research Brief #47", time: "Today 8:04 AM", href: "/tasks" },
-  { agentId: "intel",    text: "Content Strategist completed Brand Brief #23", time: "Today 9:02 AM", href: "/tasks" },
+  { agentId: "research", text: "Trend Scout completed Research Brief #47", time: "Today 8:04 AM", href: "/app/tasks" },
+  { agentId: "intel",    text: "Content Strategist completed Brand Brief #23", time: "Today 9:02 AM", href: "/app/tasks" },
   { agentId: "comms",    text: "Growth Engine discovered 4 new sponsor leads", time: "3 days ago", href: "/agents/comms" },
   { agentId: "research", text: "Trend Scout identified 12 new trends in Creator Economy", time: "Last Monday 8:11 AM", href: "/agents/research" },
   { agentId: "comms",    text: "Growth Engine drafted email blast for 'AI Tools' video", time: "4 days ago", href: "/agents/comms" },
@@ -171,7 +171,7 @@ export default function AgentsPage() {
             <p className="text-xs text-muted-foreground mt-0.5">Control your agents from Slack, Discord, or Telegram</p>
           </div>
           <Link
-            href="/agents/bots"
+            href="/app/agents/bots"
             className="flex items-center gap-1 text-sm font-medium text-primary hover:underline"
           >
             Manage Bot Connections

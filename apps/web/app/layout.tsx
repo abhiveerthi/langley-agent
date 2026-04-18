@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { cookies } from "next/headers";
 import "./globals.css";
@@ -14,8 +14,15 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Marcus",
-  description: "AI-powered creator platform",
+  title: "Backroom — The AI production team every YouTuber wishes they could afford",
+  description:
+    "Four AI specialists running the back office of your YouTube channel — strategy, publishing, community, and sponsors. Early access open.",
+};
+
+export const viewport: Viewport = {
+  themeColor: "#0a0a0a",
+  width: "device-width",
+  initialScale: 1,
 };
 
 const VALID_THEMES = ["default", "midnight", "ocean", "forest", "sunset", "rose", "gold"];

@@ -1,34 +1,43 @@
 @import "tailwindcss";
 
 @theme {
-  --color-background: #09090b;
-  --color-foreground: #fafafa;
-  --color-muted: #27272a;
-  --color-muted-foreground: #a1a1aa;
-  --color-card: #0f0f11;
-  --color-card-foreground: #fafafa;
-  --color-border: #27272a;
-  --color-input: #27272a;
-  --color-primary: #6366f1;
-  --color-primary-foreground: #fafafa;
-  --color-secondary: #27272a;
-  --color-secondary-foreground: #fafafa;
-  --color-accent: #27272a;
-  --color-accent-foreground: #fafafa;
+  /* Dark base — near-black like Supabase */
+  --color-background: #0a0a0a;
+  --color-foreground: #ededed;
+  --color-muted: #171717;
+  --color-muted-foreground: #8a8a8a;
+  --color-card: #111111;
+  --color-card-foreground: #ededed;
+  --color-border: #1f1f1f;
+  --color-input: #171717;
+
+  /* Red accent */
+  --color-primary: #ef4444;
+  --color-primary-foreground: #ffffff;
+  --color-primary-hover: #dc2626;
+  --color-primary-muted: #7f1d1d;
+
+  --color-secondary: #171717;
+  --color-secondary-foreground: #ededed;
+  --color-accent: #171717;
+  --color-accent-foreground: #ededed;
   --color-destructive: #ef4444;
-  --color-destructive-foreground: #fafafa;
-  --color-ring: #6366f1;
-  --color-sidebar: #0a0a0c;
-  --color-sidebar-foreground: #a1a1aa;
-  --color-sidebar-active: #6366f1;
+  --color-destructive-foreground: #ffffff;
+  --color-ring: #ef4444;
+
+  --color-sidebar: #0a0a0a;
+  --color-sidebar-foreground: #8a8a8a;
+  --color-sidebar-active: #ef4444;
+
   --radius-sm: 0.375rem;
   --radius-md: 0.5rem;
   --radius-lg: 0.75rem;
+
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-/* Midnight — near-black + violet */
+/* Optional in-app themes (kept for settings page) */
 [data-theme="midnight"] {
   --color-background: #030307;
   --color-card: #080812;
@@ -43,7 +52,6 @@
   --color-sidebar-active: #8b5cf6;
 }
 
-/* Ocean — dark navy + cyan */
 [data-theme="ocean"] {
   --color-background: #040d12;
   --color-card: #061520;
@@ -58,7 +66,6 @@
   --color-sidebar-active: #06b6d4;
 }
 
-/* Forest — dark green + emerald */
 [data-theme="forest"] {
   --color-background: #060d08;
   --color-card: #0a1510;
@@ -73,7 +80,6 @@
   --color-sidebar-active: #10b981;
 }
 
-/* Sunset — dark warm + orange */
 [data-theme="sunset"] {
   --color-background: #0d0804;
   --color-card: #150e08;
@@ -88,7 +94,6 @@
   --color-sidebar-active: #f97316;
 }
 
-/* Rose — dark + rose */
 [data-theme="rose"] {
   --color-background: #0d0508;
   --color-card: #15090f;
@@ -103,7 +108,6 @@
   --color-sidebar-active: #f43f5e;
 }
 
-/* Gold — dark warm + amber */
 [data-theme="gold"] {
   --color-background: #0d0b04;
   --color-card: #151208;
@@ -118,7 +122,24 @@
   --color-sidebar-active: #f59e0b;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   background: var(--color-background);
   color: var(--color-foreground);
+}
+
+/* Subtle grid background utility for the landing page hero */
+.bg-grid {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+/* Radial glow mask for hero */
+.hero-glow {
+  background: radial-gradient(ellipse at top, rgba(239, 68, 68, 0.18), transparent 60%);
 }

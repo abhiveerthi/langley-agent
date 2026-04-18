@@ -113,7 +113,7 @@ export default function DashboardPage() {
             <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
               Recent Videos
             </h2>
-            <Link href="/dashboard" className="flex items-center gap-1 text-xs text-primary hover:underline">
+            <Link href="/app/dashboard" className="flex items-center gap-1 text-xs text-primary hover:underline">
               View all <ArrowUpRight className="h-3 w-3" />
             </Link>
           </div>
