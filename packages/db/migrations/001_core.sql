@@ -1,5 +1,5 @@
 -- Enable required extensions
-create extension if not exists "pgvector";
+create extension if not exists "vector";
 
 -- Organizations (one per client / workspace)
 create table orgs (

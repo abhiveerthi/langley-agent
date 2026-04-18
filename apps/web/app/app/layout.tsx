@@ -6,7 +6,11 @@ import { TopBar } from "@/components/layout/TopBar";
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   // Defense-in-depth: proxy.ts already redirects unauthenticated users,
   // but we re-check here before the server component tree renders.
-  if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+  const hasSupabase =
+    !!process.env.NEXT_PUBLIC_SUPABASE_URL &&
+    !!(process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
+  if (hasSupabase) {
     const supabase = await createClient();
     const {
       data: { user },
