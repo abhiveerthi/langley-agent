@@ -1,0 +1,18 @@
+org_id: test-gaming-channel
+
+brand:
+  name: PixelDrift
+  voice: hype, casual, knowledgeable, slightly irreverent
+  primary_email: list@pixeldrift.gg
+
+niche:
+  preset: gaming
+  audience_size: ~250k subscribers
+
+youtube:
+  # MrBeast Gaming — handy public channel for verification testing only.
+  # Replace with a real partner channel before any production use.
+  channel_id: UCIPPMRA040LQr5QPyJEbmXA
+
+owners:
+  - test@pixeldrift.gg

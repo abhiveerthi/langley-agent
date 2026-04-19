@@ -1,4 +1,3 @@
-import os
 import json
 from datetime import datetime
 from langchain_core.tools import tool
@@ -6,11 +5,14 @@ from packages.agents.core.clients import youtube_api_get, perplexity_search
 
 
 @tool
-async def get_channel_stats() -> str:
-    """Get YouTube channel overview statistics including subscribers, total views, and video count."""
-    channel_id = os.environ.get("YOUTUBE_CHANNEL_ID")
+async def get_channel_stats(channel_id: str) -> str:
+    """Get YouTube channel overview statistics including subscribers, total views, and video count.
+
+    Args:
+        channel_id: The YouTube channel ID to fetch stats for. Supplied per-tenant.
+    """
     if not channel_id:
-        return "YOUTUBE_CHANNEL_ID not configured. Cannot fetch channel data."
+        return "No YouTube channel_id configured for this org."
 
     try:
         data = await youtube_api_get("channels", {
@@ -39,15 +41,15 @@ async def get_channel_stats() -> str:
 
 
 @tool
-async def get_video_performance(limit: int = 10) -> str:
+async def get_video_performance(channel_id: str, limit: int = 10) -> str:
     """Get recent video performance with views, likes, comments, and engagement rates.
 
     Args:
+        channel_id: The YouTube channel ID. Supplied per-tenant.
         limit: Number of recent videos to analyze (default 10).
     """
-    channel_id = os.environ.get("YOUTUBE_CHANNEL_ID")
     if not channel_id:
-        return "YOUTUBE_CHANNEL_ID not configured. Cannot fetch video data."
+        return "No YouTube channel_id configured for this org."
 
     try:
         # Step 1: Get recent video IDs
@@ -94,11 +96,15 @@ async def get_video_performance(limit: int = 10) -> str:
 
 
 @tool
-async def search_trending_topics() -> str:
-    """Search for trending topics in the conservative/2A/firearms space using Perplexity real-time search."""
+async def search_trending_topics(focus: str) -> str:
+    """Search for trending topics in the channel's niche using Perplexity real-time search.
+
+    Args:
+        focus: The niche/audience focus to scope the search to. Supplied per-tenant.
+    """
     today = datetime.now().strftime("%B %d, %Y")
     try:
-        prompt = f"""Today is {today}. What are the top trending topics in conservative media, Second Amendment communities, and firearms/tactical content on YouTube and social media right now?
+        prompt = f"""Today is {today}. What are the top trending topics in {focus} right now?
 
 Return a JSON object:
 {{
@@ -108,7 +114,7 @@ Return a JSON object:
             "platform": "Where it's trending (YouTube, X/Twitter, etc.)",
             "description": "Brief description of why it's trending",
             "momentum": "rising/stable/declining",
-            "content_angle": "How a conservative firearms YouTube channel could cover this"
+            "content_angle": "How a YouTube channel in this niche could cover this"
         }}
     ]
 }}
@@ -121,7 +127,7 @@ Focus on the last 48 hours. Return 8-10 topics. Return ONLY valid JSON."""
         )
         data = json.loads(raw)
 
-        output = "# Trending Topics in Conservative/2A Space\n\n"
+        output = f"# Trending Topics — {focus}\n\n"
         for i, t in enumerate(data.get("trending", []), 1):
             output += f"{i}. **{t.get('topic', 'N/A')}** [{t.get('platform', '')}]\n"
             output += f"   {t.get('description', '')}\n"

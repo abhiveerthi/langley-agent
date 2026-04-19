@@ -1,0 +1,10 @@
+{
+  "dependencies": ["./apps/api"],
+  "graphs": {
+    "general": "./graphs.py:general_agent",
+    "research": "./graphs.py:research_agent",
+    "intel": "./graphs.py:intel_agent",
+    "comms": "./graphs.py:comms_agent"
+  },
+  "env": ".env"
+}
