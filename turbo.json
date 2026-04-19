@@ -1,5 +1,18 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalEnv": [
+    "NEXT_PUBLIC_SUPABASE_URL",
+    "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+    "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
+    "SUPABASE_SECRET_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "SUPABASE_SERVICE_KEY",
+    "DATABASE_URL",
+    "ANTHROPIC_API_KEY",
+    "NEXT_PUBLIC_APP_URL",
+    "API_URL",
+    "ENVIRONMENT"
+  ],
   "tasks": {
     "dev": {
       "cache": false,
