@@ -35,3 +35,6 @@ htmlcov/
 
 # MCP config (may contain API keys)
 .mcp.json
+
+# LangGraph dev server local cache
+.langgraph_api/
