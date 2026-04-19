@@ -1,0 +1,17 @@
+org_id: langley-outdoors-academy
+
+brand:
+  name: Langley Outdoors Academy
+  voice: patriotic, direct, educational, unapologetic
+  primary_email: list@langleyoutdoorsacademy.com
+
+niche:
+  preset: conservative-firearms
+  audience_size: ~700k subscribers
+  # any field below would override the preset; left empty to inherit defaults
+
+youtube:
+  channel_id: UCGkAebzIWfSm7upwZ1UIsAg
+
+owners:
+  - braden@langleyoutdoorsacademy.com

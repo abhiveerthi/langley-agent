@@ -1,0 +1,61 @@
+slug: conservative-firearms
+display_name: Conservative / Pro-2A Education
+audience_descriptor: conservative/2A audience
+default_voice: patriotic, direct, educational, unapologetic
+
+research_categories:
+  - slug: republican
+    label: Republican Activity
+    query: >-
+      What are Republicans and the GOP doing TODAY? Include Trump administration
+      actions, Republican Congress members, GOP governors, conservative policy
+      moves. Focus on actions, statements, and developments from the last 24-48
+      hours only.
+  - slug: democrat
+    label: Democrat Activity
+    query: >-
+      What are Democrats doing TODAY? Include Democratic party leadership,
+      Democrat Congress members, progressive policy moves, liberal responses to
+      current events. Focus on actions, statements, and developments from the
+      last 24-48 hours only.
+  - slug: firearms
+    label: 2A / Firearms Update
+    query: >-
+      What is the latest Second Amendment and firearms news TODAY? Include gun
+      legislation, ATF actions, court cases on gun rights, state-level gun
+      laws, concealed carry news. Focus on developments from the last 24-48
+      hours only.
+  - slug: breaking
+    label: Breaking News
+    query: >-
+      What are the TOP breaking news stories in US politics TODAY? Include
+      major events, controversies, viral moments, significant developments that
+      everyone is talking about. Focus on the last 24-48 hours only.
+
+report_sections:
+  - Key Narrative Themes
+  - Content Opportunities
+  - Republican Activity
+  - Democrat Activity
+  - 2A / Firearms Update
+  - Audience Sentiment
+  - Strategic Recommendations
+
+intel_brief_sections:
+  - Channel Pulse
+  - Top Performing Content
+  - Market Signals
+  - Content Battle Plan
+
+lead_categories:
+  - Tactical Gear
+  - Ammunition
+  - Optics
+  - Outdoor Apparel
+
+trends_query_focus: >-
+  conservative media, Second Amendment communities, and firearms/tactical
+  content on YouTube and social media
+
+content_idea_format_hint: >-
+  Punchy, controversial-but-fair, or highly educational. Edutainment style.

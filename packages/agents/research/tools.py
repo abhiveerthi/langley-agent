@@ -1,35 +1,35 @@
-import os
 import json
 from datetime import datetime
 from langchain_core.tools import tool
 from packages.agents.core.clients import perplexity_search, youtube_api_get
 
 
-CATEGORY_QUERIES = {
-    "republican": "What are Republicans and the GOP doing TODAY? Include Trump administration actions, Republican Congress members, GOP governors, conservative policy moves. Focus on actions, statements, and developments from the last 24-48 hours only.",
-    "democrat": "What are Democrats doing TODAY? Include Democratic party leadership, Democrat Congress members, progressive policy moves, liberal responses to current events. Focus on actions, statements, and developments from the last 24-48 hours only.",
-    "firearms": "What is the latest Second Amendment and firearms news TODAY? Include gun legislation, ATF actions, court cases on gun rights, state-level gun laws, concealed carry news. Focus on developments from the last 24-48 hours only.",
-    "breaking": "What are the TOP breaking news stories in US politics TODAY? Include major events, controversies, viral moments, significant developments that everyone is talking about. Focus on the last 24-48 hours only.",
-}
-
-
 @tool
-async def search_political_news(category: str = "all") -> str:
-    """Search for current political news using Perplexity AI real-time search.
+async def search_political_news(
+    categories: list[dict],
+    category: str = "all",
+) -> str:
+    """Search for current news using Perplexity AI real-time search.
 
     Args:
-        category: News category. Options: 'republican', 'democrat', 'firearms', 'breaking', or 'all' for all categories.
+        categories: List of category dicts, each with `slug`, `label`, `query`.
+            Supplied per-tenant via the agent node.
+        category: Which category slug to fetch, or 'all' for every category.
     """
-    if category != "all" and category not in CATEGORY_QUERIES:
-        return f"Unknown category '{category}'. Options: republican, democrat, firearms, breaking, all"
+    categories_by_slug = {c["slug"]: c for c in categories}
 
-    cats = CATEGORY_QUERIES if category == "all" else {category: CATEGORY_QUERIES[category]}
+    if category != "all" and category not in categories_by_slug:
+        valid = ", ".join(categories_by_slug.keys())
+        return f"Unknown category '{category}'. Options: {valid}, all"
+
+    selected = categories if category == "all" else [categories_by_slug[category]]
     today = datetime.now().strftime("%B %d, %Y")
-    sections = []
+    sections: list[str] = []
 
-    for cat_key, query_text in cats.items():
+    for cat in selected:
+        cat_label = cat.get("label") or cat.get("slug", "Unknown")
         try:
-            prompt = f"""Today is {today}. {query_text}
+            prompt = f"""Today is {today}. {cat["query"]}
 
 Return a JSON object with this EXACT structure:
 {{
@@ -50,11 +50,15 @@ CRITICAL: Only news from the LAST 24-48 HOURS. Return 5-8 items. Return ONLY val
 
             raw = await perplexity_search(
                 prompt,
-                system_prompt="You are a political news aggregator focused on current events. Return only valid JSON with no markdown formatting or code blocks. Only include news from the last 24-48 hours.",
+                system_prompt=(
+                    "You are a news aggregator focused on current events. "
+                    "Return only valid JSON with no markdown formatting or code "
+                    "blocks. Only include news from the last 24-48 hours."
+                ),
             )
             data = json.loads(raw)
 
-            section = f"## {cat_key.upper()}\n"
+            section = f"## {cat_label.upper()}\n"
             for i, item in enumerate(data.get("items", []), 1):
                 section += f"{i}. **{item.get('headline', 'N/A')}** [{item.get('source', '')}]\n"
                 section += f"   {item.get('summary', '')}\n"
@@ -70,9 +74,9 @@ CRITICAL: Only news from the LAST 24-48 HOURS. Return 5-8 items. Return ONLY val
         except ValueError as e:
             return f"Error: {e}"
         except json.JSONDecodeError:
-            sections.append(f"## {cat_key.upper()}\nReceived response but failed to parse it.")
+            sections.append(f"## {cat_label.upper()}\nReceived response but failed to parse it.")
         except Exception as e:
-            sections.append(f"## {cat_key.upper()}\nError fetching news: {e}")
+            sections.append(f"## {cat_label.upper()}\nError fetching news: {e}")
 
     return "\n\n".join(sections) if sections else "No news data collected."
 
@@ -127,15 +131,15 @@ Return ONLY valid JSON."""
 
 
 @tool
-async def get_youtube_comments(max_videos: int = 5) -> str:
-    """Get recent YouTube comments from the Langley Firearms Academy channel for audience sentiment analysis.
+async def get_youtube_comments(channel_id: str, max_videos: int = 5) -> str:
+    """Get recent YouTube comments from a specific channel for audience sentiment analysis.
 
     Args:
+        channel_id: The YouTube channel ID to pull comments from. Supplied per-tenant.
         max_videos: Number of recent videos to fetch comments for (default 5).
     """
-    channel_id = os.environ.get("YOUTUBE_CHANNEL_ID")
     if not channel_id:
-        return "YOUTUBE_CHANNEL_ID not configured. Cannot fetch YouTube data."
+        return "No YouTube channel_id configured for this org."
 
     try:
         search_data = await youtube_api_get("search", {
