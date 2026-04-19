@@ -66,7 +66,7 @@ A single-page landing with waitlist capture lives at [apps/web](apps/web/). Visi
 - **Data:** Supabase (Postgres + Auth + Realtime), RLS-scoped per channel
 - **Monorepo:** Turborepo + pnpm
 
-See [ROADMAP.md](ROADMAP.md) for the detailed build plan.
+See [packages/agents/AGENTS.md](packages/agents/AGENTS.md) for the agent roster and capabilities.
 
 ---
 

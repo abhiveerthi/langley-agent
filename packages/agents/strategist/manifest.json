@@ -1,0 +1,25 @@
+{
+  "slug": "strategist",
+  "name": "Strategist",
+  "description": "Decides what to make next. Pulls channel analytics and niche trends weekly, ships ranked video-idea briefs grounded in data, and drafts scripts, hooks, and cold opens on request.",
+  "version": "0.1.0",
+  "icon": "compass",
+  "tagline": "Decides what to make next.",
+  "capabilities": ["analytics", "research", "ideation", "writing", "scripting"],
+  "required_integrations": ["youtube"],
+  "optional_integrations": ["google"],
+  "tools": [
+    "youtube_get_analytics",
+    "youtube_search",
+    "youtube_get_video",
+    "web_search",
+    "gdocs_create",
+    "gdocs_update"
+  ],
+  "interrupt_before": [],
+  "config_schema": {
+    "channel_id": { "type": "string", "required": true, "label": "YouTube Channel ID" },
+    "brief_cadence": { "type": "string", "default": "weekly", "label": "Brief cadence" },
+    "ideas_per_brief": { "type": "number", "default": 5, "label": "Ideas per brief" }
+  }
+}

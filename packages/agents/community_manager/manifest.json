@@ -1,0 +1,25 @@
+{
+  "slug": "community-manager",
+  "name": "Community Manager",
+  "description": "Talks to your audience so you don't have to. Triages comments, surfaces real questions, flags collab DMs, hides spam, drafts replies in the creator's voice, and pings the creator when a superfan or larger creator shows up.",
+  "version": "0.1.0",
+  "icon": "message-circle",
+  "tagline": "Talks to your audience so you don't have to.",
+  "capabilities": ["moderation", "triage", "writing", "communication"],
+  "required_integrations": ["youtube"],
+  "optional_integrations": ["slack", "google"],
+  "tools": [
+    "youtube_get_comments",
+    "youtube_reply_comment",
+    "youtube_moderate_comment",
+    "slack_post_message",
+    "gmail_send"
+  ],
+  "interrupt_before": ["reply_comment", "moderate_comment", "send_dm"],
+  "config_schema": {
+    "channel_id": { "type": "string", "required": true, "label": "YouTube Channel ID" },
+    "vip_list": { "type": "array", "default": [], "label": "VIP channels/handles to flag" },
+    "auto_hide_spam": { "type": "boolean", "default": true, "label": "Auto-hide obvious spam" },
+    "reply_approval": { "type": "boolean", "default": true, "label": "Require approval before posting replies" }
+  }
+}

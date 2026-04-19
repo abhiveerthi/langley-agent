@@ -1,0 +1,28 @@
+{
+  "slug": "publisher",
+  "name": "Publisher",
+  "description": "Ships every video, everywhere. Writes titles, descriptions, tags, chapters, and pinned comments in the creator's voice, then repurposes each upload into tweets, LinkedIn posts, IG captions, and newsletter drafts.",
+  "version": "0.1.0",
+  "icon": "megaphone",
+  "tagline": "Ships every video, everywhere.",
+  "capabilities": ["writing", "seo", "publishing", "repurposing"],
+  "required_integrations": ["youtube"],
+  "optional_integrations": ["google", "slack"],
+  "tools": [
+    "youtube_get_video",
+    "youtube_update_video",
+    "gdocs_create",
+    "gdocs_update",
+    "slack_post_message"
+  ],
+  "interrupt_before": ["update_video_metadata", "publish_social_post"],
+  "config_schema": {
+    "channel_id": { "type": "string", "required": true, "label": "YouTube Channel ID" },
+    "voice_sample_doc_id": { "type": "string", "label": "Voice/style reference doc" },
+    "repurpose_targets": {
+      "type": "array",
+      "default": ["twitter", "linkedin", "instagram", "newsletter"],
+      "label": "Platforms to repurpose to"
+    }
+  }
+}

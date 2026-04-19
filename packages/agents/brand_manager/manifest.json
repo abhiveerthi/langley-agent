@@ -1,0 +1,26 @@
+{
+  "slug": "brand-manager",
+  "name": "Brand Manager",
+  "description": "Gets you paid. Drafts cold outreach to sponsors and follow-ups, tracks deal stages (pitched, replied, negotiating, signed), and writes tailored pitches for specific brands on request.",
+  "version": "0.1.0",
+  "icon": "handshake",
+  "tagline": "Gets you paid.",
+  "capabilities": ["outreach", "sales", "crm", "writing"],
+  "required_integrations": ["google"],
+  "optional_integrations": ["slack", "youtube"],
+  "tools": [
+    "gmail_send",
+    "gmail_search",
+    "gmail_get_thread",
+    "gdocs_create",
+    "gdocs_update",
+    "web_search",
+    "slack_post_message"
+  ],
+  "interrupt_before": ["send_email", "log_deal_status_change"],
+  "config_schema": {
+    "sender_name": { "type": "string", "required": true, "label": "Sender display name" },
+    "media_kit_doc_id": { "type": "string", "label": "Media kit / rate card doc" },
+    "min_deal_value_usd": { "type": "number", "default": 0, "label": "Minimum deal value to pursue" }
+  }
+}
