@@ -16,6 +16,7 @@ import {
 import { brandBriefs } from "@/lib/mock-data";
 import { cn } from "@/lib/utils";
 import { MiniChat } from "@/components/chat/MiniChat";
+import { YouTubeStatusPill } from "@/components/integrations/YouTubeStatusPill";
 
 const videoIdeas = [
   { title: "AI Editor Showdown: Which Tool Actually Saves More Time?", score: 94, tag: "High CTR" },
@@ -159,20 +160,7 @@ export default function IntelAgentPage() {
           </div>
         </div>
 
-        {/* Channel Connected */}
-        <div>
-          <h3 className="text-sm font-semibold text-foreground mb-3">Channel Connected</h3>
-          <div className="rounded-md border border-border bg-muted/20 px-3 py-3 flex items-center gap-3">
-            <div className="h-9 w-9 shrink-0 rounded-full bg-gradient-to-br from-red-500 to-orange-500 flex items-center justify-center text-white text-sm font-bold">
-              YT
-            </div>
-            <div className="flex-1">
-              <div className="text-sm font-medium text-foreground">Your Channel</div>
-              <div className="text-xs text-muted-foreground mt-0.5">847K subscribers</div>
-            </div>
-            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
-          </div>
-        </div>
+        <YouTubeStatusPill heading="Channel Connected" />
 
         {/* Focus Topics */}
         <div>

@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
 import {
   ArrowLeft,
   Megaphone,
@@ -12,6 +14,11 @@ import {
   Upload,
   AlertCircle,
   ExternalLink,
+  Loader2,
+  Globe,
+  Eye,
+  Lock,
+  RefreshCw,
   Hash,
   ListOrdered,
   Type,
@@ -35,8 +42,52 @@ import {
 } from "@/lib/mock-data";
 import { cn } from "@/lib/utils";
 import { MiniChat } from "@/components/chat/MiniChat";
+import { YouTubeStatusPill } from "@/components/integrations/YouTubeStatusPill";
 
-type Tab = "packages" | "social" | "approvals";
+type Tab = "uploads" | "packages" | "social" | "approvals";
+
+type Upload = {
+  video_id: string;
+  title: string;
+  description_preview: string;
+  thumbnail: string | null;
+  published_at: string;
+  privacy_status: "public" | "unlisted" | "private" | "unknown" | null;
+  duration: string | null;
+};
+
+type UploadsState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "disconnected" }
+  | { status: "error"; message: string }
+  | { status: "ok"; items: Upload[] };
+
+const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+function parseIsoDuration(iso: string | null): string {
+  if (!iso) return "";
+  const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+  if (!m) return "";
+  const h = parseInt(m[1] || "0", 10);
+  const mins = parseInt(m[2] || "0", 10);
+  const secs = parseInt(m[3] || "0", 10);
+  const mm = String(mins).padStart(h ? 2 : 1, "0");
+  const ss = String(secs).padStart(2, "0");
+  return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  const diff = Date.now() - then;
+  const hours = diff / 3600_000;
+  if (hours < 1) return "Just now";
+  if (hours < 24) return `${Math.floor(hours)}h ago`;
+  const days = hours / 24;
+  if (days < 7) return `${Math.floor(days)}d ago`;
+  if (days < 30) return `${Math.floor(days / 7)}w ago`;
+  return new Date(iso).toLocaleDateString();
+}
 
 const statusStyles: Record<string, string> = {
   draft:   "bg-zinc-500/10 text-zinc-400 border-zinc-500/20",
@@ -93,12 +144,109 @@ function formatPackageAsText(pkg: PublisherPackage) {
 }
 
 export default function PublisherAgentPage() {
-  const [activeTab, setActiveTab] = useState<Tab>("packages");
+  const [activeTab, setActiveTab] = useState<Tab>("uploads");
   const [packages, setPackages] = useState<PublisherPackage[]>(seedPackages);
   const [approvals, setApprovals] = useState<PendingApproval[]>(seedApprovals);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [uploads, setUploads] = useState<UploadsState>({ status: "idle" });
+
+  const fetchUploads = useCallback(async () => {
+    setUploads({ status: "loading" });
+    try {
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        setUploads({ status: "error", message: "Not signed in" });
+        return;
+      }
+      const res = await fetch(`${API}/api/integrations/youtube/uploads?limit=12`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (res.status === 400) {
+        setUploads({ status: "disconnected" });
+        return;
+      }
+      if (!res.ok) {
+        setUploads({ status: "error", message: `HTTP ${res.status}` });
+        return;
+      }
+      const items = (await res.json()) as Upload[];
+      setUploads({ status: "ok", items });
+    } catch (e) {
+      setUploads({ status: "error", message: (e as Error).message });
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchUploads();
+  }, [fetchUploads]);
+
+  function packageFromUpload(u: Upload) {
+    const id = `p-${Date.now()}`;
+    const stub: PublisherPackage = {
+      id,
+      videoId: u.video_id,
+      videoTitle: u.title,
+      status: "pending",
+      packagedAt: "just now",
+      titleVariants: [u.title, "Draft Title Variant #2", "Draft Title Variant #3"],
+      description: u.description_preview || "Auto-generated description draft from the transcript. Edit before push.",
+      tags: ["draft-tag-1", "draft-tag-2", "draft-tag-3"],
+      chapters: [
+        { time: "00:00", label: "Intro" },
+        { time: "02:00", label: "Main point" },
+        { time: "08:00", label: "Wrap" },
+      ],
+      pinnedComment: "What did you want more of in this one? Let me know for the follow-up.",
+      thumbnailIdeas: [
+        "Bold number + subtitle",
+        "Face forward + single word overlay",
+        "Before/after split composition",
+      ],
+      socialKit: {
+        tweets: ["Draft tweet 1", "Draft tweet 2", "Draft tweet 3"],
+        threadOutline: ["Hook", "Main 1", "Main 2", "Main 3", "CTA"],
+        linkedin: "Draft LinkedIn post — edit before sending.",
+        instagram: "Draft IG caption — edit before sending.",
+        newsletter: "Draft newsletter blurb — edit before sending.",
+      },
+    };
+    setPackages((prev) => [stub, ...prev]);
+    setApprovals((prev) => [
+      {
+        id: `a-${id}-${Date.now()}`,
+        packageId: id,
+        videoId: u.video_id,
+        videoTitle: u.title,
+        proposedTitle: stub.titleVariants[0],
+        currentTitle: u.title,
+        proposedTagCount: stub.tags.length,
+        proposedChapterCount: stub.chapters.length,
+        requestedAt: "just now",
+      },
+      ...prev,
+    ]);
+    setActiveTab("approvals");
+    setToast(`Packaging "${u.title.slice(0, 40)}${u.title.length > 40 ? "…" : ""}"`);
+  }
+
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  useEffect(() => {
+    const yt = searchParams.get("youtube");
+    if (!yt) return;
+    if (yt === "connected") setToast("YouTube connected");
+    else if (yt === "error") {
+      const reason = searchParams.get("reason") || "unknown";
+      setToast(`YouTube connect failed: ${reason.slice(0, 80)}`);
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.delete("youtube");
+    url.searchParams.delete("reason");
+    router.replace(url.pathname + (url.search ? url.search : ""));
+  }, [searchParams, router]);
 
   const approvalCount = approvals.length;
   const detailPkg = useMemo(() => packages.find((p) => p.id === detailId) ?? null, [packages, detailId]);
@@ -300,7 +448,7 @@ export default function PublisherAgentPage() {
         {/* Tabs */}
         <div>
           <div className="flex border-b border-border mb-4">
-            {(["packages", "social", "approvals"] as Tab[]).map((tab) => (
+            {(["uploads", "packages", "social", "approvals"] as Tab[]).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -311,7 +459,18 @@ export default function PublisherAgentPage() {
                     : "border-transparent text-muted-foreground hover:text-foreground"
                 )}
               >
-                {tab === "packages" ? "Packages" : tab === "social" ? "Social Kits" : "Approvals"}
+                {tab === "uploads"
+                  ? "Recent Uploads"
+                  : tab === "packages"
+                  ? "Packages"
+                  : tab === "social"
+                  ? "Social Kits"
+                  : "Approvals"}
+                {tab === "uploads" && uploads.status === "ok" && (
+                  <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-sky-500/20 px-1 text-[10px] font-semibold text-sky-400">
+                    {uploads.items.length}
+                  </span>
+                )}
                 {tab === "approvals" && approvalCount > 0 && (
                   <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500/20 px-1 text-[10px] font-semibold text-amber-400">
                     {approvalCount}
@@ -320,6 +479,74 @@ export default function PublisherAgentPage() {
               </button>
             ))}
           </div>
+
+          {/* Uploads */}
+          {activeTab === "uploads" && (
+            <div>
+              {uploads.status === "loading" && (
+                <div className="rounded-lg border border-dashed border-border bg-muted/10 p-8 text-center">
+                  <Loader2 className="h-6 w-6 text-muted-foreground animate-spin mx-auto mb-2" />
+                  <div className="text-sm text-muted-foreground">Loading your uploads…</div>
+                </div>
+              )}
+
+              {uploads.status === "disconnected" && (
+                <Link
+                  href="/app/integrations"
+                  className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border bg-muted/10 p-8 hover:border-sky-500/40 hover:bg-sky-500/5 transition-colors text-center"
+                >
+                  <Video className="h-6 w-6 text-muted-foreground" />
+                  <div className="text-sm font-medium text-foreground">YouTube is not connected</div>
+                  <div className="text-xs text-sky-400">Connect in Integrations →</div>
+                </Link>
+              )}
+
+              {uploads.status === "error" && (
+                <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-5">
+                  <div className="flex items-center gap-2 mb-2">
+                    <AlertCircle className="h-4 w-4 text-red-400" />
+                    <span className="text-sm font-medium text-red-400">Couldn&apos;t load uploads</span>
+                  </div>
+                  <div className="text-xs text-muted-foreground mb-3">{uploads.message}</div>
+                  <button
+                    onClick={fetchUploads}
+                    className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Retry
+                  </button>
+                </div>
+              )}
+
+              {uploads.status === "ok" && uploads.items.length === 0 && (
+                <div className="rounded-lg border border-dashed border-border bg-muted/10 p-8 text-center">
+                  <div className="text-sm text-muted-foreground">No videos on this channel yet.</div>
+                </div>
+              )}
+
+              {uploads.status === "ok" && uploads.items.length > 0 && (
+                <>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="text-xs text-muted-foreground">
+                      {uploads.items.length} most recent · including unlisted
+                    </div>
+                    <button
+                      onClick={fetchUploads}
+                      className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      Refresh
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {uploads.items.map((u) => (
+                      <UploadCard key={u.video_id} upload={u} onPackage={() => packageFromUpload(u)} />
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Packages */}
           {activeTab === "packages" && (
@@ -506,19 +733,7 @@ export default function PublisherAgentPage() {
 
       {/* Right config panel */}
       <div className="w-80 shrink-0 border-l border-border bg-card/50 overflow-y-auto p-5 space-y-6">
-        <div>
-          <h3 className="text-sm font-semibold text-foreground mb-3">YouTube</h3>
-          <div className="rounded-md border border-border bg-muted/20 px-3 py-3 flex items-center gap-3">
-            <div className="h-9 w-9 shrink-0 rounded-full bg-linear-to-br from-red-500 to-orange-500 flex items-center justify-center text-white text-sm font-bold">
-              YT
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium text-foreground truncate">Your Channel</div>
-              <div className="text-xs text-muted-foreground mt-0.5">OAuth · force-ssl scope</div>
-            </div>
-            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
-          </div>
-        </div>
+        <YouTubeStatusPill />
 
         <div>
           <div className="flex items-center justify-between mb-3">
@@ -584,6 +799,75 @@ export default function PublisherAgentPage() {
 
       {/* Mini Chat */}
       <MiniChat agentSlug="publisher" agentName="Publisher" />
+    </div>
+  );
+}
+
+const privacyStyles: Record<string, { icon: React.ElementType; color: string; label: string }> = {
+  public:   { icon: Globe, color: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20", label: "Public" },
+  unlisted: { icon: Eye,   color: "text-sky-400 bg-sky-500/10 border-sky-500/20", label: "Unlisted" },
+  private:  { icon: Lock,  color: "text-zinc-400 bg-zinc-500/10 border-zinc-500/20", label: "Private" },
+  unknown:  { icon: Eye,   color: "text-muted-foreground bg-muted/30 border-border", label: "Unknown" },
+};
+
+function UploadCard({ upload, onPackage }: { upload: Upload; onPackage: () => void }) {
+  const privacy = privacyStyles[upload.privacy_status || "unknown"] || privacyStyles.unknown;
+  const PrivacyIcon = privacy.icon;
+  const duration = parseIsoDuration(upload.duration);
+  return (
+    <div className="rounded-lg border border-border bg-card overflow-hidden flex flex-col">
+      <div className="relative aspect-video bg-muted">
+        {upload.thumbnail ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={upload.thumbnail} alt="" className="w-full h-full object-cover" />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center">
+            <Video className="h-8 w-8 text-muted-foreground" />
+          </div>
+        )}
+        {duration && (
+          <span className="absolute bottom-2 right-2 rounded bg-black/80 px-1.5 py-0.5 text-[11px] font-medium text-white">
+            {duration}
+          </span>
+        )}
+        <span
+          className={cn(
+            "absolute top-2 left-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium backdrop-blur-sm",
+            privacy.color,
+          )}
+        >
+          <PrivacyIcon className="h-3 w-3" />
+          {privacy.label}
+        </span>
+      </div>
+      <div className="p-3 flex flex-col gap-2 flex-1">
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium text-foreground line-clamp-2 leading-snug">{upload.title}</div>
+          <div className="text-[11px] text-muted-foreground mt-1 flex items-center gap-2">
+            <span>{relativeTime(upload.published_at)}</span>
+            <span>·</span>
+            <span className="font-mono">{upload.video_id}</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 mt-1">
+          <button
+            onClick={onPackage}
+            className="flex-1 flex items-center justify-center gap-1.5 rounded-md bg-sky-500/10 border border-sky-500/30 px-3 py-1.5 text-xs font-medium text-sky-400 hover:bg-sky-500/20 transition-colors"
+          >
+            <Megaphone className="h-3.5 w-3.5" />
+            Package this
+          </button>
+          <a
+            href={`https://studio.youtube.com/video/${upload.video_id}/edit`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+            title="Open in YouTube Studio"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+        </div>
+      </div>
     </div>
   );
 }
@@ -671,7 +955,7 @@ function PackageDetailDrawer({
   return (
     <div className="fixed inset-0 z-40 flex">
       <button onClick={onClose} className="flex-1 bg-background/70 backdrop-blur-sm" aria-label="Close drawer" />
-      <div className="w-[680px] max-w-[90vw] h-full bg-card border-l border-border shadow-2xl flex flex-col">
+      <div className="w-170 max-w-[90vw] h-full bg-card border-l border-border shadow-2xl flex flex-col">
         {/* Header */}
         <div className="flex items-start justify-between gap-4 p-5 border-b border-border">
           <div className="min-w-0 flex-1">
