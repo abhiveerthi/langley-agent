@@ -1,19 +1,22 @@
-import os
 from langchain_core.tools import tool
 from packages.agents.core.clients import youtube_api_get
 
 
 @tool
-async def get_recent_comments(max_videos: int = 5, per_video: int = 20) -> str:
+async def get_recent_comments(
+    channel_id: str,
+    max_videos: int = 5,
+    per_video: int = 20,
+) -> str:
     """Get recent comments across the creator's most recent uploads.
 
     Args:
+        channel_id: The YouTube channel ID. Supplied per-tenant via the system prompt.
         max_videos: How many recent videos to pull comments from (default 5, max 10).
         per_video: Comments per video (default 20, max 50).
     """
-    channel_id = os.environ.get("YOUTUBE_CHANNEL_ID")
     if not channel_id:
-        return "YOUTUBE_CHANNEL_ID not configured."
+        return "No YouTube channel_id supplied."
 
     max_videos = min(max(max_videos, 1), 10)
     per_video = min(max(per_video, 1), 50)

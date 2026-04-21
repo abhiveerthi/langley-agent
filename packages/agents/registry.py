@@ -10,7 +10,7 @@ from packages.agents.brand_manager.agent import BrandManagerAgent
 from packages.agents.editor.agent import EditorAgent
 
 AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
-    # Backroom team
+    # Marcus team
     "strategist": StrategistAgent,
     "publisher": PublisherAgent,
     "community-manager": CommunityManagerAgent,
