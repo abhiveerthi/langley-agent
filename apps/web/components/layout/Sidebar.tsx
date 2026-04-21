@@ -22,6 +22,7 @@ import {
   Radar,
   Lightbulb,
   Rocket,
+  Megaphone,
   ListChecks,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -39,6 +40,7 @@ const agentItems = [
   { label: "All Agents", href: "/app/agents", icon: Bot, exact: true },
   { label: "Trend Scout", href: "/app/agents/research", icon: Radar },
   { label: "Content Strategist", href: "/app/agents/intel", icon: Lightbulb },
+  { label: "Publisher", href: "/app/agents/publisher", icon: Megaphone },
   { label: "Growth Engine", href: "/app/agents/comms", icon: Rocket },
 ];
 
