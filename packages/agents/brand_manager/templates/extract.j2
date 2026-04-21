@@ -1,0 +1,13 @@
+You are extracting structured fields from an outreach email draft.
+
+Given the draft below, return a JSON object with these fields exactly:
+{
+  "recipient": "...",
+  "subject": "...",
+  "body": "..."
+}
+
+If the recipient is not specified anywhere in context, use "marketing@example.com" as a placeholder.
+The body should be the full plain-text body — do not strip line breaks.
+
+Return ONLY valid JSON, no markdown.

@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 from langchain_core.tools import tool
-from packages.agents.core.clients import perplexity_search, youtube_api_get
+from packages.agents.core.clients import perplexity_search, resend_send, youtube_api_get
 
 
 @tool
@@ -139,5 +139,42 @@ async def get_channel_stats(channel_id: str) -> str:
         return f"Error fetching stats: {e}"
 
 
+@tool
+async def send_pitch_email(
+    recipient: str,
+    subject: str,
+    body: str,
+    from_name: str | None = None,
+    reply_to: str | None = None,
+) -> str:
+    """Send a sponsor pitch email via Resend.
+
+    Args:
+        recipient: Email address of the sponsor contact.
+        subject: Email subject line.
+        body: Plain-text body. (Resend will accept this as text/plain.)
+        from_name: Display name to show in the From line — typically the brand name
+            (e.g. "Langley Outdoors Academy"). Sender domain is fixed via EMAIL_FROM env.
+        reply_to: Optional Reply-To address — usually the creator's real email so
+            replies don't go to the noreply sender.
+    """
+    if not recipient:
+        return "Error: no recipient supplied."
+
+    try:
+        result = await resend_send(
+            to=recipient,
+            subject=subject,
+            body_text=body,
+            from_name=from_name,
+            reply_to=reply_to,
+        )
+        return f"Sent. Resend message id: {result.get('id', 'unknown')}"
+    except ValueError as e:
+        return f"Email config error: {e}"
+    except Exception as e:
+        return f"Send failed: {e}"
+
+
 def get_brand_manager_tools():
-    return [find_sponsor_leads, research_brand, get_channel_stats]
+    return [find_sponsor_leads, research_brand, get_channel_stats, send_pitch_email]
