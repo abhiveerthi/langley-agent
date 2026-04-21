@@ -1,4 +1,3 @@
-import os
 import json
 from datetime import datetime
 from langchain_core.tools import tool
@@ -101,11 +100,14 @@ Return ONLY valid JSON."""
 
 
 @tool
-async def get_channel_stats() -> str:
-    """Pull the creator's channel stats for media-kit numbers in outreach."""
-    channel_id = os.environ.get("YOUTUBE_CHANNEL_ID")
+async def get_channel_stats(channel_id: str) -> str:
+    """Pull the creator's channel stats for media-kit numbers in outreach.
+
+    Args:
+        channel_id: The YouTube channel ID. Supplied per-tenant via the system prompt.
+    """
     if not channel_id:
-        return "YOUTUBE_CHANNEL_ID not configured."
+        return "No YouTube channel_id supplied."
 
     try:
         data = await youtube_api_get("channels", {

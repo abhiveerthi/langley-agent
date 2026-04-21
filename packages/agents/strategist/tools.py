@@ -1,4 +1,3 @@
-import os
 import json
 from datetime import datetime
 from langchain_core.tools import tool
@@ -6,11 +5,14 @@ from packages.agents.core.clients import perplexity_search, youtube_api_get
 
 
 @tool
-async def get_channel_stats() -> str:
-    """Get YouTube channel overview: subscribers, total views, video count."""
-    channel_id = os.environ.get("YOUTUBE_CHANNEL_ID")
+async def get_channel_stats(channel_id: str) -> str:
+    """Get YouTube channel overview: subscribers, total views, video count.
+
+    Args:
+        channel_id: The YouTube channel ID. Supplied per-tenant via the system prompt.
+    """
     if not channel_id:
-        return "YOUTUBE_CHANNEL_ID not configured."
+        return "No YouTube channel_id supplied. Cannot fetch stats."
 
     try:
         data = await youtube_api_get("channels", {
@@ -37,15 +39,15 @@ async def get_channel_stats() -> str:
 
 
 @tool
-async def get_recent_video_performance(limit: int = 10) -> str:
+async def get_recent_video_performance(channel_id: str, limit: int = 10) -> str:
     """Get the creator's most recent videos with views, likes, comments, and engagement rate.
 
     Args:
+        channel_id: The YouTube channel ID. Supplied per-tenant via the system prompt.
         limit: Number of recent videos to analyze (default 10, max 25).
     """
-    channel_id = os.environ.get("YOUTUBE_CHANNEL_ID")
     if not channel_id:
-        return "YOUTUBE_CHANNEL_ID not configured."
+        return "No YouTube channel_id supplied."
 
     limit = min(max(limit, 1), 25)
 
@@ -94,6 +96,7 @@ async def search_niche_trends(niche: str) -> str:
 
     Args:
         niche: The channel's niche (e.g. 'personal finance', 'tactical gear', 'home fitness').
+            Supplied per-tenant via the system prompt.
     """
     today = datetime.now().strftime("%B %d, %Y")
     try:
@@ -137,7 +140,7 @@ async def search_competitor_videos(niche: str, top_n: int = 5) -> str:
     """Find top-performing videos from competitor channels in the niche over the last 30 days.
 
     Args:
-        niche: The channel's niche.
+        niche: The channel's niche. Supplied per-tenant via the system prompt.
         top_n: Number of top videos to surface (default 5, max 10).
     """
     top_n = min(max(top_n, 1), 10)
