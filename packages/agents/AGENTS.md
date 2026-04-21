@@ -1,6 +1,6 @@
-# Backroom — Agent Roster
+# Marcus — Agent Roster
 
-The Backroom team is five specialists that share context across a single chat workspace. Each agent owns a job that would otherwise need a full-time hire. What the Strategist learns, the Publisher uses; what the Publisher ships, the Community Manager fields questions on; what the Community Manager hears, the Brand Manager cites when pitching sponsors.
+The Marcus team is five specialists that share context across a single chat workspace. Each agent owns a job that would otherwise need a full-time hire. What the Strategist learns, the Publisher uses; what the Publisher ships, the Community Manager fields questions on; what the Community Manager hears, the Brand Manager cites when pitching sponsors.
 
 Live agent manifests are co-located with each agent:
 
