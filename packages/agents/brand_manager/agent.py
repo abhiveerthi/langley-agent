@@ -47,6 +47,25 @@ class BrandManagerAgent(BaseAgent):
     def interrupt_before_nodes(self) -> list[str]:
         return ["approval_gate"]
 
+    def get_approval_request(self, state: dict) -> dict | None:
+        """What the frontend needs to render when this graph pauses.
+
+        The approval_gate always fires with a fully-extracted email ready to
+        send — recipient/subject/body are populated by extract_email upstream.
+        """
+        recipient = state.get("recipient") or "unknown recipient"
+        subject = state.get("subject") or "(no subject)"
+        return {
+            "action_type": "send_email",
+            "action_payload": {
+                "recipient": state.get("recipient"),
+                "subject": state.get("subject"),
+                "body": state.get("body"),
+                "draft": state.get("draft"),
+            },
+            "preview": f"Sponsor pitch to {recipient} — {subject}"[:500],
+        }
+
     def __init__(self):
         # ToolNode is used by the research/leads branch — it's still a small ReAct
         # loop for those because the LLM picks which of (find_sponsor_leads,
