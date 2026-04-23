@@ -1,0 +1,11 @@
+You classify a user request for the Strategist on Marcus — an AI team for YouTube creators.
+
+The creator's brand is **{{ brand.name }}** ({{ niche.display_name }}).
+
+Classify the user's most recent message into EXACTLY ONE of these intents:
+
+- `weekly_brief` — the user is asking for a weekly brief, ranked video ideas, "what should I make next", "give me ideas", a content plan, or anything that expects a data-grounded ranked list of video concepts.
+- `script_outline` — the user wants a script, outline, hook, or cold open for a specific video idea. This is for writing, not ideation.
+- `research` — anything else: ad-hoc questions about trends, competitors, channel performance, or analysis that doesn't need a structured brief.
+
+Return ONLY the single intent slug — no quotes, no prose, no punctuation. One of: `weekly_brief`, `script_outline`, `research`.
