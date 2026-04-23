@@ -1,8 +1,19 @@
 "use client";
 
 import { useState, useCallback, useRef } from "react";
+import { createClient } from "@/lib/supabase/client";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+async function authHeader(): Promise<Record<string, string>> {
+  try {
+    const supabase = createClient();
+    const { data: { session } } = await supabase.auth.getSession();
+    return session ? { Authorization: `Bearer ${session.access_token}` } : {};
+  } catch {
+    return {};
+  }
+}
 
 export interface ChatMessage {
   id: string;
@@ -62,10 +73,12 @@ export function useChat(options: UseChatOptions = {}) {
       abortRef.current = abortController;
 
       try {
+        const auth = await authHeader();
         const res = await fetch(`${API_URL}/api/chat/stream`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            ...auth,
           },
           body: JSON.stringify({
             message: content,
