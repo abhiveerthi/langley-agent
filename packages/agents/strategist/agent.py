@@ -1,12 +1,41 @@
 from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolNode
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+from pydantic import BaseModel, Field
+from typing import Literal
 
 from packages.agents.core.base import BaseAgent, BaseAgentState
 from packages.agents.core.profile import OrgProfile, load_profile
 from packages.agents.core.templates import render
 from packages.agents.strategist.tools import get_strategist_tools
+
+
+# ── Structured output schema ──────────────────────────────────────────────
+# Pydantic models here double as the JSON contract the frontend can render.
+# `compose_brief` fills this via ChatAnthropic.with_structured_output(WeeklyBrief).
+class VideoIdea(BaseModel):
+    title: str = Field(description="Scroll-stopping title, under 60 characters, in the creator's voice.")
+    hook: str = Field(description="First 10 seconds of the video, one sentence.")
+    why_now: str = Field(description="The specific data point or trend that justifies this idea.")
+    confidence: Literal["high", "medium", "low"] = Field(description="Confidence level.")
+    rationale: str = Field(description="One-line reason for the confidence level.")
+    citations: list[str] = Field(
+        default_factory=list,
+        description="1–3 short strings pulled from the research (trend name, competitor title, metric).",
+    )
+
+
+class WeeklyBrief(BaseModel):
+    headline: str = Field(description="One sentence summarizing the week's strategic take.")
+    ideas: list[VideoIdea] = Field(description="3–5 ranked video ideas, ordered best-first.")
+
+
+# ── Extended state ────────────────────────────────────────────────────────
+class StrategistState(BaseAgentState):
+    """Extends BaseAgentState with intent routing and structured brief output."""
+    intent: str | None       # "weekly_brief" | "script_outline" | "research"
+    brief: dict | None       # WeeklyBrief.model_dump(), surfaced for the frontend
 
 
 class StrategistAgent(BaseAgent):
@@ -20,35 +49,62 @@ class StrategistAgent(BaseAgent):
 
     def __init__(self):
         self.tools = get_strategist_tools()
-        self.llm = ChatAnthropic(model=self.model).bind_tools(self.tools)
+        # Tool-bound LLM for the ReAct loop.
+        self.llm_with_tools = ChatAnthropic(model=self.model).bind_tools(self.tools)
         self.tool_node = ToolNode(self.tools)
+        # Plain LLM (no tools) for intent classification + structured brief composition.
+        self.llm = ChatAnthropic(model=self.model)
         super().__init__()
 
     def build_graph(self) -> StateGraph:
-        graph = StateGraph(BaseAgentState)
+        graph = StateGraph(StrategistState)
+
         graph.add_node("load_profile", self._load_profile_node)
+        graph.add_node("classify_intent", self._classify_intent_node)
         graph.add_node("agent", self._agent_node)
         graph.add_node("tools", self.tool_node)
+        graph.add_node("compose_brief", self._compose_brief_node)
+        graph.add_node("respond", self._respond_node)
 
         graph.add_edge(START, "load_profile")
-        graph.add_edge("load_profile", "agent")
+        graph.add_edge("load_profile", "classify_intent")
+        graph.add_edge("classify_intent", "agent")
+
+        # The ReAct loop exits three ways:
+        #   - more tool calls pending   -> tools
+        #   - no tool calls + weekly_brief intent -> compose_brief (structured)
+        #   - no tool calls + anything else        -> respond (free-form)
         graph.add_conditional_edges(
             "agent",
-            self._should_use_tools,
-            {"tools": "tools", "end": END},
+            self._after_agent,
+            {
+                "tools": "tools",
+                "compose_brief": "compose_brief",
+                "respond": "respond",
+            },
         )
         graph.add_edge("tools", "agent")
+        graph.add_edge("compose_brief", "respond")
+        graph.add_edge("respond", END)
+
         return graph
 
     # ── Helpers ────────────────────────────────────────────────────────────
-    def _profile(self, state: BaseAgentState) -> OrgProfile:
+    def _profile(self, state: StrategistState) -> OrgProfile:
         raw = (state.get("metadata") or {}).get("profile")
         if not raw:
             return load_profile(state.get("org_id"))
         return OrgProfile.model_validate(raw)
 
+    def _last_user_text(self, state: StrategistState) -> str:
+        last_human = next(
+            (m for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
+            None,
+        )
+        return last_human.content if last_human else ""
+
     # ── Node: load per-tenant profile into state.metadata ─────────────────
-    async def _load_profile_node(self, state: BaseAgentState):
+    async def _load_profile_node(self, state: StrategistState):
         profile = load_profile(state.get("org_id"))
         existing_meta = state.get("metadata") or {}
         return {
@@ -58,16 +114,98 @@ class StrategistAgent(BaseAgent):
             }
         }
 
-    # ── Node: ReAct LLM step (system prompt rendered per-tenant) ──────────
-    async def _agent_node(self, state: BaseAgentState):
+    # ── Node: classify user intent ─────────────────────────────────────────
+    async def _classify_intent_node(self, state: StrategistState):
         profile = self._profile(state)
-        system_prompt = render("strategist", "system.j2", profile=profile)
+        prompt = render("strategist", "classify.j2", profile=profile)
+        response = await self.llm.ainvoke([
+            SystemMessage(content=prompt),
+            HumanMessage(content=self._last_user_text(state)),
+        ])
+        raw = response.content.strip().strip("`").lower()
+        # Accept the exact slug or fall back to research for anything unexpected.
+        intent = raw if raw in {"weekly_brief", "script_outline", "research"} else "research"
+        return {"intent": intent}
+
+    # ── Node: ReAct LLM step (system prompt is intent-aware) ──────────────
+    async def _agent_node(self, state: StrategistState):
+        profile = self._profile(state)
+        system_prompt = render(
+            "strategist",
+            "system.j2",
+            profile=profile,
+            intent=state.get("intent") or "research",
+        )
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
-        response = await self.llm.ainvoke(messages)
+        response = await self.llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
 
-    def _should_use_tools(self, state: BaseAgentState):
+    # ── Router after the ReAct agent step ─────────────────────────────────
+    def _after_agent(self, state: StrategistState) -> str:
         last = state["messages"][-1]
         if hasattr(last, "tool_calls") and last.tool_calls:
             return "tools"
-        return "end"
+        if (state.get("intent") or "research") == "weekly_brief":
+            return "compose_brief"
+        return "respond"
+
+    # ── Node: structured brief composition ────────────────────────────────
+    async def _compose_brief_node(self, state: StrategistState):
+        profile = self._profile(state)
+
+        # Collect everything the ReAct loop gathered — tool outputs plus the
+        # LLM's most recent free-form take — so the composer has the full
+        # context to distill.
+        tool_outputs: list[str] = []
+        for m in state["messages"]:
+            if isinstance(m, ToolMessage):
+                name = getattr(m, "name", "tool")
+                tool_outputs.append(f"[{name}]\n{m.content}")
+        last_ai = next(
+            (m for m in reversed(state["messages"]) if isinstance(m, AIMessage) and m.content),
+            None,
+        )
+
+        context = (
+            f"USER REQUEST:\n{self._last_user_text(state)}\n\n"
+            f"RESEARCH GATHERED:\n"
+            + ("\n\n".join(tool_outputs) if tool_outputs else "(none)")
+            + "\n\nDRAFT TAKE FROM THE STRATEGIST:\n"
+            + (last_ai.content if last_ai else "(none)")
+        )
+
+        structured_llm = self.llm.with_structured_output(WeeklyBrief)
+        prompt = render("strategist", "compose_brief.j2", profile=profile)
+        brief: WeeklyBrief = await structured_llm.ainvoke([
+            SystemMessage(content=prompt),
+            HumanMessage(content=context),
+        ])
+        return {"brief": brief.model_dump(mode="json")}
+
+    # ── Node: terminal respond ────────────────────────────────────────────
+    async def _respond_node(self, state: StrategistState):
+        brief = state.get("brief")
+        if brief:
+            # Render a human-readable markdown view of the structured brief.
+            # The structured object is still on state["brief"] for the frontend.
+            lines = [f"# {brief['headline']}", ""]
+            for i, idea in enumerate(brief.get("ideas", []), 1):
+                lines.append(f"## {i}. {idea['title']}")
+                lines.append(f"**Hook:** {idea['hook']}")
+                lines.append(f"**Why now:** {idea['why_now']}")
+                lines.append(
+                    f"**Confidence:** {idea['confidence']} — {idea['rationale']}"
+                )
+                if idea.get("citations"):
+                    lines.append(f"*Cites:* {'; '.join(idea['citations'])}")
+                lines.append("")
+            content = "\n".join(lines).rstrip()
+        else:
+            # Research / script_outline paths — surface the ReAct loop's last
+            # assistant message as the reply.
+            last_ai = next(
+                (m for m in reversed(state["messages"]) if isinstance(m, AIMessage) and m.content),
+                None,
+            )
+            content = (last_ai.content if last_ai else "") or "Done."
+        return {"messages": [AIMessage(content=content)]}
