@@ -1,11 +1,18 @@
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    # Supabase
-    supabase_url: str = ""
-    supabase_anon_key: str = ""
+    # Supabase — accept either the standard name or the NEXT_PUBLIC_ prefixed one
+    supabase_url: str = Field(
+        "",
+        validation_alias=AliasChoices("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL"),
+    )
+    supabase_anon_key: str = Field(
+        "",
+        validation_alias=AliasChoices("SUPABASE_ANON_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY"),
+    )
     supabase_service_key: str = ""
     database_url: str = "postgresql://postgres:postgres@localhost:54322/postgres"
 
@@ -20,6 +27,11 @@ class Settings(BaseSettings):
 
     # Encryption
     encryption_key: str = ""
+
+    # Google OAuth (YouTube + future Google services)
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    youtube_oauth_redirect_uri: str = "http://localhost:3000/auth/youtube/callback"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

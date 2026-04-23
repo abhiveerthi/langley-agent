@@ -9,7 +9,7 @@ const navItems = [
   { label: "Appearance", href: "/app/settings", icon: Palette, exact: true },
   { label: "Notifications", href: "/app/settings/notifications", icon: Bell },
   { label: "Team", href: "/app/settings/team", icon: Users },
-  { label: "Integrations", href: "/app/settings/integrations", icon: Plug },
+  { label: "Integrations", href: "/app/integrations", icon: Plug },
 ];
 
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {
