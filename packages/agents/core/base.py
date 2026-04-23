@@ -46,6 +46,22 @@ class BaseAgent:
         """Override to define the agent's graph."""
         raise NotImplementedError
 
+    def get_approval_request(self, state: dict) -> dict | None:
+        """Describe the action that is gated at an interrupt.
+
+        Called by the API runtime when the graph is paused at one of
+        `interrupt_before_nodes`. Returns the payload the frontend needs to
+        render an approval card — or None if the agent has no HITL gates.
+
+        Shape (matches the `approvals` table in migrations/001_core.sql):
+            {
+                "action_type":    "send_email" | "update_video_metadata" | ...,
+                "action_payload": {...}   # arbitrary action-specific fields
+                "preview":        "short human-readable summary for the card",
+            }
+        """
+        return None
+
     async def run(self, input_data: dict, thread_id: str, stream: bool = False):
         app = await self.compile()
         config = {"configurable": {"thread_id": thread_id}}
