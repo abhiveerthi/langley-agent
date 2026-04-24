@@ -99,13 +99,18 @@ def load_profile(org_slug: str | None) -> OrgProfile:
     """Load a fully-resolved OrgProfile by org slug.
 
     - If `org_slug` is empty/None, falls back to DEFAULT_ORG_SLUG.
-    - Reads config/orgs/<slug>.yaml.
+    - Reads config/orgs/<slug>.yaml. If the file doesn't exist (e.g. the
+      caller passed a UUID from an auto-provisioned personal workspace that
+      has no YAML yet), falls back to DEFAULT_ORG_SLUG instead of raising.
     - If the org file's `niche` block has a `preset:` key, loads
       config/niches/<preset>.yaml and merges (org overrides preset).
     - Validates and returns an OrgProfile pydantic model.
     """
     slug = (org_slug or DEFAULT_ORG_SLUG).strip()
-    org_data = _read_yaml(ORGS_DIR / f"{slug}.yaml")
+    org_path = ORGS_DIR / f"{slug}.yaml"
+    if not org_path.exists():
+        org_path = ORGS_DIR / f"{DEFAULT_ORG_SLUG}.yaml"
+    org_data = _read_yaml(org_path)
 
     niche_block = org_data.get("niche") or {}
     preset_slug = niche_block.pop("preset", None)
