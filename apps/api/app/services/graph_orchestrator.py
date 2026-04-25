@@ -239,6 +239,14 @@ async def _stream_until_done_or_pause(
     # an interrupt. state.next is a tuple of node names the graph is waiting
     # to execute — non-empty means "paused here, waiting for a resume".
     snapshot = await app.aget_state(config)
+
+    # Emit any per-run structured outputs (Strategist's WeeklyBrief is the
+    # first; Publisher's package is on deck). Each agent declares what's
+    # interesting via `get_structured_outputs(state, visited_nodes)` — see
+    # packages/agents/core/base.py. visited_nodes gates emission so the
+    # same brief doesn't re-render on every follow-up turn.
+    for kind, data in agent.get_structured_outputs(snapshot.values, visited_nodes).items():
+        yield _sse("structured_output", {"kind": kind, "data": data})
     print(
         f"[orchestrator] agent={agent.slug} thread={thread_id} "
         f"visited={visited_nodes} snapshot.next={snapshot.next} "

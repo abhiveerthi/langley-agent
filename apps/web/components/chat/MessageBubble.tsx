@@ -3,7 +3,8 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ToolCallCard } from "./ToolCallCard";
-import type { ChatMessage } from "@/hooks/useChat";
+import { BriefCard } from "@/components/structured/BriefCard";
+import type { ChatMessage, WeeklyBrief } from "@/hooks/useChat";
 import { cn } from "@/lib/utils";
 import { Bot, User } from "lucide-react";
 
@@ -58,6 +59,19 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             ))}
           </div>
         )}
+
+        {/* Structured outputs — agent-emitted typed payloads rendered
+            alongside (or instead of) the markdown body. Each `kind` has a
+            dedicated renderer; unknown kinds are silently skipped so the
+            backend can introduce new types ahead of frontend support. */}
+        {message.structured && Object.entries(message.structured).map(([kind, data]) => {
+          if (kind === "brief") {
+            return (
+              <BriefCard key={kind} brief={data as WeeklyBrief} />
+            );
+          }
+          return null;
+        })}
       </div>
     </div>
   );

@@ -49,6 +49,17 @@ class StrategistAgent(BaseAgent):
     )
     model = "claude-sonnet-4-6"
 
+    def get_structured_outputs(self, state: dict, visited_nodes: list[str]) -> dict[str, dict]:
+        """Surface the WeeklyBrief as a structured frontend card — but ONLY
+        when `compose_brief` actually ran this turn. The brief field stays
+        on state across turns (LangGraph checkpointer persists it), so
+        gating on visited_nodes prevents the same card from re-rendering
+        on every follow-up message that doesn't regenerate the brief."""
+        out: dict[str, dict] = {}
+        if "compose_brief" in visited_nodes and state.get("brief"):
+            out["brief"] = state["brief"]
+        return out
+
     def __init__(self):
         self.tools = get_strategist_tools()
         # Tool-bound LLM for the ReAct loop.
