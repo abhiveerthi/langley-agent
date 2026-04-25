@@ -94,18 +94,22 @@ def _split_scopes(scope: str) -> list[str]:
     return [s for s in (p.strip() for p in raw.split(",")) if s]
 
 
-# ── Posting ────────────────────────────────────────────────────────────────
+# ── Slack Web API helpers ──────────────────────────────────────────────────
 
-async def post_message(access_token: str, channel: str, text: str) -> dict:
-    """Post a message via chat.postMessage. Returns {ts, channel, permalink?}.
+SLACK_API_BASE = "https://slack.com/api"
 
-    Uses Bearer auth + JSON body — Slack accepts both form and JSON, but JSON
-    plays nicer with rich blocks if we add them later.
+
+async def _slack_post(access_token: str, method: str, payload: dict) -> dict:
+    """POST to Slack Web API with bearer auth + JSON body, raise on failure.
+
+    Slack's 200-with-error pattern (HTTP 200, `ok: false`) gets surfaced as a
+    RuntimeError carrying the Slack error code so callers can give actionable
+    messages (e.g. `not_in_channel`, `name_taken`).
     """
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            "https://slack.com/api/chat.postMessage",
-            json={"channel": channel, "text": text},
+    async with httpx.AsyncClient(timeout=15) as http:
+        resp = await http.post(
+            f"{SLACK_API_BASE}/{method}",
+            json=payload,
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json; charset=utf-8",
@@ -113,13 +117,88 @@ async def post_message(access_token: str, channel: str, text: str) -> dict:
         )
     body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
     if resp.status_code >= 400:
-        raise RuntimeError(f"Slack chat.postMessage HTTP {resp.status_code}: {resp.text}")
+        raise RuntimeError(f"Slack {method} HTTP {resp.status_code}: {resp.text}")
     if not body.get("ok"):
-        # Slack-specific 200-with-error case. Surface the raw error code so the
-        # UI can give the user something actionable (e.g. `not_in_channel`).
-        raise RuntimeError(f"Slack rejected message: {body.get('error') or body}")
-    return {
-        "ts": body.get("ts"),
-        "channel": body.get("channel"),
-        "permalink": body.get("permalink"),
-    }
+        raise RuntimeError(f"Slack {method} rejected: {body.get('error') or body}")
+    return body
+
+
+async def _slack_get(access_token: str, method: str, params: dict) -> dict:
+    async with httpx.AsyncClient(timeout=15) as http:
+        resp = await http.get(
+            f"{SLACK_API_BASE}/{method}",
+            params=params,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Slack {method} HTTP {resp.status_code}: {resp.text}")
+    if not body.get("ok"):
+        raise RuntimeError(f"Slack {method} rejected: {body.get('error') or body}")
+    return body
+
+
+# ── Posting ────────────────────────────────────────────────────────────────
+
+async def post_message_in_thread(
+    access_token: str,
+    channel: str,
+    text: str,
+    *,
+    thread_ts: str | None = None,
+) -> dict:
+    """Post via chat.postMessage. If thread_ts is set, replies into that
+    Slack thread; otherwise posts at the top level. Returns {ts, channel}."""
+    payload: dict = {"channel": channel, "text": text}
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
+    body = await _slack_post(access_token, "chat.postMessage", payload)
+    return {"ts": body.get("ts"), "channel": body.get("channel")}
+
+
+async def post_message(access_token: str, channel: str, text: str) -> dict:
+    """Backwards-compatible top-level post. Prefer post_message_in_thread."""
+    return await post_message_in_thread(access_token, channel, text)
+
+
+# ── Channels ───────────────────────────────────────────────────────────────
+
+async def create_private_channel(
+    access_token: str,
+    name: str,
+    *,
+    invite_user_ids: list[str] | None = None,
+) -> dict:
+    """Create a private channel via conversations.create. If invite_user_ids
+    is non-empty, invites them (the bot is auto-added as the creator).
+
+    Returns {channel_id, name}. If a channel with `name` already exists in
+    the workspace, Slack returns `name_taken` — caller should handle by
+    looking up the existing id via conversations.list.
+    """
+    body = await _slack_post(
+        access_token,
+        "conversations.create",
+        {"name": name, "is_private": True},
+    )
+    channel = body.get("channel") or {}
+    channel_id = channel.get("id")
+    if invite_user_ids:
+        # conversations.invite takes a comma-separated list of user ids.
+        await _slack_post(
+            access_token,
+            "conversations.invite",
+            {"channel": channel_id, "users": ",".join(invite_user_ids)},
+        )
+    return {"channel_id": channel_id, "name": channel.get("name")}
+
+
+# ── Users ──────────────────────────────────────────────────────────────────
+
+async def lookup_user_email(access_token: str, user_id: str) -> str | None:
+    """Fetch a Slack user's email via users.info. Requires users:read.email
+    scope. Returns None if the user has no email set or the field is hidden
+    by workspace privacy settings."""
+    body = await _slack_get(access_token, "users.info", {"user": user_id})
+    profile = (body.get("user") or {}).get("profile") or {}
+    return profile.get("email") or None

@@ -13,12 +13,24 @@ import httpx
 
 # Bot scopes for posting on behalf of the workspace.
 # `chat:write.public` lets the bot post in public channels it hasn't joined.
+# `groups:write` + `groups:history` are for the per-agent private channels:
+# the OAuth callback creates `#marcus-publisher` and the Events API delivers
+# message.groups events from it so the agent can reply in-thread.
+# `users:read.email` is the identity hook — Slack messages → Marcus user via
+# email match. (`users:read` is required alongside it for users.info to work.)
+# `im:write` is the fallback path: when no Marcus user matches the Slack
+# email, we DM the user a "link your account" prompt.
 SLACK_BOT_SCOPES = [
     "chat:write",
     "chat:write.public",
     "channels:read",
     "groups:read",
+    "groups:write",
+    "groups:history",
     "team:read",
+    "users:read",
+    "users:read.email",
+    "im:write",
 ]
 
 AUTH_ENDPOINT = "https://slack.com/oauth/v2/authorize"
