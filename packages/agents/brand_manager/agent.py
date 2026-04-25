@@ -329,6 +329,23 @@ USER FEEDBACK:
             "from_name": profile.brand.name,
             "reply_to": profile.brand.primary_email,
         })
+
+        # Best-effort: log the pitch into the brand_deals pipeline so it shows
+        # up in `list_active_deals` and on peer agents' peer_context.
+        # Failure does NOT fail the run — the email already shipped.
+        from packages.agents.brand_manager.deals import log_deal_pitched
+        await log_deal_pitched(
+            org_id=state.get("org_id"),
+            thread_id=state.get("thread_id"),
+            # Use the user's pitch request as the brand name (e.g. "Magpul" from
+            # "draft a pitch to Magpul"). Future stage updates / settings UI
+            # can clean these up.
+            brand_name=self._last_user_text(state),
+            recipient=state.get("recipient"),
+            subject=state.get("subject"),
+            send_result=result,
+        )
+
         return {"send_result": result, "approval_status": "approved"}
 
     # ── shared terminal ────────────────────────────────────────────────────

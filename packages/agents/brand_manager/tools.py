@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from langchain_core.tools import tool
 from packages.agents.core.clients import perplexity_search, resend_send, youtube_api_get
+from packages.integrations.context import current_org_id
 
 
 @tool
@@ -176,5 +177,46 @@ async def send_pitch_email(
         return f"Send failed: {e}"
 
 
+@tool
+async def list_active_deals_tool(limit: int = 10) -> str:
+    """List the creator's recent sponsor deals across all stages.
+
+    Returns the deal pipeline (pitched, replied, negotiating, signed, declined,
+    paused) sorted by most recently updated. Use this when the user asks
+    "who have we pitched", "show me the pipeline", "what's the status with
+    Magpul", or before drafting a new pitch (so you can avoid pitching a
+    brand we're already negotiating with).
+
+    Args:
+        limit: How many deals to surface (default 10, max 50).
+    """
+    # Avoid circular import at module load — deals.py imports tools-ish stuff.
+    from packages.agents.brand_manager.deals import list_active_deals
+
+    org_id = current_org_id.get()
+    deals = await list_active_deals(org_id=org_id, limit=limit)
+    if not deals:
+        return (
+            "No deals logged yet. Pitches sent through this agent are recorded "
+            "here automatically as 'pitched'; future stage updates will land here too."
+        )
+
+    output = "# Sponsor Pipeline\n\n"
+    for d in deals:
+        last = (d.get("last_updated_at") or "")[:10]
+        output += (
+            f"- **{d.get('brand_name', '?')}** "
+            f"({d.get('stage', '?')}) — "
+            f"{d.get('recipient', '(no recipient)')}, last updated {last}\n"
+        )
+    return output
+
+
 def get_brand_manager_tools():
-    return [find_sponsor_leads, research_brand, get_channel_stats, send_pitch_email]
+    return [
+        find_sponsor_leads,
+        research_brand,
+        get_channel_stats,
+        send_pitch_email,
+        list_active_deals_tool,
+    ]
