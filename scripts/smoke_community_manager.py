@@ -225,6 +225,24 @@ def test_templates_render_with_empty_state():
     print("  ✓ All 6 CM templates render cleanly")
 
 
+def test_draft_and_triage_render_peer_context():
+    """When peer_context.latest_brief is present, draft.j2 and triage.j2
+    should weave the headline into the prompt — and omit the block cleanly
+    when peer_context is absent."""
+    p = load_profile("langley-outdoors-academy")
+    peer = {"latest_brief": {"headline": "TEST_HEADLINE_FROM_STRATEGIST", "ideas": []}}
+
+    draft_with = render("community_manager", "draft.j2", profile=p, peer_context=peer)
+    assert "TEST_HEADLINE_FROM_STRATEGIST" in draft_with
+
+    triage_with = render("community_manager", "triage.j2", profile=p, peer_context=peer)
+    assert "TEST_HEADLINE_FROM_STRATEGIST" in triage_with
+
+    draft_without = render("community_manager", "draft.j2", profile=p)
+    assert "Strategy Context" not in draft_without
+    print("  ✓ draft.j2 + triage.j2 render peer_context.latest_brief; omit cleanly when absent")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────
 async def main():
     bar = "=" * 70
@@ -241,6 +259,7 @@ async def main():
     await test_respond_node_for_each_terminal_case()
     await test_reply_to_comment_no_org_context()
     test_templates_render_with_empty_state()
+    test_draft_and_triage_render_peer_context()
     print()
     print("All smoke checks passed.")
 

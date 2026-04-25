@@ -130,6 +130,11 @@ class CommunityManagerAgent(BaseAgent):
         graph = StateGraph(CommunityManagerState)
 
         graph.add_node("load_profile", self._load_profile_node)
+        # peer_context: latest Strategist brief (for voice/direction reference
+        # when replying) + latest Publisher package once that table lands on
+        # main. Hydrated once at the top so triage and draft prompts can both
+        # cite it via state.metadata.peer_context.
+        graph.add_node("load_peer_context", self._load_peer_context_node)
         graph.add_node("classify_intent", self._classify_intent_node)
 
         # triage / research branch — ReAct sub-loop
@@ -148,7 +153,8 @@ class CommunityManagerAgent(BaseAgent):
 
         # ── Edges ──────────────────────────────────────────────────────────
         graph.add_edge(START, "load_profile")
-        graph.add_edge("load_profile", "classify_intent")
+        graph.add_edge("load_profile", "load_peer_context")
+        graph.add_edge("load_peer_context", "classify_intent")
 
         graph.add_conditional_edges(
             "classify_intent",
@@ -195,6 +201,11 @@ class CommunityManagerAgent(BaseAgent):
         if not raw:
             return load_profile(state.get("org_id"))
         return OrgProfile.model_validate(raw)
+
+    def _peer_context(self, state: CommunityManagerState) -> dict:
+        """Latest Strategist brief / Publisher package, hydrated by the
+        load_peer_context node. Empty dict in dev mode."""
+        return (state.get("metadata") or {}).get("peer_context") or {}
 
     def _last_user_text(self, state: CommunityManagerState) -> str:
         last_human = next(
@@ -252,7 +263,12 @@ class CommunityManagerAgent(BaseAgent):
         # triage produces the structured alert / needs-reply / hide format;
         # research is a free-form ad-hoc analysis path.
         template = "triage.j2" if state.get("intent") == "triage" else "research.j2"
-        system_prompt = render("community_manager", template, profile=profile)
+        system_prompt = render(
+            "community_manager",
+            template,
+            profile=profile,
+            peer_context=self._peer_context(state),
+        )
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
         response = await self.llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
@@ -303,7 +319,12 @@ class CommunityManagerAgent(BaseAgent):
             f"  Text: {state.get('target_comment_text') or ''}\n\n"
             f"USER'S DIRECTION:\n{self._last_user_text(state)}"
         )
-        prompt = render("community_manager", "draft.j2", profile=profile)
+        prompt = render(
+            "community_manager",
+            "draft.j2",
+            profile=profile,
+            peer_context=self._peer_context(state),
+        )
         response = await self.llm.ainvoke([
             SystemMessage(content=prompt),
             HumanMessage(content=context),
@@ -316,7 +337,12 @@ class CommunityManagerAgent(BaseAgent):
             f"PREVIOUS REPLY:\n{state.get('draft_reply') or ''}\n\n"
             f"USER FEEDBACK:\n{state.get('feedback') or 'No specific feedback'}"
         )
-        prompt = render("community_manager", "revise.j2", profile=profile)
+        prompt = render(
+            "community_manager",
+            "revise.j2",
+            profile=profile,
+            peer_context=self._peer_context(state),
+        )
         response = await self.llm.ainvoke([
             SystemMessage(content=prompt),
             HumanMessage(content=context),

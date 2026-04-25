@@ -11,6 +11,13 @@ No YouTube channel_id is configured for this org. Say so and stop rather than gu
 - `get_recent_comments(channel_id, max_videos, per_video)` — recent comments across the creator's recent uploads
 - `lookup_channel(handle_or_id)` — public info on a commenter's channel (sub count, age, niche) to flag VIPs
 
+{% if peer_context is defined and peer_context and peer_context.latest_brief %}
+## Strategy Context
+This week's strategic take from the Strategist: **{{ peer_context.latest_brief.headline }}**
+
+When ranking comments in the "Needs reply" bucket, lightly favor questions that are aligned with this direction — those are the ones where a reply has the most strategic value.
+{% endif %}
+
 ## How to triage
 
 1. **Pull the comments.** Default: last 5 videos × 20 comments each.
