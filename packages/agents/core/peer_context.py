@@ -52,13 +52,32 @@ class PublisherPackageSummary(BaseModel):
     created_at: str | None = None
 
 
+class DealSummary(BaseModel):
+    """One row from the Brand Manager's deal pipeline. Read by Strategist
+    (briefs can cite "we're negotiating with X" when relevant) and by
+    Brand Manager itself for "don't pitch a brand we're already in
+    conversation with" deduplication."""
+    brand_name: str
+    stage: str
+    recipient: str | None = None
+    last_updated_at: str | None = None
+
+
 class PeerContext(BaseModel):
     """Per-org snapshot of peer-agent outputs at the start of a run."""
     latest_brief: StrategistBriefSummary | None = None
     latest_package: PublisherPackageSummary | None = None
+    # Up to N most-recently-touched deals across all stages. Agents that
+    # care about pipeline state (Brand Manager, Strategist) render these
+    # in their prompts.
+    active_deals: list[DealSummary] = Field(default_factory=list)
 
     def has_any(self) -> bool:
-        return self.latest_brief is not None or self.latest_package is not None
+        return (
+            self.latest_brief is not None
+            or self.latest_package is not None
+            or bool(self.active_deals)
+        )
 
 
 # ── Loader ────────────────────────────────────────────────────────────────
@@ -91,6 +110,7 @@ async def load_peer_context(org_id: str | None, supabase: Any) -> PeerContext:
     return PeerContext(
         latest_brief=_fetch_latest_brief(org_id, supabase),
         latest_package=_fetch_latest_package(org_id, supabase),
+        active_deals=_fetch_active_deals(org_id, supabase),
     )
 
 
@@ -115,6 +135,37 @@ def _fetch_latest_brief(org_id: str, supabase: Any) -> StrategistBriefSummary | 
         ideas=row.get("ideas") or [],
         created_at=row.get("created_at"),
     )
+
+
+def _fetch_active_deals(org_id: str, supabase: Any, limit: int = 5) -> list[DealSummary]:
+    """Read the most-recently-touched rows from `brand_deals`. Returns []
+    when the table doesn't exist (pre-migration), the org has no deals yet,
+    or any DB error — peer agents should never fail because pipeline data
+    is unavailable. Limit is small on purpose: we ship ~5 rows into every
+    agent prompt that opts into peer_context, so we keep them brief."""
+    try:
+        result = (
+            supabase.table("brand_deals")
+            .select("brand_name, stage, recipient, last_updated_at")
+            .eq("org_id", org_id)
+            .order("last_updated_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+    except Exception:
+        return []
+
+    if not result.data:
+        return []
+    return [
+        DealSummary(
+            brand_name=row.get("brand_name", ""),
+            stage=row.get("stage", ""),
+            recipient=row.get("recipient"),
+            last_updated_at=row.get("last_updated_at"),
+        )
+        for row in result.data
+    ]
 
 
 def _fetch_latest_package(org_id: str, supabase: Any) -> PublisherPackageSummary | None:
