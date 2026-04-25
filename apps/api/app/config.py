@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     twitter_client_secret: str = ""
     twitter_oauth_redirect_uri: str = "http://localhost:3000/auth/twitter/callback"
 
+    # Slack OAuth v2 (workspace install). client_secret is required.
+    # Note: Slack requires https for redirect URIs once "Public Distribution"
+    # is enabled. With Public Distribution off (Development app only), http
+    # is accepted again.
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+    slack_oauth_redirect_uri: str = "http://localhost:3000/auth/slack/callback"
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

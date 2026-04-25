@@ -56,14 +56,26 @@ type TwitterState =
     }
   | { state: "error"; message: string };
 
+type SlackState =
+  | { state: "loading" }
+  | { state: "disconnected" }
+  | {
+      state: "connected";
+      team: { id?: string; name?: string; url?: string };
+      scopes: string[];
+    }
+  | { state: "error"; message: string };
+
 export default function IntegrationsPage() {
   const [activeCategory, setActiveCategory] = useState("All");
   const [requestText, setRequestText] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [youtube, setYoutube] = useState<YouTubeState>({ state: "loading" });
   const [twitter, setTwitter] = useState<TwitterState>({ state: "loading" });
+  const [slack, setSlack] = useState<SlackState>({ state: "loading" });
   const [busy, setBusy] = useState(false);
   const [twitterBusy, setTwitterBusy] = useState(false);
+  const [slackBusy, setSlackBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
   const router = useRouter();
@@ -139,6 +151,36 @@ export default function IntegrationsPage() {
     fetchTwitter();
   }, [fetchTwitter]);
 
+  const fetchSlack = useCallback(async () => {
+    try {
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        setSlack({ state: "error", message: "Not signed in" });
+        return;
+      }
+      const res = await fetch(`${API}/api/integrations/slack/status`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) {
+        setSlack({ state: "error", message: `HTTP ${res.status}` });
+        return;
+      }
+      const data = await res.json();
+      if (!data.connected) {
+        setSlack({ state: "disconnected" });
+        return;
+      }
+      setSlack({ state: "connected", team: data.team || {}, scopes: data.scopes || [] });
+    } catch (e) {
+      setSlack({ state: "error", message: (e as Error).message });
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSlack();
+  }, [fetchSlack]);
+
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(null), 2200);
@@ -174,6 +216,22 @@ export default function IntegrationsPage() {
     url.searchParams.delete("reason");
     router.replace(url.pathname + (url.search ? url.search : ""));
   }, [searchParams, router, fetchTwitter]);
+
+  useEffect(() => {
+    const sl = searchParams.get("slack");
+    if (!sl) return;
+    if (sl === "connected") {
+      setToast("Slack connected");
+      fetchSlack();
+    } else if (sl === "error") {
+      const reason = searchParams.get("reason") || "unknown";
+      setToast(`Slack connect failed: ${reason.slice(0, 80)}`);
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.delete("slack");
+    url.searchParams.delete("reason");
+    router.replace(url.pathname + (url.search ? url.search : ""));
+  }, [searchParams, router, fetchSlack]);
 
   async function connectYouTube() {
     setBusy(true);
@@ -265,6 +323,51 @@ export default function IntegrationsPage() {
     }
   }
 
+  async function connectSlack() {
+    setSlackBusy(true);
+    try {
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        setToast("Sign in first");
+        return;
+      }
+      const res = await fetch(`${API}/api/integrations/slack/auth-url`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) {
+        setToast(`Failed to start connect (HTTP ${res.status})`);
+        return;
+      }
+      const { auth_url } = await res.json();
+      window.location.href = auth_url;
+    } finally {
+      setSlackBusy(false);
+    }
+  }
+
+  async function disconnectSlack() {
+    setSlackBusy(true);
+    try {
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+      const res = await fetch(`${API}/api/integrations/slack`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (res.ok) {
+        setToast("Slack disconnected");
+        setSlack({ state: "disconnected" });
+      } else {
+        setToast(`Failed to disconnect (HTTP ${res.status})`);
+      }
+    } finally {
+      setSlackBusy(false);
+    }
+  }
+
   const filtered =
     activeCategory === "All"
       ? integrations
@@ -273,7 +376,10 @@ export default function IntegrationsPage() {
   const connectedCount =
     (youtube.state === "connected" ? 1 : 0) +
     (twitter.state === "connected" ? 1 : 0) +
-    filtered.filter((i) => i.id !== "youtube" && i.id !== "twitter" && i.connected).length;
+    (slack.state === "connected" ? 1 : 0) +
+    filtered.filter(
+      (i) => i.id !== "youtube" && i.id !== "twitter" && i.id !== "slack" && i.connected,
+    ).length;
 
   function handleRequest() {
     if (requestText.trim()) {
@@ -345,6 +451,18 @@ export default function IntegrationsPage() {
                 onConnect={connectTwitter}
                 onDisconnect={disconnectTwitter}
                 onRefresh={fetchTwitter}
+              />
+            );
+          }
+          if (integration.id === "slack") {
+            return (
+              <SlackCard
+                key={integration.id}
+                state={slack}
+                busy={slackBusy}
+                onConnect={connectSlack}
+                onDisconnect={disconnectSlack}
+                onRefresh={fetchSlack}
               />
             );
           }
@@ -731,6 +849,146 @@ function TwitterCard({
               )}
             >
               {state.scopes.includes("tweet.write") ? "Read + write" : "Read only"}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={onRefresh}
+              disabled={busy}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+            >
+              <RefreshCw className="h-3 w-3" />
+              Refresh
+            </button>
+            <button
+              onClick={onDisconnect}
+              disabled={busy}
+              className="flex-1 rounded-md border border-red-500/30 py-1.5 text-xs font-medium text-red-400 transition-colors hover:bg-red-500/10 disabled:opacity-50"
+            >
+              {busy ? "…" : "Disconnect"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SlackCard({
+  state,
+  busy,
+  onConnect,
+  onDisconnect,
+  onRefresh,
+}: {
+  state: SlackState;
+  busy: boolean;
+  onConnect: () => void;
+  onDisconnect: () => void;
+  onRefresh: () => void;
+}) {
+  const isConnected = state.state === "connected";
+  const isLoading = state.state === "loading";
+
+  return (
+    <div
+      className={cn(
+        "rounded-lg border bg-card p-5 transition-colors",
+        isConnected ? "border-border" : "border-border hover:border-border/80"
+      )}
+    >
+      <div className="mb-4 flex items-start justify-between">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-violet-500/15 p-2">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/integrations/slack.svg" alt="" className="h-full w-full object-contain" />
+          </div>
+          <div className="min-w-0">
+            <p className="font-medium text-foreground">Slack</p>
+            {state.state === "connected" && state.team.name ? (
+              <p className="text-xs text-muted-foreground truncate">{state.team.name}</p>
+            ) : (
+              <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-xs font-medium text-violet-400">
+                Communication
+              </span>
+            )}
+          </div>
+        </div>
+        {isConnected && (
+          <div className="flex items-center gap-1 text-xs text-emerald-400">
+            <div className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+            Live
+          </div>
+        )}
+      </div>
+
+      <p className="mb-4 text-sm text-muted-foreground">
+        Send approval pings, run notifications, and approval-gated messages from agents to your Slack workspace.
+      </p>
+
+      {isLoading && (
+        <button
+          disabled
+          className="flex w-full items-center justify-center gap-2 rounded-md border border-border bg-muted/30 py-2 text-xs font-medium text-muted-foreground"
+        >
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Checking…
+        </button>
+      )}
+
+      {state.state === "disconnected" && (
+        <button
+          onClick={onConnect}
+          disabled={busy}
+          className="flex w-full items-center justify-center gap-2 rounded-md bg-primary py-2 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+        >
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          Connect Slack
+        </button>
+      )}
+
+      {state.state === "error" && (
+        <div>
+          <div className="mb-2 flex items-center gap-2 text-xs text-red-400">
+            <AlertCircle className="h-3.5 w-3.5" />
+            {state.message}
+          </div>
+          <button
+            onClick={onRefresh}
+            className="w-full rounded-md border border-border py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {isConnected && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+            <div className="flex items-center gap-2 min-w-0">
+              <CheckCircle className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+              {state.team.url ? (
+                <a
+                  href={state.team.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="truncate hover:text-foreground hover:underline"
+                >
+                  {state.team.name || state.team.url.replace(/^https?:\/\//, "")}
+                </a>
+              ) : (
+                <span className="truncate">{state.team.name || "Connected"}</span>
+              )}
+            </div>
+            <span
+              className={cn(
+                "rounded-full border px-2 py-0.5 text-[10px] font-medium",
+                state.scopes.includes("chat:write")
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                  : "border-amber-500/30 bg-amber-500/10 text-amber-400"
+              )}
+            >
+              {state.scopes.includes("chat:write") ? "Can post" : "Limited"}
             </span>
           </div>
           <div className="flex gap-2">

@@ -5,6 +5,8 @@ from supabase import Client
 
 from app.config import Settings, get_settings
 from app.dependencies import CurrentUser, get_current_user, get_supabase
+from packages.integrations.slack import client as slack_client
+from packages.integrations.slack import oauth as slack_oauth
 from packages.integrations.x import client as x_client
 from packages.integrations.x import oauth as x_oauth
 from packages.integrations.youtube import client as yt_client
@@ -267,4 +269,105 @@ async def twitter_disconnect(
     supabase: Client = Depends(get_supabase),
 ):
     x_client.delete_connection(supabase, user.org_id)
+    return {"status": "disconnected"}
+
+
+# ── Slack ────────────────────────────────────────────────────────────────────
+
+@router.post("/integrations/slack/auth-url", response_model=AuthUrlResponse)
+async def slack_auth_url(
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    if not settings.slack_client_id or not settings.slack_client_secret:
+        raise HTTPException(500, "Slack OAuth is not configured")
+    if not settings.jwt_secret:
+        raise HTTPException(500, "JWT secret is not configured")
+
+    state = slack_oauth.sign_state(
+        {"org_id": user.org_id, "user_id": user.id},
+        settings.jwt_secret,
+    )
+    url = slack_oauth.build_auth_url(
+        client_id=settings.slack_client_id,
+        redirect_uri=settings.slack_oauth_redirect_uri,
+        state=state,
+    )
+    return AuthUrlResponse(auth_url=url)
+
+
+@router.post("/integrations/slack/callback")
+async def slack_callback(
+    body: CallbackRequest,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    supabase: Client = Depends(get_supabase),
+):
+    try:
+        payload = slack_oauth.verify_state(body.state, settings.jwt_secret)
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid state: {e}")
+
+    if payload.get("org_id") != user.org_id:
+        raise HTTPException(403, "State does not match current org")
+
+    try:
+        install = await slack_oauth.exchange_code(
+            code=body.code,
+            client_id=settings.slack_client_id,
+            client_secret=settings.slack_client_secret,
+            redirect_uri=settings.slack_oauth_redirect_uri,
+        )
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+    # auth.test gives us a verified team url for the UI to deep-link to.
+    extra: dict = {}
+    try:
+        info = await slack_oauth.auth_test(install.access_token)
+        extra["team_url"] = info.get("url")
+    except RuntimeError:
+        # Token works for installs but auth.test failed — non-fatal; metadata
+        # can be re-fetched later.
+        pass
+
+    saved = slack_client.save_connection(supabase, user.org_id, install, extra)
+    return {
+        "status": "ok",
+        "team": {
+            "id": install.team_id,
+            "name": install.team_name,
+            "url": extra.get("team_url"),
+        },
+        "scopes": saved.get("scopes", []),
+    }
+
+
+@router.get("/integrations/slack/status")
+async def slack_status(
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    conn = slack_client.get_connection(supabase, user.org_id)
+    if not conn:
+        return {"connected": False}
+    metadata = conn.get("metadata") or {}
+    return {
+        "connected": True,
+        "status": conn.get("status", "active"),
+        "team": {
+            "id": metadata.get("team_id"),
+            "name": metadata.get("team_name"),
+            "url": metadata.get("team_url"),
+        },
+        "scopes": conn.get("scopes") or [],
+    }
+
+
+@router.delete("/integrations/slack")
+async def slack_disconnect(
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    slack_client.delete_connection(supabase, user.org_id)
     return {"status": "disconnected"}
