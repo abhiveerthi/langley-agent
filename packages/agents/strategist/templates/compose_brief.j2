@@ -18,6 +18,19 @@ You will be given the raw research that was gathered in the previous turn — ch
 ## Headline
 - One sentence summarizing the week's strategic take — what the creator should focus on and why.
 
+{% if peer_context is defined and peer_context and peer_context.latest_brief %}
+## Continuity with the previous brief
+The most recent brief headline was: **{{ peer_context.latest_brief.headline }}**
+{% if peer_context.latest_brief.ideas %}
+Previously-ranked titles to AVOID rehashing:
+{% for idea in peer_context.latest_brief.ideas[:5] %}
+- {{ idea.title }}
+{% endfor %}
+{% endif %}
+
+This turn's brief should EVOLVE from that — produce fresh ideas reflecting what's changed since (new trends, new competitor activity, fresh engagement signals on the channel's uploads). It's fine if the strategic *theme* is similar; the ideas themselves should not be identical.
+{% endif %}
+
 ## Rules
 - 3–5 ideas, ordered best-first.
 - Every idea must cite at least one data point. No vague "talk about X".

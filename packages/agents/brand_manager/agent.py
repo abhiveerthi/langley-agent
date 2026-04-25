@@ -81,6 +81,10 @@ class BrandManagerAgent(BaseAgent):
         graph = StateGraph(BrandManagerState)
 
         graph.add_node("load_profile", self._load_profile_node)
+        # peer_context: latest Strategist brief + Publisher package, etc.
+        # Hydrated once at the top so every downstream node can reference it
+        # via state.metadata.peer_context (renders into draft / research prompts).
+        graph.add_node("load_peer_context", self._load_peer_context_node)
         graph.add_node("classify_intent", self._classify_intent_node)
 
         # research / leads branch (ReAct sub-loop)
@@ -100,7 +104,8 @@ class BrandManagerAgent(BaseAgent):
 
         # ── Edges ──────────────────────────────────────────────────────────
         graph.add_edge(START, "load_profile")
-        graph.add_edge("load_profile", "classify_intent")
+        graph.add_edge("load_profile", "load_peer_context")
+        graph.add_edge("load_peer_context", "classify_intent")
 
         graph.add_conditional_edges(
             "classify_intent",
@@ -151,6 +156,11 @@ class BrandManagerAgent(BaseAgent):
         if not raw:
             return load_profile(state.get("org_id"))
         return OrgProfile.model_validate(raw)
+
+    def _peer_context(self, state: BrandManagerState) -> dict:
+        """Latest peer-agent outputs (Strategist brief, Publisher package, …)
+        hydrated by the load_peer_context node. Empty dict in dev mode."""
+        return (state.get("metadata") or {}).get("peer_context") or {}
 
     def _last_user_text(self, state: BrandManagerState) -> str:
         last_human = next(
@@ -205,7 +215,12 @@ class BrandManagerAgent(BaseAgent):
     # ── research / leads branch (ReAct) ────────────────────────────────────
     async def _research_agent_node(self, state: BrandManagerState):
         profile = self._profile(state)
-        system_prompt = render("brand_manager", "research_or_leads.j2", profile=profile)
+        system_prompt = render(
+            "brand_manager",
+            "research_or_leads.j2",
+            profile=profile,
+            peer_context=self._peer_context(state),
+        )
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
         response = await self.llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
@@ -242,7 +257,12 @@ BRAND RESEARCH:
 MEDIA KIT NUMBERS:
 {state.get("media_kit") or "Not available"}"""
 
-        prompt = render("brand_manager", "draft.j2", profile=profile)
+        prompt = render(
+            "brand_manager",
+            "draft.j2",
+            profile=profile,
+            peer_context=self._peer_context(state),
+        )
         response = await self.llm.ainvoke([
             SystemMessage(content=prompt),
             HumanMessage(content=context),
@@ -257,7 +277,12 @@ MEDIA KIT NUMBERS:
 USER FEEDBACK:
 {state.get("feedback", "No specific feedback")}"""
 
-        prompt = render("brand_manager", "revise.j2", profile=profile)
+        prompt = render(
+            "brand_manager",
+            "revise.j2",
+            profile=profile,
+            peer_context=self._peer_context(state),
+        )
         response = await self.llm.ainvoke([
             SystemMessage(content=prompt),
             HumanMessage(content=context),

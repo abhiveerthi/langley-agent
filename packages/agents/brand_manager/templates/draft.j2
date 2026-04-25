@@ -7,6 +7,19 @@ You will be given:
 - Brand research about the target sponsor
 - The creator's media-kit numbers (subscribers, average views, etc.)
 
+{% if peer_context is defined and peer_context and peer_context.latest_brief %}
+## Strategy Context (from the Strategist)
+- Current take: **{{ peer_context.latest_brief.headline }}**
+{% if peer_context.latest_brief.ideas %}
+- Top video angles this week:
+{% for idea in peer_context.latest_brief.ideas[:3] %}
+  - {{ idea.title }}
+{% endfor %}
+{% endif %}
+
+Anchor the pitch in this — what you tell the sponsor about {{ brand.name }}'s direction should be consistent with what the channel is actually making this week. The "fit" paragraph is the obvious place to weave in this strategic framing.
+{% endif %}
+
 Draft a pitch email. Constraints:
 - Subject line under 60 chars, specific not generic.
 - First line references something concrete about the sponsor (recent campaign, product launch, sponsorship of a similar creator).
