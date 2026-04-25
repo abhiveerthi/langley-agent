@@ -47,6 +47,17 @@ class Settings(BaseSettings):
     slack_client_secret: str = ""
     slack_oauth_redirect_uri: str = "http://localhost:3000/auth/slack/callback"
 
+    # Dropbox OAuth 2.0. Uses token_access_type=offline so we get a refresh
+    # token alongside the short-lived (4h) access token.
+    dropbox_client_id: str = ""
+    dropbox_client_secret: str = ""
+    dropbox_oauth_redirect_uri: str = "http://localhost:3000/auth/dropbox/callback"
+
+    # monday.com OAuth 2.0. Tokens are long-lived (no expiry, no refresh).
+    monday_client_id: str = ""
+    monday_client_secret: str = ""
+    monday_oauth_redirect_uri: str = "http://localhost:3000/auth/monday/callback"
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

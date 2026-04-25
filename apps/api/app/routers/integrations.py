@@ -5,6 +5,10 @@ from supabase import Client
 
 from app.config import Settings, get_settings
 from app.dependencies import CurrentUser, get_current_user, get_supabase
+from packages.integrations.dropbox import client as dropbox_client
+from packages.integrations.dropbox import oauth as dropbox_oauth
+from packages.integrations.monday import client as monday_client
+from packages.integrations.monday import oauth as monday_oauth
 from packages.integrations.slack import client as slack_client
 from packages.integrations.slack import oauth as slack_oauth
 from packages.integrations.x import client as x_client
@@ -370,4 +374,173 @@ async def slack_disconnect(
     supabase: Client = Depends(get_supabase),
 ):
     slack_client.delete_connection(supabase, user.org_id)
+    return {"status": "disconnected"}
+
+
+# ── Dropbox ──────────────────────────────────────────────────────────────────
+
+@router.post("/integrations/dropbox/auth-url", response_model=AuthUrlResponse)
+async def dropbox_auth_url(
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    if not settings.dropbox_client_id or not settings.dropbox_client_secret:
+        raise HTTPException(500, "Dropbox OAuth is not configured")
+    if not settings.jwt_secret:
+        raise HTTPException(500, "JWT secret is not configured")
+
+    state = dropbox_oauth.sign_state(
+        {"org_id": user.org_id, "user_id": user.id},
+        settings.jwt_secret,
+    )
+    url = dropbox_oauth.build_auth_url(
+        client_id=settings.dropbox_client_id,
+        redirect_uri=settings.dropbox_oauth_redirect_uri,
+        state=state,
+    )
+    return AuthUrlResponse(auth_url=url)
+
+
+@router.post("/integrations/dropbox/callback")
+async def dropbox_callback(
+    body: CallbackRequest,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    supabase: Client = Depends(get_supabase),
+):
+    try:
+        payload = dropbox_oauth.verify_state(body.state, settings.jwt_secret)
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid state: {e}")
+
+    if payload.get("org_id") != user.org_id:
+        raise HTTPException(403, "State does not match current org")
+
+    try:
+        tokens = await dropbox_oauth.exchange_code(
+            code=body.code,
+            client_id=settings.dropbox_client_id,
+            client_secret=settings.dropbox_client_secret,
+            redirect_uri=settings.dropbox_oauth_redirect_uri,
+        )
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+    try:
+        account = await dropbox_oauth.fetch_account_info(tokens.access_token)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+    saved = dropbox_client.save_connection(supabase, user.org_id, tokens, account)
+    return {"status": "ok", "account": account, "scopes": saved.get("scopes", [])}
+
+
+@router.get("/integrations/dropbox/status")
+async def dropbox_status(
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    conn = dropbox_client.get_connection(supabase, user.org_id)
+    if not conn:
+        return {"connected": False}
+    return {
+        "connected": True,
+        "status": conn.get("status", "active"),
+        "account": conn.get("metadata") or {},
+        "scopes": conn.get("scopes") or [],
+        "token_expires_at": conn.get("token_expires_at"),
+    }
+
+
+@router.delete("/integrations/dropbox")
+async def dropbox_disconnect(
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    dropbox_client.delete_connection(supabase, user.org_id)
+    return {"status": "disconnected"}
+
+
+# ── monday.com ───────────────────────────────────────────────────────────────
+
+@router.post("/integrations/monday/auth-url", response_model=AuthUrlResponse)
+async def monday_auth_url(
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    if not settings.monday_client_id or not settings.monday_client_secret:
+        raise HTTPException(500, "monday.com OAuth is not configured")
+    if not settings.jwt_secret:
+        raise HTTPException(500, "JWT secret is not configured")
+
+    state = monday_oauth.sign_state(
+        {"org_id": user.org_id, "user_id": user.id},
+        settings.jwt_secret,
+    )
+    url = monday_oauth.build_auth_url(
+        client_id=settings.monday_client_id,
+        redirect_uri=settings.monday_oauth_redirect_uri,
+        state=state,
+    )
+    return AuthUrlResponse(auth_url=url)
+
+
+@router.post("/integrations/monday/callback")
+async def monday_callback(
+    body: CallbackRequest,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    supabase: Client = Depends(get_supabase),
+):
+    try:
+        payload = monday_oauth.verify_state(body.state, settings.jwt_secret)
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid state: {e}")
+
+    if payload.get("org_id") != user.org_id:
+        raise HTTPException(403, "State does not match current org")
+
+    try:
+        tokens = await monday_oauth.exchange_code(
+            code=body.code,
+            client_id=settings.monday_client_id,
+            client_secret=settings.monday_client_secret,
+            redirect_uri=settings.monday_oauth_redirect_uri,
+        )
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+    try:
+        account = await monday_oauth.fetch_account_info(tokens.access_token)
+    except RuntimeError as e:
+        # Auth succeeded but the me-query failed — still save the token; the
+        # UI can re-fetch metadata later.
+        account = {"warning": f"me-query failed: {e}"}
+
+    saved = monday_client.save_connection(supabase, user.org_id, tokens, account)
+    return {"status": "ok", "account": account, "scopes": saved.get("scopes", [])}
+
+
+@router.get("/integrations/monday/status")
+async def monday_status(
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    conn = monday_client.get_connection(supabase, user.org_id)
+    if not conn:
+        return {"connected": False}
+    return {
+        "connected": True,
+        "status": conn.get("status", "active"),
+        "account": conn.get("metadata") or {},
+        "scopes": conn.get("scopes") or [],
+    }
+
+
+@router.delete("/integrations/monday")
+async def monday_disconnect(
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    monday_client.delete_connection(supabase, user.org_id)
     return {"status": "disconnected"}
