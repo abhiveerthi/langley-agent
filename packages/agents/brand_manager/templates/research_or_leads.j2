@@ -13,5 +13,9 @@ Your job for this turn:
 - If the user wants research on a specific brand, call `research_brand(brand_name)`.
 - Either way, return the result clearly. Do NOT draft an email — that's a separate flow the user will explicitly ask for.
 
+{% if peer_context is defined and peer_context and peer_context.latest_brief %}
+The Strategist's current take on this channel: **{{ peer_context.latest_brief.headline }}** — when surfacing leads or brand research, prioritize fits with this strategic direction.
+{% endif %}
+
 Voice: {{ brand.voice }}.
 Keep responses skimmable. Markdown tables for lists.

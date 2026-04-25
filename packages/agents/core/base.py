@@ -4,6 +4,9 @@ from langgraph.graph.message import add_messages
 from typing import TypedDict, Annotated, Any
 import os
 
+from packages.agents.core.peer_context import load_peer_context
+from packages.integrations.context import current_supabase
+
 
 class BaseAgentState(TypedDict):
     messages: Annotated[list, add_messages]
@@ -45,6 +48,28 @@ class BaseAgent:
     def build_graph(self) -> StateGraph:
         """Override to define the agent's graph."""
         raise NotImplementedError
+
+    async def _load_peer_context_node(self, state: dict) -> dict:
+        """Hydrate `state.metadata.peer_context` with the latest outputs of
+        peer agents in the same org.
+
+        Reusable across agents — wire it into your graph (typically right
+        after `load_profile`) and the rendered prompts can reference
+        `peer_context.latest_brief`, `peer_context.latest_package`, etc.
+        Reads `current_supabase` and the state's `org_id`; gracefully
+        no-ops in dev mode (returns empty PeerContext) so local runs work
+        without Supabase configured. See packages/agents/core/peer_context.py.
+        """
+        org_id = state.get("org_id") or ""
+        supabase = current_supabase.get()
+        peer = await load_peer_context(org_id, supabase)
+        existing_meta = state.get("metadata") or {}
+        return {
+            "metadata": {
+                **existing_meta,
+                "peer_context": peer.model_dump(mode="json"),
+            }
+        }
 
     def get_approval_request(self, state: dict) -> dict | None:
         """Describe the action that is gated at an interrupt.
