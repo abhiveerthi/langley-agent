@@ -184,9 +184,17 @@ Return ONLY valid JSON."""
 
 
 def get_strategist_tools():
+    # OAuth-backed Analytics API tools live in analytics_tools.py — separated
+    # so it's obvious which tools need YouTube to be connected for the org.
+    # Imported here so callers get a single flat list to bind to the LLM.
+    from packages.agents.strategist.analytics_tools import (
+        get_strategist_analytics_tools,
+    )
     return [
+        # Public Data API — works for any channel by ID, no OAuth needed.
         get_channel_stats,
         get_recent_video_performance,
+        # Niche-level external research (Perplexity).
         search_niche_trends,
         search_competitor_videos,
-    ]
+    ] + get_strategist_analytics_tools()
