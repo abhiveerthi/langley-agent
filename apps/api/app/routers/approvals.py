@@ -1,41 +1,35 @@
 """
 Human-in-the-loop approval endpoints.
 
-Three endpoints:
+Three endpoints, all tenancy-scoped via the Bearer-token auth helper:
 
-  GET  /api/approvals                        — list pending approvals for the
-                                               signed-in user's org
-  POST /api/approvals/{id}/approve           — resume the paused graph; streams
-                                               continuation events as SSE
+  GET  /api/approvals                        — list pending approvals
+                                               scoped to the caller's org
+  POST /api/approvals/{id}/approve           — resume the paused graph;
+                                               streams continuation events
+                                               as SSE
   POST /api/approvals/{id}/reject            — reject with optional feedback;
-                                               the agent's revise branch runs
-                                               and re-pauses at approval_gate
+                                               Brand Manager revises and
+                                               re-pauses at approval_gate
 
-Auth + tenancy come from `Depends(get_current_user)`. Both resume entry points
-wrap the orchestrator's async generator with the same `_with_tool_context`
-helper used by /chat/stream — the resumed graph needs `current_supabase`,
-`current_org_id`, and `current_user_id` set so tools like Publisher's
-`update_video_metadata` can reach the org's OAuth connection.
+All three resolve `(org_id, user_id, supabase)` via `resolve_user` — the
+same helper `/chat/stream` uses — and fall back to "dev" when no token is
+present so local development without auth still works. The two
+StreamingResponses are wrapped in `with_tool_context` so agent tools that
+read ContextVars on resume (YouTube client, etc.) see the right tenant.
 """
 from __future__ import annotations
 
-from typing import AsyncIterator, Optional
-
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from supabase import Client
+from typing import Optional
 
-from app.dependencies import CurrentUser, get_current_user, get_supabase
+from app.auth import resolve_user, with_tool_context
 from app.services.approval_store import get_approval_store
 from app.services.graph_orchestrator import (
     stream_resume_approved,
     stream_resume_rejected,
-)
-from packages.integrations.context import (
-    current_org_id,
-    current_supabase,
-    current_user_id,
 )
 
 router = APIRouter(tags=["approvals"])
@@ -45,48 +39,30 @@ class RejectBody(BaseModel):
     feedback: Optional[str] = None
 
 
-async def _with_tool_context(
-    gen: AsyncIterator[str],
-    *,
-    org_id: str,
-    user_id: str,
-    supabase: Client,
-) -> AsyncIterator[str]:
-    current_org_id.set(org_id)
-    current_user_id.set(user_id)
-    current_supabase.set(supabase)
-    async for event in gen:
-        yield event
-
-
 @router.get("/approvals")
-async def list_approvals(
-    user: CurrentUser = Depends(get_current_user),
-):
+async def list_approvals(request: Request):
+    org_id, _user_id, _supabase = resolve_user(request)
     store = get_approval_store()
-    return await store.list_pending(user.org_id)
+    return await store.list_pending(org_id)
 
 
 @router.post("/approvals/{approval_id}/approve")
-async def approve_action(
-    approval_id: str,
-    user: CurrentUser = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase),
-):
+async def approve_action(approval_id: str, request: Request):
     """Approve the gated action and stream the continuation.
 
-    The graph resumes at the node after the interrupt (e.g. Publisher's
-    `push_metadata`), runs to completion — or pauses again if there's another
-    gate — and streams events the whole way.
+    The graph resumes at the node after the interrupt (e.g. Brand Manager's
+    send_email), runs to completion — or pauses again if there's another gate
+    — and streams events the whole way.
     """
+    org_id, user_id, supabase = resolve_user(request)
     return StreamingResponse(
-        _with_tool_context(
+        with_tool_context(
             stream_resume_approved(
                 approval_id=approval_id,
-                reviewer_user_id=user.id,
+                reviewer_user_id=user_id,
             ),
-            org_id=user.org_id,
-            user_id=user.id,
+            org_id=org_id,
+            user_id=user_id,
             supabase=supabase,
         ),
         media_type="text/event-stream",
@@ -97,26 +73,26 @@ async def approve_action(
 @router.post("/approvals/{approval_id}/reject")
 async def reject_action(
     approval_id: str,
+    request: Request,
     body: RejectBody | None = None,
-    user: CurrentUser = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase),
 ):
     """Reject the draft and stream the continuation.
 
-    The agent's revise branch runs with the user's feedback and then pauses
-    again at the next approval_gate — a new approvals row is created for that
-    gate and emitted on the stream as a `waiting_approval` event.
+    For Brand Manager, a rejection + feedback runs `revise_pitch` and then
+    pauses again at the next approval_gate — a new approvals row is created
+    for that gate and emitted on the stream as a `waiting_approval` event.
     """
     feedback = body.feedback if body else None
+    org_id, user_id, supabase = resolve_user(request)
     return StreamingResponse(
-        _with_tool_context(
+        with_tool_context(
             stream_resume_rejected(
                 approval_id=approval_id,
-                reviewer_user_id=user.id,
+                reviewer_user_id=user_id,
                 feedback=feedback,
             ),
-            org_id=user.org_id,
-            user_id=user.id,
+            org_id=org_id,
+            user_id=user_id,
             supabase=supabase,
         ),
         media_type="text/event-stream",

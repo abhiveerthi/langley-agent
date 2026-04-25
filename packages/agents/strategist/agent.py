@@ -7,8 +7,10 @@ from typing import Literal
 
 from packages.agents.core.base import BaseAgent, BaseAgentState
 from packages.agents.core.profile import OrgProfile, load_profile
+from packages.agents.core.peer_context import _is_real_uuid
 from packages.agents.core.templates import render
 from packages.agents.strategist.tools import get_strategist_tools
+from packages.integrations.context import current_supabase
 
 
 # ── Structured output schema ──────────────────────────────────────────────
@@ -60,14 +62,23 @@ class StrategistAgent(BaseAgent):
         graph = StateGraph(StrategistState)
 
         graph.add_node("load_profile", self._load_profile_node)
+        # peer_context: latest brief / package / etc. for this org. Even the
+        # Strategist reads it so a repeat brief can build on what was said
+        # last time rather than starting cold.
+        graph.add_node("load_peer_context", self._load_peer_context_node)
         graph.add_node("classify_intent", self._classify_intent_node)
         graph.add_node("agent", self._agent_node)
         graph.add_node("tools", self.tool_node)
         graph.add_node("compose_brief", self._compose_brief_node)
+        # persist_brief writes the just-composed WeeklyBrief into Postgres so
+        # peer agents (Brand Manager, Publisher, CM) can hydrate it on their
+        # next run. No-op in dev mode (no Supabase) — see implementation.
+        graph.add_node("persist_brief", self._persist_brief_node)
         graph.add_node("respond", self._respond_node)
 
         graph.add_edge(START, "load_profile")
-        graph.add_edge("load_profile", "classify_intent")
+        graph.add_edge("load_profile", "load_peer_context")
+        graph.add_edge("load_peer_context", "classify_intent")
         graph.add_edge("classify_intent", "agent")
 
         # The ReAct loop exits three ways:
@@ -84,7 +95,8 @@ class StrategistAgent(BaseAgent):
             },
         )
         graph.add_edge("tools", "agent")
-        graph.add_edge("compose_brief", "respond")
+        graph.add_edge("compose_brief", "persist_brief")
+        graph.add_edge("persist_brief", "respond")
         graph.add_edge("respond", END)
 
         return graph
@@ -95,6 +107,9 @@ class StrategistAgent(BaseAgent):
         if not raw:
             return load_profile(state.get("org_id"))
         return OrgProfile.model_validate(raw)
+
+    def _peer_context(self, state: StrategistState) -> dict:
+        return (state.get("metadata") or {}).get("peer_context") or {}
 
     def _last_user_text(self, state: StrategistState) -> str:
         last_human = next(
@@ -135,6 +150,7 @@ class StrategistAgent(BaseAgent):
             "system.j2",
             profile=profile,
             intent=state.get("intent") or "research",
+            peer_context=self._peer_context(state),
         )
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
         response = await self.llm_with_tools.ainvoke(messages)
@@ -175,12 +191,50 @@ class StrategistAgent(BaseAgent):
         )
 
         structured_llm = self.llm.with_structured_output(WeeklyBrief)
-        prompt = render("strategist", "compose_brief.j2", profile=profile)
+        prompt = render(
+            "strategist",
+            "compose_brief.j2",
+            profile=profile,
+            peer_context=self._peer_context(state),
+        )
         brief: WeeklyBrief = await structured_llm.ainvoke([
             SystemMessage(content=prompt),
             HumanMessage(content=context),
         ])
         return {"brief": brief.model_dump(mode="json")}
+
+    # ── Node: persist the brief so peers can read it ──────────────────────
+    async def _persist_brief_node(self, state: StrategistState):
+        """Write the just-composed brief to strategist_briefs.
+
+        No-op when:
+          - Supabase isn't configured (local dev)
+          - org_id isn't a real UUID (dev fallback)
+          - the brief field is empty (defensive — should never happen here
+            because this node only runs after compose_brief)
+        Errors are swallowed: a failed persistence shouldn't break the user-
+        facing reply. Logs are the trail; the orchestrator already streams
+        the brief object directly to the frontend regardless.
+        """
+        brief = state.get("brief")
+        org_id = state.get("org_id") or ""
+        thread_id = state.get("thread_id") or ""
+        supabase = current_supabase.get()
+        if not brief or supabase is None or not _is_real_uuid(org_id):
+            return {}
+
+        payload = {
+            "org_id": org_id,
+            "thread_id": thread_id if _is_real_uuid(thread_id) else None,
+            "headline": brief.get("headline", ""),
+            "ideas": brief.get("ideas", []),
+        }
+        try:
+            supabase.table("strategist_briefs").insert(payload).execute()
+        except Exception:
+            # Persistence is best-effort. Don't fail the run on it.
+            pass
+        return {}
 
     # ── Node: terminal respond ────────────────────────────────────────────
     async def _respond_node(self, state: StrategistState):
