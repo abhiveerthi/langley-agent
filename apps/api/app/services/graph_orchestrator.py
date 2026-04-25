@@ -19,14 +19,23 @@ at when an interrupt fires. If it's non-empty, the graph is paused; we pull
 the agent's approval-request shape off the state, persist an approvals row,
 and emit a `waiting_approval` SSE event carrying the approval_id + payload.
 
-Checkpointer is a module-level MemorySaver singleton so paused state survives
-across requests within one uvicorn worker. Production will upgrade to
-AsyncPostgresSaver (tracked as part of backlog item B — tenancy).
+## Checkpointer lifecycle
+
+- **Production** (FastAPI lifespan calls `init_checkpointer()` at startup):
+  AsyncPostgresSaver bound to `DATABASE_URL`. Paused state survives API
+  restarts because LangGraph's checkpoint tables are persistent.
+- **Dev** (no `DATABASE_URL`, or Postgres unreachable, or no lifespan):
+  MemorySaver fallback. Paused state survives across requests within one
+  uvicorn worker, lost on restart. Acceptable for local iteration.
+
+Tests don't go through the FastAPI lifespan, so they hit the lazy
+`get_checkpointer()` path which returns MemorySaver — no test setup needed.
 """
 from __future__ import annotations
 
 import json
-from typing import AsyncIterator
+import os
+from typing import Any, AsyncIterator
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
@@ -38,10 +47,92 @@ from packages.integrations.context import current_supabase
 from app.services.approval_store import get_approval_store
 
 
-# ── Shared checkpointer ───────────────────────────────────────────────────
-# Module-level so every request in the same process hits the same store.
-# Dev-only; wire AsyncPostgresSaver in for production (backlog: B tenancy).
-_checkpointer = MemorySaver()
+# ── Shared checkpointer (lifespan-managed) ────────────────────────────────
+# `_checkpointer` is the singleton used by every compile call. Started as
+# None; populated by `init_checkpointer()` (FastAPI lifespan) or the lazy
+# fallback in `get_checkpointer()` (test paths).
+#
+# `_checkpointer_cm` holds the AsyncPostgresSaver's async context manager so
+# we can call __aexit__ on shutdown. None for the MemorySaver fallback.
+_checkpointer: Any = None
+_checkpointer_cm: Any = None
+
+
+async def init_checkpointer() -> None:
+    """Initialise the shared checkpointer for the API's lifetime.
+
+    Called from FastAPI's lifespan handler. Idempotent. Picks
+    AsyncPostgresSaver when `DATABASE_URL` is set and Postgres is reachable,
+    falls back to MemorySaver otherwise so `pnpm dev` doesn't require a
+    running database.
+    """
+    global _checkpointer, _checkpointer_cm
+    if _checkpointer is not None:
+        return  # already initialised
+
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        _checkpointer = MemorySaver()
+        print("[checkpointer] DATABASE_URL not set; using MemorySaver", flush=True)
+        return
+
+    try:
+        # `from_conn_string` is an async context manager that yields a
+        # bound AsyncPostgresSaver. We `__aenter__` manually so the
+        # returned saver lives for the app's lifetime; `close_checkpointer`
+        # runs the matching `__aexit__` on shutdown.
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+        _checkpointer_cm = AsyncPostgresSaver.from_conn_string(db_url)
+        _checkpointer = await _checkpointer_cm.__aenter__()
+        # `setup()` runs CREATE TABLE IF NOT EXISTS for LangGraph's internal
+        # checkpoint tables (`checkpoints`, `checkpoint_blobs`,
+        # `checkpoint_writes`). Idempotent.
+        await _checkpointer.setup()
+        print("[checkpointer] AsyncPostgresSaver bound to DATABASE_URL", flush=True)
+    except Exception as e:
+        # Production should fail loud here — silent fallback would mean
+        # paused approvals quietly stop surviving restarts.
+        env = os.environ.get("ENVIRONMENT", "").lower()
+        if env == "production":
+            raise
+
+        print(
+            f"[checkpointer] AsyncPostgresSaver unavailable ({e}); "
+            "falling back to MemorySaver",
+            flush=True,
+        )
+        _checkpointer_cm = None
+        _checkpointer = MemorySaver()
+
+
+async def close_checkpointer() -> None:
+    """Cleanly close the AsyncPostgresSaver's connection on shutdown.
+
+    Called from FastAPI's lifespan handler. No-op for MemorySaver paths.
+    """
+    global _checkpointer, _checkpointer_cm
+    if _checkpointer_cm is not None:
+        try:
+            await _checkpointer_cm.__aexit__(None, None, None)
+        except Exception as e:
+            print(f"[checkpointer] close failed: {e!r}", flush=True)
+    _checkpointer_cm = None
+    _checkpointer = None
+
+
+def get_checkpointer():
+    """Return the shared checkpointer.
+
+    Lazy-initialises a MemorySaver if `init_checkpointer()` hasn't run
+    (test paths, ad-hoc scripts). Production paths always go through the
+    FastAPI lifespan which sets up AsyncPostgresSaver before any request
+    can call this.
+    """
+    global _checkpointer
+    if _checkpointer is None:
+        _checkpointer = MemorySaver()
+    return _checkpointer
 
 
 def _sse(event_type: str, data: dict) -> str:
@@ -87,9 +178,9 @@ def _emit_message_events(messages: list) -> list[str]:
 
 
 async def _compile_agent(agent: BaseAgent):
-    """Compile an agent's graph against the shared in-memory checkpointer."""
+    """Compile an agent's graph against the shared checkpointer."""
     return agent.graph.compile(
-        checkpointer=_checkpointer,
+        checkpointer=get_checkpointer(),
         interrupt_before=agent.interrupt_before_nodes,
     )
 

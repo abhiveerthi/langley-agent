@@ -1,18 +1,33 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.routers import chat, stream, agents, tasks, projects, runs, approvals, notifications, dashboard, integrations, publisher
+from app.services.graph_orchestrator import close_checkpointer, init_checkpointer
 
 settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """App lifespan — wires the LangGraph checkpointer to Postgres on startup
+    and tears it down on shutdown. Without this, the orchestrator falls back
+    to an in-memory checkpointer that loses paused approvals on restart."""
+    await init_checkpointer()
+    yield
+    await close_checkpointer()
+
 
 app = FastAPI(
     title="AgentOS API",
     version="0.1.0",
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
