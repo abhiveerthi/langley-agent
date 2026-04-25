@@ -1,6 +1,25 @@
-from langchain_core.tools import tool
-from packages.agents.core.clients import youtube_api_get
+"""
+Community Manager tools.
 
+Two read-only Data-API tools (`get_recent_comments`, `lookup_channel`) plus
+one OAuth-backed write tool (`reply_to_comment`) — the write tool calls
+YouTube on behalf of the connected creator using their per-org refresh
+token, gated by the agent's approval_gate at the graph level so a draft
+must be approved before this tool ever fires.
+"""
+from __future__ import annotations
+
+import os
+
+import httpx
+from langchain_core.tools import tool
+
+from packages.agents.core.clients import youtube_api_get
+from packages.integrations.context import current_org_id, current_supabase
+from packages.integrations.youtube.client import get_fresh_access_token
+
+
+# ── Read-only tools (Data API + API key) ──────────────────────────────────
 
 @tool
 async def get_recent_comments(
@@ -48,12 +67,17 @@ async def get_recent_comments(
                     output += "(no comments)\n\n"
                     continue
                 for c in comments:
-                    s = c["snippet"]["topLevelComment"]["snippet"]
+                    top = c["snippet"]["topLevelComment"]
+                    s = top["snippet"]
+                    comment_id = top["id"]
                     author = s.get("authorDisplayName", "unknown")
                     author_channel = s.get("authorChannelId", {}).get("value", "")
                     likes = s.get("likeCount", 0)
                     text = s["textDisplay"][:280]
-                    output += f"- **{author}** ({author_channel}) [{likes}👍]: {text}\n"
+                    output += (
+                        f"- [{comment_id}] **{author}** ({author_channel}) "
+                        f"[{likes}👍]: {text}\n"
+                    )
                 output += "\n"
             except Exception as e:
                 output += f"(error fetching comments: {e})\n\n"
@@ -103,6 +127,71 @@ async def lookup_channel(handle_or_id: str) -> str:
         return f"Error: {e}"
     except Exception as e:
         return f"Error fetching channel: {e}"
+
+
+# ── OAuth-backed write tool ───────────────────────────────────────────────
+
+async def reply_to_comment(parent_comment_id: str, text: str) -> str:
+    """Post a reply to a top-level comment as the connected creator.
+
+    NOTE: Not exposed to the LLM as a `@tool` — the agent calls this directly
+    from `_send_reply_node` only AFTER the approval_gate has been cleared.
+    The graph-level interrupt is what protects writes; the LLM never has
+    access to this function as a tool.
+
+    Uses the per-org OAuth refresh token from the `integrations` table.
+    Required scope: `https://www.googleapis.com/auth/youtube.force-ssl`
+    (already requested in packages/integrations/youtube/oauth.py).
+
+    Args:
+        parent_comment_id: The top-level comment's YouTube ID.
+        text: The reply body. Plain text; YouTube auto-renders.
+
+    Returns a short confirmation string suitable for the chat reply, or an
+    error message if the call failed (token issues, missing scope, etc.).
+    """
+    org_id = current_org_id.get()
+    supabase = current_supabase.get()
+    if not org_id or supabase is None:
+        return "Cannot post reply: no org context (running without auth)."
+
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        return "Cannot post reply: GOOGLE_CLIENT_ID/SECRET not configured."
+
+    try:
+        access_token = await get_fresh_access_token(
+            supabase, org_id, client_id, client_secret
+        )
+    except Exception as e:
+        return f"Cannot post reply: YouTube OAuth not available ({e})."
+
+    payload = {
+        "snippet": {
+            "parentId": parent_comment_id,
+            "textOriginal": text,
+        }
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://www.googleapis.com/youtube/v3/comments",
+                params={"part": "snippet"},
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            posted_id = data.get("id", "(unknown)")
+            return f"Reply posted (comment id: {posted_id})."
+    except httpx.HTTPStatusError as e:
+        return f"YouTube rejected the reply ({e.response.status_code}): {e.response.text[:200]}"
+    except Exception as e:
+        return f"Error posting reply: {e}"
 
 
 def get_community_manager_tools():
