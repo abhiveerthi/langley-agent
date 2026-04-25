@@ -1,59 +1,9 @@
 slug: gaming
 display_name: Gaming / Esports
 audience_descriptor: gaming and esports audience
-default_voice: hype, casual, knowledgeable, slightly irreverent
-
-research_categories:
-  - slug: aaa-releases
-    label: AAA Releases
-    query: >-
-      What major AAA game releases, delays, leaks, or update announcements
-      happened in the last 24-48 hours? Include studio statements, review
-      embargo lifts, and significant patch notes.
-  - slug: esports
-    label: Esports
-    query: >-
-      What are the top esports stories from the last 24-48 hours? Include
-      tournament results, roster moves, prize pool announcements, and major
-      organizational news across League, Valorant, CS, Dota, and FGC.
-  - slug: indie-spotlight
-    label: Indie Spotlight
-    query: >-
-      What indie games are gaining momentum in the last 24-48 hours? Include
-      Steam launch performance, viral moments on TikTok/Twitter, demo standouts,
-      and Kickstarter/early access wins.
-  - slug: hardware
-    label: Hardware & Tech
-    query: >-
-      What gaming hardware news happened in the last 24-48 hours? Include GPU
-      launches, console updates, peripheral releases, and benchmark leaks.
-
-report_sections:
-  - Key Storylines
-  - Content Opportunities
-  - AAA Updates
-  - Esports Pulse
-  - Indie Watch
-  - Hardware News
-  - Audience Sentiment
-  - Strategic Recommendations
-
-intel_brief_sections:
-  - Channel Pulse
-  - Top Performing Content
-  - Market Signals
-  - Content Battle Plan
 
 lead_categories:
   - Gaming Peripherals
   - Energy Drinks
   - PC Components
   - Streaming Gear
-
-trends_query_focus: >-
-  gaming, esports, streaming, and gaming-creator content on YouTube, Twitch,
-  TikTok, and X
-
-content_idea_format_hint: >-
-  Hook-first, meme-aware, react-friendly. Educational explainers and "wait,
-  what just happened" moment-capture videos work best.
