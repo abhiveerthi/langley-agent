@@ -1,18 +1,20 @@
 import Link from "next/link";
-import { Plus, Radar, Lightbulb, Rocket, ArrowRight, CheckCircle2, Clock, MessageSquare } from "lucide-react";
+import { Plus, Radar, Lightbulb, Rocket, Megaphone, ArrowRight, CheckCircle2, Clock, MessageSquare } from "lucide-react";
 import { agents, botConnections } from "@/lib/mock-data";
 import { cn } from "@/lib/utils";
 
 const agentColors: Record<string, { bg: string; icon: string; dot: string; border: string }> = {
-  research: { bg: "bg-indigo-500/10", icon: "text-indigo-400", dot: "bg-indigo-500", border: "border-indigo-500/20" },
-  intel:    { bg: "bg-violet-500/10", icon: "text-violet-400", dot: "bg-violet-500", border: "border-violet-500/20" },
-  comms:    { bg: "bg-emerald-500/10", icon: "text-emerald-400", dot: "bg-emerald-500", border: "border-emerald-500/20" },
+  research:  { bg: "bg-indigo-500/10", icon: "text-indigo-400", dot: "bg-indigo-500", border: "border-indigo-500/20" },
+  intel:     { bg: "bg-violet-500/10", icon: "text-violet-400", dot: "bg-violet-500", border: "border-violet-500/20" },
+  comms:     { bg: "bg-emerald-500/10", icon: "text-emerald-400", dot: "bg-emerald-500", border: "border-emerald-500/20" },
+  publisher: { bg: "bg-sky-500/10", icon: "text-sky-400", dot: "bg-sky-500", border: "border-sky-500/20" },
 };
 
 const agentIcons: Record<string, React.ElementType> = {
-  research: Radar,
-  intel:    Lightbulb,
-  comms:    Rocket,
+  research:  Radar,
+  intel:     Lightbulb,
+  comms:     Rocket,
+  publisher: Megaphone,
 };
 
 const activityLog = [

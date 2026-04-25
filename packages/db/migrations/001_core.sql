@@ -209,7 +209,7 @@ create table agent_memory (
 -- ── Indexes ──
 create index idx_threads_org on threads(org_id, created_at desc);
 create index idx_messages_thread on messages(thread_id, created_at);
-create index idx_agent_runs_org on agent_runs(org_id, status, created_at desc);
+create index idx_agent_runs_org on agent_runs(org_id, status, started_at desc);
 create index idx_tasks_org on tasks(org_id, status, created_at desc);
 create index idx_approvals_org on approvals(org_id, status, created_at desc);
 create index idx_notifications_user on notifications(user_id, read, created_at desc);

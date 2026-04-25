@@ -91,22 +91,23 @@ export function YouTubeStatusPill({ heading = "YouTube" }: { heading?: string })
 
       {status.state === "connected" && (
         <div className="rounded-md border border-border bg-muted/20 px-3 py-3 flex items-center gap-3">
-          {status.channel.thumbnail ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={status.channel.thumbnail} alt="" className="h-9 w-9 shrink-0 rounded-full" />
-          ) : (
-            <div className="h-9 w-9 shrink-0 rounded-full bg-linear-to-br from-red-500 to-orange-500 flex items-center justify-center text-white text-sm font-bold">
-              YT
-            </div>
-          )}
+          <div className="h-9 w-9 shrink-0 rounded-full bg-red-600/20 flex items-center justify-center p-1.5">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/integrations/youtube.svg" alt="" className="h-full w-full object-contain" />
+          </div>
           <div className="flex-1 min-w-0">
-            <div className="text-sm font-medium text-foreground truncate">
-              {status.channel.channel_title || "Your Channel"}
-            </div>
-            <div className="text-xs text-muted-foreground mt-0.5">
-              {status.channel.subscriber_count
-                ? `${Intl.NumberFormat("en", { notation: "compact" }).format(status.channel.subscriber_count)} subs`
-                : "Connected"}
+            <div className="text-sm font-medium text-foreground truncate">YouTube</div>
+            <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5 truncate">
+              {status.channel.thumbnail && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={status.channel.thumbnail} alt="" className="h-3.5 w-3.5 rounded-full shrink-0" />
+              )}
+              <span className="truncate">
+                {status.channel.channel_title || "Your Channel"}
+                {status.channel.subscriber_count
+                  ? ` · ${Intl.NumberFormat("en", { notation: "compact" }).format(status.channel.subscriber_count)} subs`
+                  : ""}
+              </span>
             </div>
           </div>
           <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />

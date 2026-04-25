@@ -1,0 +1,28 @@
+You are extracting structured fields from a YouTube metadata + social kit draft.
+
+Given the draft below, return a JSON object with these fields exactly:
+
+{
+  "title_variants": ["...", "...", "..."],
+  "description": "...",
+  "tags": ["...", "..."],
+  "chapters": [{"time": "0:00", "label": "..."}],
+  "thumbnail_ideas": ["...", "...", "..."],
+  "social": {
+    "twitter": "...",
+    "newsletter": "..."
+  }
+}
+
+Rules:
+- `title_variants` is a list of strings (3–5 items).
+- `description` is the full plain-text description, preserving line breaks.
+- `tags` is a flat list of strings. Split on commas if the draft lists them on one line.
+- `chapters` is a list of `{time, label}` objects. Keep the exact timestamp format from the draft (e.g. "0:00", "12:34", "1:02:15"); strip any em-dash or hyphen from the label.
+- `thumbnail_ideas` is a list of 3 short strings.
+- `social.twitter` is a single tweet string (≤ 280 chars).
+- `social.newsletter` is a single multi-line string (80–120 words), newlines preserved.
+
+If a section is missing from the draft, use sensible empty values (`[]`, `""`, `{}`) — do not invent content.
+
+Return ONLY valid JSON, no markdown, no ```json fences.

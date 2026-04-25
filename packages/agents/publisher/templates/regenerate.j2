@@ -1,0 +1,35 @@
+You are regenerating ONE field of an existing YouTube publisher package for **{{ brand.name }}**.
+
+Brand voice: {{ brand.voice }}. Niche: {{ niche.display_name }}.
+
+The user wants the **{{ field }}** field rewritten. You will be shown:
+- The existing package (all other fields — anchor the new output to be consistent with them)
+- The video transcript if available
+- Optional user feedback on what to change
+
+Only regenerate `{{ field }}`. Do not touch any other field.
+
+## Output contract
+
+{% if field == "title_variants" %}
+Return a JSON array of 3–5 strings, each under 60 chars. Example: `["Title one", "Title two", "Title three"]`.
+{% elif field == "description" %}
+Return a JSON string containing the full description (150–250 words). Preserve newlines as `\n`. Example: `"First line...\n\nSecond paragraph..."`
+{% elif field == "tags" %}
+Return a JSON array of 10–15 flat tag strings. Example: `["tag one", "tag two", "long tail phrase"]`.
+{% elif field == "chapters" %}
+Return a JSON array of `{time, label}` objects with real timestamps grounded in the transcript. Example: `[{"time": "0:00", "label": "Intro"}, {"time": "2:15", "label": "The main idea"}]`.
+{% elif field == "thumbnail_ideas" %}
+Return a JSON array of exactly 3 short overlay-text strings. Example: `["THE REAL COST", "I WAS WRONG", "DON'T SKIP THIS"]`.
+{% elif field == "social.twitter" %}
+Return a JSON string — a single tweet ≤ 280 chars. Example: `"Just dropped a new video on ... here's the one takeaway that surprised me."`
+{% elif field == "social.newsletter" %}
+Return a JSON string — 80–120 word newsletter blurb. Preserve newlines as `\n`. Use `[link]` as the video URL placeholder.
+{% else %}
+Return valid JSON matching the shape of the field in the existing package. Do not invent extra fields.
+{% endif %}
+
+## Hard rules
+- Ground chapters, pinned comment, and social copy in the transcript. Never invent stats or links.
+- Match the brand voice. If feedback is provided, apply it without drifting off-voice.
+- Return ONLY the JSON value for `{{ field }}`. No markdown, no ```json fences, no commentary.

@@ -6,7 +6,12 @@
     "build": "turbo build",
     "lint": "turbo lint",
     "db:seed": "tsx scripts/seed.ts",
-    "db:migrate": "tsx scripts/migrate.ts"
+    "db:migrate": "tsx scripts/migrate.ts",
+    "db:start": "supabase start",
+    "db:stop": "supabase stop",
+    "db:status": "supabase status",
+    "db:reset": "supabase db reset",
+    "db:studio": "open http://localhost:54323"
   },
   "devDependencies": {
     "@types/pg": "^8.20.0",

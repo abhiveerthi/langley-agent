@@ -33,6 +33,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from packages.agents.core.base import BaseAgent
 from packages.agents.registry import get_agent
+from packages.integrations.context import current_supabase
 
 from app.services.approval_store import get_approval_store
 
@@ -93,6 +94,32 @@ async def _compile_agent(agent: BaseAgent):
     )
 
 
+async def _ensure_thread_row(*, org_id: str, thread_id: str, agent_slug: str) -> None:
+    """Idempotently upsert a `threads` row so the approvals FK is satisfied.
+
+    Runs via `current_supabase` (set on the request-scoped ContextVar). If the
+    context isn't set (e.g. in dev without Supabase), quietly no-ops — the FK
+    won't blow up because there's no real DB behind the in-memory store.
+    """
+    supabase = current_supabase.get()
+    if supabase is None or not org_id or org_id == "dev":
+        return
+    try:
+        supabase.table("threads").upsert(
+            {
+                "id": thread_id,
+                "org_id": org_id,
+                "title": f"{agent_slug} approval gate",
+                "status": "active",
+            },
+            on_conflict="id",
+        ).execute()
+    except Exception as e:
+        # Non-fatal — if the upsert fails, store.create will raise its own FK
+        # error and the real diagnostic bubbles up from there.
+        print(f"[orchestrator] _ensure_thread_row failed: {e!r}", flush=True)
+
+
 async def _stream_until_done_or_pause(
     app,
     input_data: dict | None,
@@ -108,8 +135,10 @@ async def _stream_until_done_or_pause(
     a `waiting_approval` event with the approval payload. Yields `done` at the
     end if the graph completed without pausing.
     """
+    visited_nodes: list[str] = []
     async for chunk in app.astream(input_data, config=config, stream_mode="updates"):
         for _node, node_data in chunk.items():
+            visited_nodes.append(_node)
             if not node_data:
                 continue
             for event in _emit_message_events(node_data.get("messages", [])):
@@ -119,6 +148,12 @@ async def _stream_until_done_or_pause(
     # an interrupt. state.next is a tuple of node names the graph is waiting
     # to execute — non-empty means "paused here, waiting for a resume".
     snapshot = await app.aget_state(config)
+    print(
+        f"[orchestrator] agent={agent.slug} thread={thread_id} "
+        f"visited={visited_nodes} snapshot.next={snapshot.next} "
+        f"interrupt_before={agent.interrupt_before_nodes}",
+        flush=True,
+    )
     if not snapshot.next:
         yield _sse("done", {})
         return
@@ -130,15 +165,28 @@ async def _stream_until_done_or_pause(
         "action_payload": {},
         "preview": "An agent action is waiting for your review.",
     }
+
+    # The approvals table FKs thread_id -> threads(id). LangGraph manages its
+    # own thread_id via the checkpointer, but nothing has inserted a matching
+    # row in the legacy threads table — so insert one now (idempotent upsert).
+    # Keeps the FK happy and gives us a future hook for linking LangGraph
+    # threads to the chat-history table.
+    await _ensure_thread_row(org_id=org_id, thread_id=thread_id, agent_slug=agent.slug)
+
     store = get_approval_store()
-    row = await store.create(
-        org_id=org_id,
-        thread_id=thread_id,
-        requested_by_agent=agent.slug,
-        action_type=approval_req["action_type"],
-        action_payload=approval_req["action_payload"],
-        preview=approval_req["preview"],
-    )
+    try:
+        row = await store.create(
+            org_id=org_id,
+            thread_id=thread_id,
+            requested_by_agent=agent.slug,
+            action_type=approval_req["action_type"],
+            action_payload=approval_req["action_payload"],
+            preview=approval_req["preview"],
+        )
+        print(f"[orchestrator] approval row created id={row.get('id')}", flush=True)
+    except Exception as e:
+        print(f"[orchestrator] approval store.create FAILED: {e!r}", flush=True)
+        raise
     yield _sse("waiting_approval", {
         "approval_id": row["id"],
         "thread_id": thread_id,
@@ -158,12 +206,18 @@ async def stream_new_run(
     thread_id: str,
     org_id: str,
     user_id: str,
+    extra_state: dict | None = None,
 ) -> AsyncIterator[str]:
-    """Start a fresh agent run and stream events until done or pause."""
+    """Start a fresh agent run and stream events until done or pause.
+
+    `extra_state` lets callers pre-populate fields on the agent's state dict
+    (e.g. intent, video_id, package_id for one-click Publisher actions) so
+    the agent can skip LLM-based intent parsing.
+    """
     agent = get_agent(agent_slug)
     app = await _compile_agent(agent)
 
-    input_data = {
+    input_data: dict = {
         "messages": [HumanMessage(content=message)],
         "org_id": org_id,
         "user_id": user_id,
@@ -171,6 +225,8 @@ async def stream_new_run(
         "task_id": None,
         "metadata": {},
     }
+    if extra_state:
+        input_data.update(extra_state)
     config = {"configurable": {"thread_id": thread_id}}
 
     try:

@@ -33,6 +33,31 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     youtube_oauth_redirect_uri: str = "http://localhost:3000/auth/youtube/callback"
 
+    # X (Twitter) OAuth 2.0 with PKCE.
+    # client_secret is optional — leave it blank for Public clients (PKCE only).
+    twitter_client_id: str = ""
+    twitter_client_secret: str = ""
+    twitter_oauth_redirect_uri: str = "http://localhost:3000/auth/twitter/callback"
+
+    # Slack OAuth v2 (workspace install). client_secret is required.
+    # Note: Slack requires https for redirect URIs once "Public Distribution"
+    # is enabled. With Public Distribution off (Development app only), http
+    # is accepted again.
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+    slack_oauth_redirect_uri: str = "http://localhost:3000/auth/slack/callback"
+
+    # Dropbox OAuth 2.0. Uses token_access_type=offline so we get a refresh
+    # token alongside the short-lived (4h) access token.
+    dropbox_client_id: str = ""
+    dropbox_client_secret: str = ""
+    dropbox_oauth_redirect_uri: str = "http://localhost:3000/auth/dropbox/callback"
+
+    # monday.com OAuth 2.0. Tokens are long-lived (no expiry, no refresh).
+    monday_client_id: str = ""
+    monday_client_secret: str = ""
+    monday_oauth_redirect_uri: str = "http://localhost:3000/auth/monday/callback"
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
