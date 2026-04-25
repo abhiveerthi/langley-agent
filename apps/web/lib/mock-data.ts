@@ -81,14 +81,11 @@ export const brandDeals = [
 
 // Integrations
 export const integrations = [
-  { id: "dropbox", name: "Dropbox", description: "Sync raw footage and exports", category: "Storage", connected: true, lastSync: "2 min ago", icon: "dropbox" },
-  { id: "gdrive", name: "Google Drive", description: "Access and store project files", category: "Storage", connected: true, lastSync: "5 min ago", icon: "drive" },
-  { id: "gmail", name: "Gmail", description: "Manage brand deal emails", category: "Communication", connected: true, lastSync: "Just now", icon: "gmail" },
-  { id: "youtube", name: "YouTube Studio", description: "Analytics and publishing", category: "Platform", connected: true, lastSync: "1 min ago", icon: "youtube" },
-  { id: "notion", name: "Notion", description: "Content calendar and planning", category: "Productivity", connected: false, lastSync: null, icon: "notion" },
-  { id: "slack", name: "Slack", description: "Team notifications and alerts", category: "Communication", connected: false, lastSync: null, icon: "slack" },
-  { id: "frameio", name: "Frame.io", description: "Video review and collaboration", category: "Production", connected: false, lastSync: null, icon: "frameio" },
-  { id: "stripe", name: "Stripe", description: "Sponsorship invoicing", category: "Finance", connected: false, lastSync: null, icon: "stripe" },
+  { id: "youtube", name: "YouTube Studio", description: "Read uploads, push titles and metadata", category: "Platform", connected: false, lastSync: null, icon: "youtube" },
+  { id: "twitter", name: "X (Twitter)", description: "Auto-post tweet drafts from Publisher", category: "Platform", connected: false, lastSync: null, icon: "twitter" },
+  { id: "slack", name: "Slack", description: "Team notifications and approval pings", category: "Communication", connected: false, lastSync: null, icon: "slack" },
+  { id: "dropbox", name: "Dropbox", description: "Sync raw footage and exports", category: "Storage", connected: false, lastSync: null, icon: "dropbox" },
+  { id: "monday", name: "Monday.com", description: "Sync content calendar and tasks", category: "Productivity", connected: false, lastSync: null, icon: "monday" },
 ]
 
 // Revenue chart data (12 months)

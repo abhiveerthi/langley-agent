@@ -36,13 +36,14 @@ from packages.agents.publisher.tools import (
     get_video_transcript,
     get_video_comments,
     update_video_metadata,
+    post_tweet,
     get_publisher_tools,
 )
 from packages.integrations.context import current_supabase
 
 
 # Valid intents — treat anything else as "general".
-VALID_INTENTS = {"create_package", "regenerate_field", "push_metadata", "general"}
+VALID_INTENTS = {"create_package", "regenerate_field", "push_metadata", "push_x", "general"}
 
 
 class PublisherState(BaseAgentState):
@@ -80,6 +81,11 @@ class PublisherState(BaseAgentState):
     feedback: str | None
     push_result: str | None
 
+    # Push-X (Twitter) flow
+    proposed_tweet: str | None
+    x_push_result: str | None
+    x_tweet_id: str | None
+
     # Degraded-state marker, surfaced into publisher_packages.warning
     warning: str | None
 
@@ -89,8 +95,8 @@ class PublisherAgent(BaseAgent):
     name = "Publisher"
     description = (
         "Packages YouTube videos end-to-end: titles, descriptions, tags, chapters, "
-        "pinned comment, thumbnail ideas, and social drafts (Twitter + newsletter). "
-        "Pushes to YouTube via an approval-gated metadata update."
+        "thumbnail ideas, and social drafts (Twitter + newsletter). Pushes to "
+        "YouTube and posts to X — both gated behind explicit approval."
     )
     model = "claude-sonnet-4-6"
 
@@ -100,23 +106,36 @@ class PublisherAgent(BaseAgent):
 
     def get_approval_request(self, state: dict) -> dict | None:
         """Approval card payload surfaced when `approval_gate` pauses the graph."""
-        if state.get("intent") != "push_metadata":
-            return None
+        intent = state.get("intent")
         title = state.get("video_title") or state.get("video_id") or "video"
-        return {
-            "action_type": "youtube_metadata_update",
-            "action_payload": {
-                "package_id": state.get("package_id"),
-                "video_id": state.get("video_id"),
-                "proposed_title": state.get("proposed_title"),
-                "proposed_description": state.get("proposed_description"),
-                "proposed_tags": state.get("proposed_tags") or [],
-                "current_title": state.get("current_title"),
-                "current_description": state.get("current_description"),
-                "current_tags": state.get("current_tags") or [],
-            },
-            "preview": f"Push metadata to YouTube: {title}"[:500],
-        }
+        if intent == "push_metadata":
+            return {
+                "action_type": "youtube_metadata_update",
+                "action_payload": {
+                    "package_id": state.get("package_id"),
+                    "video_id": state.get("video_id"),
+                    "proposed_title": state.get("proposed_title"),
+                    "proposed_description": state.get("proposed_description"),
+                    "proposed_tags": state.get("proposed_tags") or [],
+                    "current_title": state.get("current_title"),
+                    "current_description": state.get("current_description"),
+                    "current_tags": state.get("current_tags") or [],
+                },
+                "preview": f"Push metadata to YouTube: {title}"[:500],
+            }
+        if intent == "push_x":
+            tweet = state.get("proposed_tweet") or ""
+            return {
+                "action_type": "x_post",
+                "action_payload": {
+                    "package_id": state.get("package_id"),
+                    "video_id": state.get("video_id"),
+                    "proposed_tweet": tweet,
+                    "tweet_char_count": len(tweet),
+                },
+                "preview": f"Post to X: {tweet[:80]}…" if len(tweet) > 80 else f"Post to X: {tweet}",
+            }
+        return None
 
     def __init__(self):
         self.tools = get_publisher_tools()
@@ -151,6 +170,12 @@ class PublisherAgent(BaseAgent):
         graph.add_node("mark_pushed", self._mark_pushed_node)
         graph.add_node("revise_metadata", self._revise_metadata_node)
 
+        # push_x branch (X / Twitter post). Reuses approval_gate.
+        graph.add_node("prepare_x_push", self._prepare_x_push_node)
+        graph.add_node("post_to_x", self._post_to_x_node)
+        graph.add_node("mark_x_pushed", self._mark_x_pushed_node)
+        graph.add_node("revise_tweet", self._revise_tweet_node)
+
         # general branch (ReAct)
         graph.add_node("react_agent", self._react_agent_node)
         graph.add_node("react_tools", self.tool_node)
@@ -168,6 +193,7 @@ class PublisherAgent(BaseAgent):
                 "create_package": "fetch_video_context",
                 "regenerate_field": "load_package",
                 "push_metadata": "load_package",
+                "push_x": "load_package",
                 "general": "react_agent",
             },
         )
@@ -178,13 +204,14 @@ class PublisherAgent(BaseAgent):
         graph.add_edge("extract_structured", "persist_package")
         graph.add_edge("persist_package", "respond")
 
-        # load_package fan-out: regen vs push
+        # load_package fan-out: regen vs push (YouTube) vs push (X)
         graph.add_conditional_edges(
             "load_package",
             self._route_after_load,
             {
                 "regenerate_field": "regenerate_field",
                 "push_metadata": "prepare_push",
+                "push_x": "prepare_x_push",
             },
         )
 
@@ -192,21 +219,26 @@ class PublisherAgent(BaseAgent):
         graph.add_edge("regenerate_field", "persist_regen")
         graph.add_edge("persist_regen", "respond")
 
-        # push_metadata: prepare → [INTERRUPT: approval_gate] →
-        #   approved: push → mark_pushed → respond
-        #   rejected: revise_metadata → approval_gate (loop)
+        # push_metadata + push_x both flow through approval_gate; the post-gate
+        # split is intent-aware so a YouTube push doesn't accidentally fire a tweet.
         graph.add_edge("prepare_push", "approval_gate")
+        graph.add_edge("prepare_x_push", "approval_gate")
         graph.add_conditional_edges(
             "approval_gate",
             self._route_by_approval,
             {
-                "approved": "push_metadata",
-                "rejected": "revise_metadata",
+                "approved_push_metadata": "push_metadata",
+                "approved_push_x": "post_to_x",
+                "rejected_push_metadata": "revise_metadata",
+                "rejected_push_x": "revise_tweet",
             },
         )
         graph.add_edge("push_metadata", "mark_pushed")
         graph.add_edge("mark_pushed", "respond")
         graph.add_edge("revise_metadata", "approval_gate")
+        graph.add_edge("post_to_x", "mark_x_pushed")
+        graph.add_edge("mark_x_pushed", "respond")
+        graph.add_edge("revise_tweet", "approval_gate")
 
         # general ReAct sub-loop: react_agent ↔ react_tools; exits on no tool_calls
         graph.add_conditional_edges(
@@ -252,7 +284,12 @@ class PublisherAgent(BaseAgent):
 
     def _route_by_approval(self, state: PublisherState) -> str:
         status = (state.get("approval_status") or "approved").lower()
-        return "rejected" if status == "rejected" else "approved"
+        intent = state.get("intent") or "push_metadata"
+        # `push_x` is the only non-default intent that hits this gate; default
+        # everything else to the YouTube push lane.
+        lane = "push_x" if intent == "push_x" else "push_metadata"
+        outcome = "rejected" if status == "rejected" else "approved"
+        return f"{outcome}_{lane}"
 
     def _should_use_tools(self, state: PublisherState) -> str:
         last = state["messages"][-1]
@@ -640,6 +677,106 @@ class PublisherAgent(BaseAgent):
             "feedback": None,
         }
 
+    # ── push_x branch (Twitter) ───────────────────────────────────────────
+    async def _prepare_x_push_node(self, state: PublisherState):
+        """Pull `social.twitter` off the package row as the proposed tweet."""
+        pkg = state.get("existing_package") or {}
+        social = pkg.get("social") or {}
+        proposed = (social.get("twitter") or "").strip()
+        return {
+            "proposed_tweet": proposed,
+            "approval_status": "pending",
+        }
+
+    async def _post_to_x_node(self, state: PublisherState):
+        """Resume path on approve — call the post_tweet tool."""
+        result = await _safe_tool(post_tweet, {"text": state.get("proposed_tweet") or ""})
+        # Pull the tweet_id back out of the success line, if present.
+        tweet_id = None
+        if isinstance(result, str) and "tweet_id=" in result:
+            try:
+                tweet_id = result.split("tweet_id=", 1)[1].split()[0].split("(")[0].strip()
+            except Exception:
+                tweet_id = None
+        return {
+            "x_push_result": result,
+            "x_tweet_id": tweet_id,
+            "approval_status": "approved",
+        }
+
+    async def _mark_x_pushed_node(self, state: PublisherState):
+        """Persist x_posted_at + x_tweet_id on the package row.
+
+        If post_to_x failed (string starts with "Error"), don't flip the row;
+        the warning surfaces via the response.
+        """
+        result = state.get("x_push_result") or ""
+        if not state.get("x_tweet_id") or (isinstance(result, str) and result.startswith("Error")):
+            return {}
+        supabase = current_supabase.get()
+        pkg_id = state.get("package_id")
+        if supabase is None or not pkg_id:
+            return {}
+        try:
+            supabase.table("publisher_packages").update({
+                "x_posted_at": _now_iso(),
+                "x_tweet_id": state.get("x_tweet_id"),
+                "updated_at": _now_iso(),
+            }).eq("id", pkg_id).execute()
+        except Exception:
+            pass
+        return {}
+
+    async def _revise_tweet_node(self, state: PublisherState):
+        """User rejected the tweet — rewrite per feedback, loop back to approval_gate."""
+        profile = self._profile(state)
+        context = (
+            f"CURRENT PROPOSED TWEET ({len(state.get('proposed_tweet') or '')} chars):\n"
+            f"{state.get('proposed_tweet') or ''}\n\n"
+            f"USER FEEDBACK:\n{state.get('feedback') or '(no specific feedback)'}\n\n"
+            "Rewrite the tweet. Stay ≤280 chars. Return ONLY a JSON object:\n"
+            '{"tweet": "..."}'
+        )
+        system_msg = (
+            f"You are revising a single tweet for {profile.brand.name} "
+            f"(voice: {profile.brand.voice}) based on user feedback. Return ONLY a JSON "
+            'object with key "tweet". Keep ≤280 chars.'
+        )
+        response = await self.llm.ainvoke([
+            SystemMessage(content=system_msg),
+            HumanMessage(content=context),
+        ])
+        raw = response.content if isinstance(response.content, str) else _flatten_content(response.content)
+        cleaned = self._strip_json_fences(raw)
+        new_tweet = state.get("proposed_tweet") or ""
+        try:
+            parsed = json.loads(cleaned)
+            candidate = (parsed.get("tweet") or "").strip()
+            if candidate:
+                new_tweet = candidate[:280]
+        except Exception:
+            pass
+
+        # Mirror the YouTube revise pattern: also persist back to social.twitter
+        # so the package detail page reflects the revision in real time.
+        supabase = current_supabase.get()
+        pkg_id = state.get("package_id")
+        if supabase is not None and pkg_id:
+            existing_social = (state.get("existing_package") or {}).get("social") or {}
+            try:
+                supabase.table("publisher_packages").update({
+                    "social": {**existing_social, "twitter": new_tweet},
+                    "updated_at": _now_iso(),
+                }).eq("id", pkg_id).execute()
+            except Exception:
+                pass
+
+        return {
+            "proposed_tweet": new_tweet,
+            "approval_status": "pending",
+            "feedback": None,
+        }
+
     # ── general branch (ReAct) ────────────────────────────────────────────
     async def _react_agent_node(self, state: PublisherState):
         profile = self._profile(state)
@@ -662,6 +799,8 @@ class PublisherAgent(BaseAgent):
             content = f"Regenerated {state.get('regen_field') or 'field'}."
         elif intent == "push_metadata":
             content = state.get("push_result") or "Push complete."
+        elif intent == "push_x":
+            content = state.get("x_push_result") or "Tweet posted."
         else:
             last_ai = next(
                 (m for m in reversed(state["messages"]) if isinstance(m, AIMessage)),

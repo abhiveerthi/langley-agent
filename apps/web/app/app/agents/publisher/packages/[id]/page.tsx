@@ -28,6 +28,7 @@ import {
   Circle,
   Trash2,
   RotateCcw,
+  Plug,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type {
@@ -81,6 +82,9 @@ export default function PackageDetailPage({
   // Track approval IDs we've already auto-opened — so if the user dismisses
   // the dialog, polling doesn't keep reopening it on the same row.
   const [openedApprovalIds, setOpenedApprovalIds] = useState<Set<string>>(new Set());
+  // Connection status for the Platforms sidebar.
+  const [ytConnected, setYtConnected] = useState<boolean | null>(null);
+  const [xConnected, setXConnected] = useState<boolean | null>(null);
 
   // ── Fetchers ──────────────────────────────────────────────────────────
   const fetchPackage = useCallback(async () => {
@@ -116,6 +120,37 @@ export default function PackageDetailPage({
   useEffect(() => {
     fetchPackage();
   }, [fetchPackage]);
+
+  // Connection status for the Platforms sidebar — load once on mount.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const auth = await authHeader();
+      try {
+        const [ytRes, xRes] = await Promise.all([
+          fetch(`${API}/api/integrations/youtube/status`, { headers: auth }),
+          fetch(`${API}/api/integrations/twitter/status`, { headers: auth }),
+        ]);
+        if (cancelled) return;
+        if (ytRes.ok) {
+          const data = await ytRes.json();
+          setYtConnected(!!data.connected);
+        } else setYtConnected(false);
+        if (xRes.ok) {
+          const data = await xRes.json();
+          setXConnected(!!data.connected);
+        } else setXConnected(false);
+      } catch {
+        if (!cancelled) {
+          setYtConnected(false);
+          setXConnected(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Poll while the row is in flight: still generating, mid-push, OR we just
   // fired the push button and are waiting for the approval_gate row to land.
@@ -230,6 +265,27 @@ export default function PackageDetailPage({
     }
   }
 
+  async function postToX() {
+    if (!pkg) return;
+    setPushPending(true);
+    try {
+      const auth = await authHeader();
+      const res = await fetch(`${API}/api/publisher/packages/${pkg.id}/post-x`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...auth },
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        throw new Error(detail?.detail || `HTTP ${res.status}`);
+      }
+      setToast("Preparing tweet — waiting for your approval");
+      fetchApproval();
+    } catch (e) {
+      setToast(`X post failed: ${(e as Error).message}`);
+      setPushPending(false);
+    }
+  }
+
   /**
    * Drain the SSE body so the server-side task finishes its work.
    * Canceling (.cancel()) aborts mid-graph, which can leave the approval
@@ -250,7 +306,7 @@ export default function PackageDetailPage({
     // Close the dialog immediately for responsiveness — the server-side flip
     // to status=approved means polling won't find this row again.
     setShowApprovalDialog(false);
-    setToast("Pushing to YouTube…");
+    setToast(approval.action_type === "x_post" ? "Posting to X…" : "Pushing to YouTube…");
     try {
       const auth = await authHeader();
       const res = await fetch(`${API}/api/approvals/${approval.id}/approve`, {
@@ -403,7 +459,9 @@ export default function PackageDetailPage({
 
   return (
     <div className="flex h-full min-h-0 overflow-y-auto">
-      <div className="flex-1 p-6 max-w-5xl mx-auto space-y-6">
+      <div className="flex-1 max-w-7xl mx-auto p-6 w-full">
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px] gap-6">
+          <div className="min-w-0 space-y-6">
         {/* Header */}
         <div>
           <Link
@@ -420,7 +478,7 @@ export default function PackageDetailPage({
             <div className="min-w-0 flex-1">
               <h1 className="text-xl font-semibold text-foreground truncate">{pkg.video_title}</h1>
               <div className="text-xs text-muted-foreground mt-1 font-mono">{pkg.video_id}</div>
-              <div className="flex items-center gap-3 mt-2">
+              <div className="flex items-center gap-3 mt-2 flex-wrap">
                 <span className={cn("rounded-full border px-2.5 py-0.5 text-[11px] font-medium", statusStyles[pkg.status])}>
                   {isGenerating && <Loader2 className="inline h-3 w-3 animate-spin mr-1" />}
                   {statusLabel[pkg.status]}
@@ -442,47 +500,11 @@ export default function PackageDetailPage({
                 </a>
               </div>
             </div>
-            {canPush && (
-              <button
-                onClick={() => pushPackage(pkg.title_variants[0])}
-                className="shrink-0 flex items-center gap-1.5 rounded-md bg-sky-500/10 border border-sky-500/30 px-4 py-2 text-sm font-medium text-sky-400 hover:bg-sky-500/20 transition-colors"
-              >
-                <UploadIcon className="h-4 w-4" />
-                Push to YouTube
-              </button>
-            )}
-            {pkg.status === "pending_push" && approval && (
-              <button
-                onClick={() => setShowApprovalDialog(true)}
-                className="shrink-0 flex items-center gap-1.5 rounded-md bg-amber-500/10 border border-amber-500/30 px-4 py-2 text-sm font-medium text-amber-400 hover:bg-amber-500/20 transition-colors"
-              >
-                <AlertCircle className="h-4 w-4" />
-                Review Push
-              </button>
-            )}
           </div>
 
-          {/* Package-level actions */}
-          <div className="flex items-center justify-end gap-2 mt-3">
-            <button
-              onClick={() => setConfirmOpen("regen-all")}
-              disabled={isGenerating || bulkActing}
-              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              Regenerate entire package
-            </button>
-            <button
-              onClick={() => setConfirmOpen("delete")}
-              disabled={bulkActing}
-              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-red-500/10 hover:border-red-500/30 hover:text-red-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              Delete package
-            </button>
-          </div>
         </div>
 
+        <div id="section-titles" />
         {/* Title variants — each row has a radio to mark it as the push title */}
         <TitleVariantsSection
           pkg={pkg}
@@ -495,6 +517,7 @@ export default function PackageDetailPage({
           onCopy={copy}
         />
 
+        <div id="section-description" />
         <EditableSection
           title="Description"
           icon={MessageSquare}
@@ -513,6 +536,7 @@ export default function PackageDetailPage({
           onCopy={copy}
         />
 
+        <div id="section-tags" />
         <EditableSection
           title="Tags"
           icon={Hash}
@@ -531,6 +555,7 @@ export default function PackageDetailPage({
           onCopy={copy}
         />
 
+        <div id="section-chapters" />
         <EditableSection
           title="Chapters"
           icon={ListOrdered}
@@ -549,6 +574,7 @@ export default function PackageDetailPage({
           onCopy={copy}
         />
 
+        <div id="section-thumbnails" />
         <EditableSection
           title="Thumbnail Ideas"
           icon={ImageIcon}
@@ -568,6 +594,7 @@ export default function PackageDetailPage({
         />
 
         {/* Socials */}
+        <div id="section-twitter" />
         <div className="rounded-lg border border-border bg-card/50 p-5 space-y-4">
           <div className="text-sm font-semibold text-foreground">Social Drafts</div>
 
@@ -592,6 +619,7 @@ export default function PackageDetailPage({
             onCopy={copy}
           />
 
+          <div id="section-newsletter" />
           <EditableSection
             variant="inline"
             title="Newsletter"
@@ -630,6 +658,44 @@ export default function PackageDetailPage({
             </a>
           </div>
         )}
+
+        {/* Package-level destructive actions — pushed to the bottom now that
+            push triggers live in the right sidebar. */}
+        <div className="flex items-center justify-end gap-2 pt-2">
+          <button
+            onClick={() => setConfirmOpen("regen-all")}
+            disabled={isGenerating || bulkActing}
+            className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            Regenerate entire package
+          </button>
+          <button
+            onClick={() => setConfirmOpen("delete")}
+            disabled={bulkActing}
+            className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-red-500/10 hover:border-red-500/30 hover:text-red-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Delete package
+          </button>
+        </div>
+          </div>
+
+          {/* ── Right sidebar: Platforms ─────────────────────────────── */}
+          <aside className="space-y-4">
+            <PlatformsSidebar
+              pkg={pkg}
+              canPush={canPush}
+              pushPending={pushPending}
+              ytConnected={ytConnected}
+              xConnected={xConnected}
+              hasPendingApproval={!!approval && approval.status === "pending"}
+              onPushYouTube={() => pushPackage(pkg.title_variants[0])}
+              onPostX={postToX}
+              onReviewPending={() => setShowApprovalDialog(true)}
+            />
+          </aside>
+        </div>
       </div>
 
       {/* Confirmation dialog for regen-all / delete */}
@@ -1123,7 +1189,13 @@ function ApprovalDialog({
   onFeedbackChange: (v: string) => void;
   acting: "approve" | "reject" | null;
 }) {
-  const p = approval.action_payload;
+  const isX = approval.action_type === "x_post";
+  const heading = isX ? "Post to X (Twitter)" : "Push metadata to YouTube";
+  const approveLabel = isX ? "Approve & post" : "Approve & push";
+  const feedbackPlaceholder = isX
+    ? "e.g. punchier, drop the emoji, lead with the surprising stat…"
+    : "e.g. less clickbaity, shorter tags…";
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-6">
       <div className="w-full max-w-2xl max-h-full overflow-y-auto rounded-lg border border-border bg-card shadow-xl">
@@ -1133,7 +1205,7 @@ function ApprovalDialog({
               <AlertCircle className="h-4 w-4" />
               <span className="text-xs font-semibold uppercase tracking-wider">Approval Required</span>
             </div>
-            <h2 className="text-lg font-semibold text-foreground">Push metadata to YouTube</h2>
+            <h2 className="text-lg font-semibold text-foreground">{heading}</h2>
             <p className="text-xs text-muted-foreground mt-1">{approval.preview}</p>
           </div>
           <button
@@ -1145,17 +1217,50 @@ function ApprovalDialog({
         </div>
 
         <div className="p-5 space-y-4">
-          <DiffRow label="Title" current={p.current_title} proposed={p.proposed_title} />
-          <DiffRow label="Tags" current={(p.current_tags || []).join(", ")} proposed={(p.proposed_tags || []).join(", ")} />
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">Description</div>
-            <details className="rounded-md border border-border bg-muted/20">
-              <summary className="px-3 py-2 text-xs text-muted-foreground cursor-pointer">Preview (click to expand)</summary>
-              <pre className="px-3 pb-3 whitespace-pre-wrap font-sans text-xs text-foreground/80 max-h-48 overflow-y-auto">
-                {p.proposed_description}
+          {approval.action_type === "youtube_metadata_update" ? (
+            <>
+              <DiffRow
+                label="Title"
+                current={approval.action_payload.current_title}
+                proposed={approval.action_payload.proposed_title}
+              />
+              <DiffRow
+                label="Tags"
+                current={(approval.action_payload.current_tags || []).join(", ")}
+                proposed={(approval.action_payload.proposed_tags || []).join(", ")}
+              />
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">Description</div>
+                <details className="rounded-md border border-border bg-muted/20">
+                  <summary className="px-3 py-2 text-xs text-muted-foreground cursor-pointer">Preview (click to expand)</summary>
+                  <pre className="px-3 pb-3 whitespace-pre-wrap font-sans text-xs text-foreground/80 max-h-48 overflow-y-auto">
+                    {approval.action_payload.proposed_description}
+                  </pre>
+                </details>
+              </div>
+            </>
+          ) : (
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1.5 flex items-center justify-between">
+                <span>Tweet</span>
+                <span
+                  className={cn(
+                    "font-mono",
+                    approval.action_payload.tweet_char_count > 280
+                      ? "text-red-400"
+                      : approval.action_payload.tweet_char_count > 260
+                      ? "text-amber-400"
+                      : "text-muted-foreground",
+                  )}
+                >
+                  {approval.action_payload.tweet_char_count}/280
+                </span>
+              </div>
+              <pre className="rounded-md border border-sky-500/30 bg-sky-500/5 p-3 whitespace-pre-wrap font-sans text-sm text-foreground/90">
+                {approval.action_payload.proposed_tweet}
               </pre>
-            </details>
-          </div>
+            </div>
+          )}
 
           <div>
             <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1.5 block">
@@ -1164,7 +1269,7 @@ function ApprovalDialog({
             <textarea
               value={rejectFeedback}
               onChange={(e) => onFeedbackChange(e.target.value)}
-              placeholder="e.g. less clickbaity, shorter tags…"
+              placeholder={feedbackPlaceholder}
               className="w-full rounded-md border border-border bg-muted/20 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:border-sky-500/40 focus:outline-none"
               rows={2}
             />
@@ -1186,10 +1291,245 @@ function ApprovalDialog({
             className="flex items-center gap-1.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 px-4 py-2 text-sm font-medium text-emerald-400 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
           >
             {acting === "approve" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-            Approve & push
+            {approveLabel}
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Right-side platforms sidebar ────────────────────────────────────────
+
+function PlatformsSidebar({
+  pkg,
+  canPush,
+  pushPending,
+  ytConnected,
+  xConnected,
+  hasPendingApproval,
+  onPushYouTube,
+  onPostX,
+  onReviewPending,
+}: {
+  pkg: PublisherPackage;
+  canPush: boolean;
+  pushPending: boolean;
+  ytConnected: boolean | null;
+  xConnected: boolean | null;
+  hasPendingApproval: boolean;
+  onPushYouTube: () => void;
+  onPostX: () => void;
+  onReviewPending: () => void;
+}) {
+  function scrollTo(anchor: string) {
+    const el = document.getElementById(anchor);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  const pushedYouTube = !!pkg.youtube_pushed_at;
+  const postedX = !!pkg.x_posted_at;
+  const tweet = pkg.social.twitter || "";
+
+  return (
+    <div className="rounded-lg border border-border bg-card/50 p-4 lg:sticky lg:top-6">
+      <div className="text-sm font-semibold text-foreground mb-3">Platforms</div>
+
+      <div className="space-y-2">
+        <PlatformRow
+          name="YouTube"
+          customIcon={
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-red-600/20 p-1.5">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/integrations/youtube.svg" alt="" className="h-full w-full object-contain" />
+            </div>
+          }
+          connected={ytConnected}
+          status={
+            pushedYouTube
+              ? `Pushed ${new Date(pkg.youtube_pushed_at!).toLocaleDateString()}`
+              : pkg.status === "pending_push"
+              ? "Awaiting approval"
+              : canPush
+              ? "Ready to push"
+              : null
+          }
+          onClick={() => scrollTo("section-titles")}
+          actionLabel={pushedYouTube ? "Re-push" : "Push to YouTube"}
+          actionVariant="primary"
+          actionDisabled={!canPush || pushPending || ytConnected !== true}
+          onAction={onPushYouTube}
+          actionTitle={
+            ytConnected !== true
+              ? "Connect YouTube in Integrations to enable pushing"
+              : !canPush
+              ? "Available once status is draft"
+              : undefined
+          }
+        />
+
+        <PlatformRow
+          name="X (Twitter)"
+          customIcon={
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-foreground/10 p-1.5">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/integrations/x.svg" alt="" className="h-full w-full object-contain" />
+            </div>
+          }
+          connected={xConnected}
+          status={
+            postedX
+              ? `Posted ${new Date(pkg.x_posted_at!).toLocaleDateString()}`
+              : !tweet
+              ? "No tweet copy yet"
+              : `${tweet.length}/280 chars`
+          }
+          onClick={() => scrollTo("section-twitter")}
+          actionLabel={postedX ? "Post again" : "Post to X"}
+          actionVariant="primary"
+          actionDisabled={!canPush || pushPending || xConnected !== true || !tweet}
+          onAction={onPostX}
+          actionTitle={
+            xConnected !== true
+              ? "Connect X in Integrations to enable posting"
+              : !tweet
+              ? "Regenerate the tweet copy first"
+              : !canPush
+              ? "Available once status is draft"
+              : undefined
+          }
+          extraLink={
+            postedX && pkg.x_tweet_id ? (
+              <a
+                href={`https://x.com/i/web/status/${pkg.x_tweet_id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[11px] text-emerald-400 hover:underline inline-flex items-center gap-1"
+              >
+                View tweet <ExternalLink className="h-3 w-3" />
+              </a>
+            ) : null
+          }
+        />
+
+        <PlatformRow
+          name="Newsletter"
+          icon={Mail}
+          iconClass="text-amber-400"
+          connected={null}
+          status="Coming soon"
+          onClick={() => scrollTo("section-newsletter")}
+          actionLabel="Coming soon"
+          actionVariant="muted"
+          actionDisabled
+          onAction={() => {}}
+        />
+      </div>
+
+      {hasPendingApproval && (
+        <button
+          onClick={onReviewPending}
+          className="mt-4 w-full flex items-center justify-center gap-1.5 rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-xs font-medium text-amber-400 hover:bg-amber-500/20 transition-colors"
+        >
+          <AlertCircle className="h-3.5 w-3.5" />
+          Review pending approval
+        </button>
+      )}
+    </div>
+  );
+}
+
+function PlatformRow({
+  name,
+  icon: Icon,
+  customIcon,
+  iconClass,
+  connected,
+  status,
+  onClick,
+  actionLabel,
+  actionVariant,
+  actionDisabled,
+  onAction,
+  actionTitle,
+  extraLink,
+}: {
+  name: string;
+  icon?: React.ElementType;
+  customIcon?: React.ReactNode;
+  iconClass?: string;
+  connected: boolean | null;
+  status: string | null;
+  onClick: () => void;
+  actionLabel: string;
+  actionVariant: "primary" | "muted";
+  actionDisabled: boolean;
+  onAction: () => void;
+  actionTitle?: string;
+  extraLink?: React.ReactNode;
+}) {
+  const connectedLabel =
+    connected === null ? null : connected ? "Connected" : "Not connected";
+  const connectedClass =
+    connected === null
+      ? "text-muted-foreground"
+      : connected
+      ? "text-emerald-400"
+      : "text-amber-400";
+
+  return (
+    <div className="rounded-md border border-border bg-muted/20 p-3">
+      <button
+        onClick={onClick}
+        className="flex items-center gap-3 w-full text-left hover:opacity-90 transition-opacity"
+      >
+        {customIcon ? (
+          customIcon
+        ) : Icon ? (
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-muted">
+            <Icon className={cn("h-4 w-4", iconClass)} />
+          </div>
+        ) : null}
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium text-foreground">{name}</div>
+          <div className="text-[11px] text-muted-foreground truncate">
+            {connectedLabel ? (
+              <>
+                <span className={connectedClass}>{connectedLabel}</span>
+                {status ? ` · ${status}` : ""}
+              </>
+            ) : (
+              status || ""
+            )}
+          </div>
+        </div>
+      </button>
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          onClick={onAction}
+          disabled={actionDisabled}
+          title={actionTitle}
+          className={cn(
+            "flex-1 rounded-md border px-2 py-1.5 text-[11px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
+            actionVariant === "primary"
+              ? "bg-sky-500/10 border-sky-500/30 text-sky-400 hover:bg-sky-500/20"
+              : "border-border text-muted-foreground",
+          )}
+        >
+          {actionLabel}
+        </button>
+        {connected === false && (
+          <Link
+            href="/app/integrations"
+            className="shrink-0 inline-flex items-center gap-1 rounded-md border border-border px-2 py-1.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+            title="Open integrations"
+          >
+            <Plug className="h-3 w-3" />
+          </Link>
+        )}
+      </div>
+      {extraLink && <div className="mt-1.5">{extraLink}</div>}
     </div>
   );
 }

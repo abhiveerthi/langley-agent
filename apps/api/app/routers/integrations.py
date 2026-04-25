@@ -5,6 +5,8 @@ from supabase import Client
 
 from app.config import Settings, get_settings
 from app.dependencies import CurrentUser, get_current_user, get_supabase
+from packages.integrations.x import client as x_client
+from packages.integrations.x import oauth as x_oauth
 from packages.integrations.youtube import client as yt_client
 from packages.integrations.youtube import oauth as yt_oauth
 
@@ -171,3 +173,98 @@ async def youtube_uploads(
         }
         for i in items
     ]
+
+
+# ── X (Twitter) ──────────────────────────────────────────────────────────────
+
+@router.post("/integrations/twitter/auth-url", response_model=AuthUrlResponse)
+async def twitter_auth_url(
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    if not settings.twitter_client_id:
+        raise HTTPException(500, "X (Twitter) OAuth is not configured")
+    if not settings.jwt_secret:
+        raise HTTPException(500, "JWT secret is not configured")
+
+    verifier, challenge = x_oauth.generate_pkce_pair()
+    state = x_oauth.sign_state(
+        {"org_id": user.org_id, "user_id": user.id, "code_verifier": verifier},
+        settings.jwt_secret,
+    )
+    url = x_oauth.build_auth_url(
+        client_id=settings.twitter_client_id,
+        redirect_uri=settings.twitter_oauth_redirect_uri,
+        state=state,
+        code_challenge=challenge,
+    )
+    return AuthUrlResponse(auth_url=url)
+
+
+@router.post("/integrations/twitter/callback")
+async def twitter_callback(
+    body: CallbackRequest,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    supabase: Client = Depends(get_supabase),
+):
+    try:
+        payload = x_oauth.verify_state(body.state, settings.jwt_secret)
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid state: {e}")
+
+    if payload.get("org_id") != user.org_id:
+        raise HTTPException(403, "State does not match current org")
+
+    code_verifier = payload.get("code_verifier")
+    if not code_verifier:
+        raise HTTPException(400, "State is missing PKCE verifier")
+
+    try:
+        tokens = await x_oauth.exchange_code(
+            code=body.code,
+            client_id=settings.twitter_client_id,
+            redirect_uri=settings.twitter_oauth_redirect_uri,
+            code_verifier=code_verifier,
+            client_secret=settings.twitter_client_secret or None,
+        )
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+    try:
+        user_info = await x_oauth.fetch_user_info(tokens.access_token)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+    saved = x_client.save_connection(supabase, user.org_id, tokens, user_info)
+    return {
+        "status": "ok",
+        "user": user_info,
+        "scopes": saved.get("scopes", []),
+    }
+
+
+@router.get("/integrations/twitter/status")
+async def twitter_status(
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    conn = x_client.get_connection(supabase, user.org_id)
+    if not conn:
+        return {"connected": False}
+    return {
+        "connected": True,
+        "status": conn.get("status", "active"),
+        "user": conn.get("metadata") or {},
+        "scopes": conn.get("scopes") or [],
+        "token_expires_at": conn.get("token_expires_at"),
+    }
+
+
+@router.delete("/integrations/twitter")
+async def twitter_disconnect(
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    x_client.delete_connection(supabase, user.org_id)
+    return {"status": "disconnected"}

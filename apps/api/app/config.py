@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     youtube_oauth_redirect_uri: str = "http://localhost:3000/auth/youtube/callback"
 
+    # X (Twitter) OAuth 2.0 with PKCE.
+    # client_secret is optional — leave it blank for Public clients (PKCE only).
+    twitter_client_id: str = ""
+    twitter_client_secret: str = ""
+    twitter_oauth_redirect_uri: str = "http://localhost:3000/auth/twitter/callback"
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

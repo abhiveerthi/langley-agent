@@ -340,6 +340,44 @@ async def push_package(
     return {"thread_id": thread_id}
 
 
+@router.post("/publisher/packages/{package_id}/post-x")
+async def post_to_x(
+    package_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    """Kick off the X push flow for a package's social.twitter copy.
+
+    Pauses at the approval gate; the client polls /approval to surface the dialog.
+    """
+    pkg = _get_package_or_404(supabase, user.org_id, package_id)
+    if pkg.get("status") == "generating":
+        raise HTTPException(409, "Package is still generating — try again when status=draft")
+    tweet = ((pkg.get("social") or {}).get("twitter") or "").strip()
+    if not tweet:
+        raise HTTPException(400, "Package has no tweet copy yet — regenerate social.twitter first")
+
+    thread_id = str(uuid4())
+    gen = stream_new_run(
+        agent_slug="publisher",
+        message=f"Post tweet for package {package_id}",
+        thread_id=thread_id,
+        org_id=user.org_id,
+        user_id=user.id,
+        extra_state={
+            "intent": "push_x",
+            "package_id": package_id,
+            "video_id": pkg.get("video_id"),
+            "video_title": pkg.get("video_title"),
+            "proposed_tweet": tweet,
+        },
+    )
+    asyncio.create_task(_run_in_background(
+        gen, org_id=user.org_id, user_id=user.id, supabase=supabase, package_id=package_id,
+    ))
+    return {"thread_id": thread_id}
+
+
 @router.patch("/publisher/packages/{package_id}")
 async def patch_package(
     package_id: str,
@@ -380,17 +418,17 @@ async def get_pending_approval(
     user: CurrentUser = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
 ):
-    """Find the pending youtube_metadata_update approval for this package, if any.
+    """Find the most-recent pending approval for this package, if any.
 
-    Used by the detail page to render the approve/reject dialog once the push
-    flow pauses at the approval_gate.
+    Returns either a `youtube_metadata_update` or `x_post` row — the UI keys
+    off `action_type` to render the right dialog body.
     """
     _get_package_or_404(supabase, user.org_id, package_id)  # tenant guard
     resp = (
         supabase.table("approvals")
         .select("*")
         .eq("org_id", user.org_id)
-        .eq("action_type", "youtube_metadata_update")
+        .in_("action_type", ["youtube_metadata_update", "x_post"])
         .eq("status", "pending")
         .order("created_at", desc=True)
         .limit(20)

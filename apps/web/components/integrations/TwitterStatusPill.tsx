@@ -10,14 +10,14 @@ type Status =
   | { state: "disconnected" }
   | {
       state: "connected";
-      channel: { channel_title?: string; thumbnail?: string; subscriber_count?: number };
+      user: { username?: string; name?: string; profile_image_url?: string };
       scopes: string[];
     }
   | { state: "error"; message: string };
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-export function YouTubeStatusPill({ heading = "YouTube" }: { heading?: string }) {
+export function TwitterStatusPill({ heading = "X / Twitter" }: { heading?: string }) {
   const [status, setStatus] = useState<Status>({ state: "loading" });
 
   const fetchStatus = useCallback(async () => {
@@ -28,7 +28,7 @@ export function YouTubeStatusPill({ heading = "YouTube" }: { heading?: string })
         setStatus({ state: "error", message: "Not signed in" });
         return;
       }
-      const res = await fetch(`${API}/api/integrations/youtube/status`, {
+      const res = await fetch(`${API}/api/integrations/twitter/status`, {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) {
@@ -40,7 +40,7 @@ export function YouTubeStatusPill({ heading = "YouTube" }: { heading?: string })
         setStatus({ state: "disconnected" });
         return;
       }
-      setStatus({ state: "connected", channel: data.channel || {}, scopes: data.scopes || [] });
+      setStatus({ state: "connected", user: data.user || {}, scopes: data.scopes || [] });
     } catch (e) {
       setStatus({ state: "error", message: (e as Error).message });
     }
@@ -91,22 +91,21 @@ export function YouTubeStatusPill({ heading = "YouTube" }: { heading?: string })
 
       {status.state === "connected" && (
         <div className="rounded-md border border-border bg-muted/20 px-3 py-3 flex items-center gap-3">
-          <div className="h-9 w-9 shrink-0 rounded-full bg-red-600/20 flex items-center justify-center p-1.5">
+          <div className="h-9 w-9 shrink-0 rounded-full bg-foreground/10 flex items-center justify-center p-1.5">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/integrations/youtube.svg" alt="" className="h-full w-full object-contain" />
+            <img src="/integrations/x.svg" alt="" className="h-full w-full object-contain" />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="text-sm font-medium text-foreground truncate">YouTube</div>
+            <div className="text-sm font-medium text-foreground truncate">X (Twitter)</div>
             <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5 truncate">
-              {status.channel.thumbnail && (
+              {status.user.profile_image_url && (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={status.channel.thumbnail} alt="" className="h-3.5 w-3.5 rounded-full shrink-0" />
+                <img src={status.user.profile_image_url} alt="" className="h-3.5 w-3.5 rounded-full shrink-0" />
               )}
               <span className="truncate">
-                {status.channel.channel_title || "Your Channel"}
-                {status.channel.subscriber_count
-                  ? ` · ${Intl.NumberFormat("en", { notation: "compact" }).format(status.channel.subscriber_count)} subs`
-                  : ""}
+                {status.user.username
+                  ? `@${status.user.username}`
+                  : status.user.name || "Connected"}
               </span>
             </div>
           </div>

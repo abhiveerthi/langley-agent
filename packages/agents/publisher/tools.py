@@ -6,6 +6,10 @@ from langchain_core.tools import tool
 
 from packages.agents.core.clients import perplexity_search, youtube_api_get
 from packages.integrations.context import current_org_id, current_supabase
+from packages.integrations.x.client import (
+    get_fresh_access_token as x_get_fresh_access_token,
+    post_tweet as x_post_tweet,
+)
 from packages.integrations.youtube.client import (
     get_connection,
     get_fresh_access_token,
@@ -293,6 +297,58 @@ async def update_video_metadata(
     )
 
 
+async def _x_access_token(org_id, supabase) -> tuple[str | None, str | None]:
+    import os
+    client_id = os.environ.get("TWITTER_CLIENT_ID", "")
+    client_secret = os.environ.get("TWITTER_CLIENT_SECRET", "") or None
+    if not client_id:
+        return None, "X (Twitter) OAuth is not configured on the server."
+    try:
+        token = await x_get_fresh_access_token(supabase, org_id, client_id, client_secret)
+        return token, None
+    except RuntimeError as e:
+        return None, str(e)
+
+
+@tool
+async def post_tweet(text: str) -> str:
+    """Post a single tweet to the connected X (Twitter) account.
+
+    APPROVAL REQUIRED. Only call after the creator has explicitly approved this exact tweet.
+
+    Args:
+        text: The tweet text (≤280 chars). Anything longer is rejected by X.
+    """
+    org_id, supabase, err = _oauth_context()
+    if err:
+        return f"Error: {err}"
+
+    token, err = await _x_access_token(org_id, supabase)
+    if err:
+        return f"Error: {err}"
+
+    if len(text) > 280:
+        return f"Error: tweet is {len(text)} chars, max is 280."
+
+    try:
+        result = await x_post_tweet(token, text)
+    except RuntimeError as e:
+        return f"Error: {e}"
+
+    tweet_id = result.get("id")
+    username = None
+    try:
+        from packages.integrations.x.client import get_connection as x_get_connection
+        conn = x_get_connection(supabase, org_id)
+        username = ((conn or {}).get("metadata") or {}).get("username")
+    except Exception:
+        pass
+
+    url = f"https://x.com/{username}/status/{tweet_id}" if username and tweet_id else None
+    suffix = f" ({url})" if url else ""
+    return f"✓ Posted to X: tweet_id={tweet_id}{suffix}"
+
+
 def get_publisher_tools():
     return [
         get_video_details,
@@ -301,4 +357,5 @@ def get_publisher_tools():
         get_latest_upload,
         get_video_transcript,
         update_video_metadata,
+        post_tweet,
     ]
