@@ -12,7 +12,7 @@ Live agent manifests are co-located with each agent:
 | `brand-manager` | Brand Manager | Gets you paid. | [brand_manager/manifest.json](brand_manager/manifest.json) | active |
 | `editor` | Editor | Cuts long-form videos into ready-to-post shorts. | [editor/manifest.json](editor/manifest.json) | coming soon |
 
-> The legacy scaffolds (`comms/`, `core/`, `general/`, `intel/`, `research/`) remain in the tree. `core/` is shared infrastructure (`BaseAgent`, tracker, prompts) and stays. The others are earlier experiments that the new roster supersedes.
+> Shared infrastructure lives in `core/` (`BaseAgent`, profile loader, peer-context helper, prompt rendering) and is used by every agent.
 
 ---
 
