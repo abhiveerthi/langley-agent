@@ -55,9 +55,9 @@ const analyzeItems = [
 // Dispatch is where the agents reach out from — Slack today, Discord/Telegram
 // later. Visually grouped with Integrations because both are about external
 // connections, not in the Agents section because it's a configuration concern,
-// not a per-agent surface.
+// not a per-agent surface. Brand deals live on the Brand Manager dashboard
+// (one-place-per-concept, mirroring how Publisher packages live on Publisher).
 const businessItems = [
-  { label: "Brand Deals", href: "/app/crm", icon: Briefcase },
   { label: "Integrations", href: "/app/integrations", icon: Plug },
   { label: "Dispatch", href: "/app/agents/bots", icon: Send },
 ];
