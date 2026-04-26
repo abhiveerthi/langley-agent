@@ -12,9 +12,7 @@ import {
   Image,
   FileText,
   Search,
-  BarChart3,
   MessageCircle,
-  TrendingUp,
   Briefcase,
   Plug,
   Settings,
@@ -44,12 +42,6 @@ const agentItems = [
   { label: "Publisher", href: "/app/agents/publisher", icon: Megaphone },
   { label: "Community Manager", href: "/app/agents/community-manager", icon: MessageCircle },
   { label: "Brand Manager", href: "/app/agents/brand-manager", icon: Briefcase },
-];
-
-const analyzeItems = [
-  { label: "Dashboard", href: "/app/dashboard", icon: BarChart3 },
-  { label: "Comments", href: "/app/analytics/comments", icon: MessageCircle },
-  { label: "Trends", href: "/app/analytics/trends", icon: TrendingUp },
 ];
 
 // Dispatch is where the agents reach out from — Slack today, Discord/Telegram
@@ -180,11 +172,6 @@ export function Sidebar() {
         <SectionLabel>Work</SectionLabel>
         <TasksItem />
         <ApprovalsItem />
-
-        <SectionLabel>Analyze</SectionLabel>
-        {analyzeItems.map((item) => (
-          <NavItem key={item.href} {...item} />
-        ))}
 
         <SectionLabel>Business</SectionLabel>
         {businessItems.map((item) => (
