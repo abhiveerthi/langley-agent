@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     slack_client_id: str = ""
     slack_client_secret: str = ""
     slack_oauth_redirect_uri: str = "http://localhost:3000/auth/slack/callback"
+    # Signing secret for the Events API webhook. Authenticates Slack → us
+    # callbacks (HMAC-SHA256 over the raw body). Found in the Slack App
+    # dashboard under Basic Information → Signing Secret.
+    slack_signing_secret: str = ""
 
     # Dropbox OAuth 2.0. Uses token_access_type=offline so we get a refresh
     # token alongside the short-lived (4h) access token.
