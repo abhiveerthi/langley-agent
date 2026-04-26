@@ -33,6 +33,19 @@ SLACK_BOT_SCOPES = [
     "im:write",
 ]
 
+
+# Agent slug → Slack channel name. Provisioned in the OAuth callback,
+# one private channel per agent. Slugs match `packages/agents/registry.py`.
+# Channel names are constrained by Slack: 1–80 chars, lowercase, no spaces,
+# no periods. The `marcus-` prefix keeps them grouped in the workspace
+# sidebar; future work can make this configurable per-org.
+SLACK_AGENT_CHANNELS: list[tuple[str, str]] = [
+    ("strategist", "marcus-strategist"),
+    ("publisher", "marcus-publisher"),
+    ("brand-manager", "marcus-brand-manager"),
+    ("community-manager", "marcus-community-manager"),
+]
+
 AUTH_ENDPOINT = "https://slack.com/oauth/v2/authorize"
 TOKEN_ENDPOINT = "https://slack.com/api/oauth.v2.access"
 
