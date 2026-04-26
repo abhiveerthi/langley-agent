@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { AlertCircle, CheckCircle, Loader2, Plus, RefreshCw } from "lucide-react";
+import { AlertCircle, CheckCircle, ExternalLink, Loader2, Plus, RefreshCw } from "lucide-react";
 import { integrations } from "@/lib/mock-data";
 import { cn } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
@@ -39,7 +39,7 @@ type YouTubeState =
   | { state: "disconnected" }
   | {
       state: "connected";
-      channel: { channel_title?: string; thumbnail?: string; subscriber_count?: number };
+      channel: { channel_id?: string; channel_title?: string; thumbnail?: string; subscriber_count?: number };
       scopes: string[];
       synced_at: string | null;
     }
@@ -949,6 +949,17 @@ function YouTubeCard({
             </span>
           </div>
           <div className="flex gap-2">
+            {state.state === "connected" && state.channel.channel_id && (
+              <a
+                href={`https://studio.youtube.com/channel/${state.channel.channel_id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <ExternalLink className="h-3 w-3" />
+                Studio
+              </a>
+            )}
             <button
               onClick={onRefresh}
               disabled={busy}
@@ -1090,6 +1101,17 @@ function TwitterCard({
             </span>
           </div>
           <div className="flex gap-2">
+            {state.state === "connected" && state.user.username && (
+              <a
+                href={`https://x.com/${state.user.username}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <ExternalLink className="h-3 w-3" />
+                Profile
+              </a>
+            )}
             <button
               onClick={onRefresh}
               disabled={busy}
@@ -1230,6 +1252,17 @@ function SlackCard({
             </span>
           </div>
           <div className="flex gap-2">
+            {state.state === "connected" && state.team.url && (
+              <a
+                href={state.team.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <ExternalLink className="h-3 w-3" />
+                Workspace
+              </a>
+            )}
             <button
               onClick={onRefresh}
               disabled={busy}
@@ -1369,6 +1402,15 @@ function DropboxCard({
             </span>
           </div>
           <div className="flex gap-2">
+            <a
+              href="https://www.dropbox.com/home"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <ExternalLink className="h-3 w-3" />
+              Open
+            </a>
             <button
               onClick={onRefresh}
               disabled={busy}
@@ -1515,6 +1557,21 @@ function MondayCard({
             </span>
           </div>
           <div className="flex gap-2">
+            {state.state === "connected" && (
+              <a
+                href={
+                  state.account.account_slug
+                    ? `https://${state.account.account_slug}.monday.com`
+                    : "https://monday.com"
+                }
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <ExternalLink className="h-3 w-3" />
+                Workspace
+              </a>
+            )}
             <button
               onClick={onRefresh}
               disabled={busy}

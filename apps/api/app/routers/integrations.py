@@ -339,39 +339,26 @@ async def slack_callback(
 
     saved = slack_client.save_connection(supabase, user.org_id, install, extra)
 
-    # Provision the per-agent channel for this org. Phase A is Publisher
-    # only; the other 3 agents land in Phase B. Failures here are
-    # non-fatal — the connection itself succeeded; surface as metadata so
-    # the UI can offer a retry button later.
-    channel_provision_error: str | None = None
-    try:
-        chan = await slack_client.create_private_channel(
-            install.access_token,
-            name="marcus-publisher",
-            invite_user_ids=(
-                [install.authed_user_id] if install.authed_user_id else None
-            ),
-        )
-        supabase.table("slack_channels").upsert(
-            {
-                "org_id": user.org_id,
-                "agent_slug": "publisher",
-                "slack_team_id": install.team_id,
-                "slack_channel_id": chan["channel_id"],
-                "slack_thread_root_ts": None,
-                # Placeholder root thread for the channel — never actually
-                # streamed; per-Slack-thread rows hold the real thread_ids.
-                "marcus_thread_id": str(uuid4()),
-            },
-            on_conflict="slack_channel_id,slack_thread_root_ts",
-        ).execute()
-        await slack_client.post_message_in_thread(
-            install.access_token,
-            chan["channel_id"],
-            "Marcus Publisher is online. Post a message in this channel to start a run.",
-        )
-    except RuntimeError as e:
-        channel_provision_error = str(e)
+    # Provision a private channel per agent. Failures are isolated per
+    # channel — if `marcus-strategist` already exists in the workspace we
+    # still want `marcus-publisher` to provision. The UI can offer a retry
+    # for any that failed.
+    granted_scopes = saved.get("scopes") or []
+    provisioned: list[dict] = []
+    channel_errors: list[dict] = []
+    for agent_slug, channel_name in slack_oauth.SLACK_AGENT_CHANNELS:
+        try:
+            chan = await _provision_agent_channel(
+                supabase=supabase,
+                install=install,
+                org_id=user.org_id,
+                agent_slug=agent_slug,
+                channel_name=channel_name,
+                granted_scopes=granted_scopes,
+            )
+            provisioned.append(chan)
+        except RuntimeError as e:
+            channel_errors.append({"agent_slug": agent_slug, "error": str(e)})
 
     return {
         "status": "ok",
@@ -381,7 +368,55 @@ async def slack_callback(
             "url": extra.get("team_url"),
         },
         "scopes": saved.get("scopes", []),
-        "channel_provision_error": channel_provision_error,
+        "channels": provisioned,
+        "channel_errors": channel_errors,
+    }
+
+
+async def _provision_agent_channel(
+    *,
+    supabase: Client,
+    install,  # slack_oauth.OAuthInstall
+    org_id: str,
+    agent_slug: str,
+    channel_name: str,
+    granted_scopes: list[str],
+) -> dict:
+    """Create a private channel for one agent + persist the mapping row +
+    post a greeting under the agent's persona. Raises RuntimeError on
+    Slack API failure; the caller isolates per-channel failures."""
+    chan = await slack_client.create_private_channel(
+        install.access_token,
+        name=channel_name,
+        invite_user_ids=(
+            [install.authed_user_id] if install.authed_user_id else None
+        ),
+    )
+    supabase.table("slack_channels").upsert(
+        {
+            "org_id": org_id,
+            "agent_slug": agent_slug,
+            "slack_team_id": install.team_id,
+            "slack_channel_id": chan["channel_id"],
+            "slack_thread_root_ts": None,
+            # Placeholder UUID — the channel-mapping row never streams;
+            # per-Slack-thread rows hold the real thread_ids.
+            "marcus_thread_id": str(uuid4()),
+        },
+        on_conflict="slack_channel_id,slack_thread_root_ts",
+    ).execute()
+    persona = slack_oauth.persona_for(agent_slug, granted_scopes)
+    display_name = agent_slug.replace("-", " ").title()
+    await slack_client.post_message_in_thread(
+        install.access_token,
+        chan["channel_id"],
+        f"Backroom {display_name} is online. Post a message in this channel to start a run.",
+        **persona,
+    )
+    return {
+        "agent_slug": agent_slug,
+        "channel_id": chan["channel_id"],
+        "channel_name": chan.get("name") or channel_name,
     }
 
 
