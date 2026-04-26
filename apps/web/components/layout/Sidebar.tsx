@@ -7,11 +7,6 @@ import {
   Plus,
   MessageSquare,
   Scissors,
-  Languages,
-  Subtitles,
-  Image,
-  FileText,
-  Search,
   MessageCircle,
   Briefcase,
   Plug,
@@ -24,24 +19,19 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const studioItems = [
-  { label: "Auto Clips", href: "/app/studio/clips", icon: Scissors },
-  { label: "Dubbing", href: "/app/studio/dubbing", icon: Languages },
-  { label: "Subtitles", href: "/app/studio/subtitles", icon: Subtitles },
-  { label: "Thumbnails", href: "/app/studio/thumbnails", icon: Image },
-  { label: "Script Writer", href: "/app/studio/scripts", icon: FileText },
-  { label: "SEO Optimizer", href: "/app/studio/seo", icon: Search },
-];
-
 // The live agent roster — these are the registered agents in the backend.
 // Each link goes to the agent's dashboard, which embeds a MiniChat for
-// in-context conversations. The "general" assistant slug is reserved for a
-// future general-purpose bot — kept off the sidebar until it ships.
+// in-context conversations. Editor is on here too even though its video
+// worker isn't built yet — the dashboard surfaces what it'll do and what
+// lives elsewhere in the meantime. The "general" assistant slug is
+// reserved for a future general-purpose bot — kept off the sidebar until
+// it ships.
 const agentItems = [
   { label: "Strategist", href: "/app/agents/strategist", icon: Compass },
   { label: "Publisher", href: "/app/agents/publisher", icon: Megaphone },
   { label: "Community Manager", href: "/app/agents/community-manager", icon: MessageCircle },
   { label: "Brand Manager", href: "/app/agents/brand-manager", icon: Briefcase },
+  { label: "Editor", href: "/app/agents/editor", icon: Scissors },
 ];
 
 // Dispatch is where the agents reach out from — Slack today, Discord/Telegram
@@ -178,10 +168,6 @@ export function Sidebar() {
           <NavItem key={item.href} {...item} />
         ))}
 
-        <SectionLabel>Studio</SectionLabel>
-        {studioItems.map((item) => (
-          <NavItem key={item.href} {...item} />
-        ))}
       </nav>
 
       {/* Bottom pinned settings */}

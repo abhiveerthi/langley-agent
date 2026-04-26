@@ -94,8 +94,8 @@ const AGENTS: AgentMeta[] = [
   {
     slug: "editor",
     name: "Editor",
-    tagline: "Cuts long-form videos into ready-to-post shorts. Video worker not yet available.",
-    href: null,
+    tagline: "Cuts long-form video into shorts, dubs, captions, and thumbnails. Video worker not yet available.",
+    href: "/app/agents/editor",
     icon: Scissors,
     accent: {
       bg: "bg-zinc-500/10",
@@ -103,7 +103,7 @@ const AGENTS: AgentMeta[] = [
       border: "border-zinc-500/20",
     },
     status: "coming-soon",
-    highlights: ["Coming soon"],
+    highlights: ["Clips", "Dubbing", "Subtitles", "Thumbnails"],
   },
 ];
 
@@ -275,9 +275,9 @@ function AgentCard({ agent }: { agent: AgentMeta }) {
       </div>
 
       <div className="border-t border-border pt-3 mt-auto">
-        {isActive && agent.href ? (
+        {agent.href ? (
           <span className={cn("inline-flex items-center gap-1.5 text-xs font-medium", agent.accent.icon)}>
-            Open dashboard
+            {isActive ? "Open dashboard" : "Preview"}
             <ArrowRight className="h-3 w-3" />
           </span>
         ) : (
@@ -287,7 +287,7 @@ function AgentCard({ agent }: { agent: AgentMeta }) {
     </div>
   );
 
-  if (isActive && agent.href) {
+  if (agent.href) {
     return (
       <Link href={agent.href} className="block">
         {inner}
