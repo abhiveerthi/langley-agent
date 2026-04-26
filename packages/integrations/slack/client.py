@@ -148,6 +148,7 @@ async def post_message_in_thread(
     thread_ts: str | None = None,
     username: str | None = None,
     icon_emoji: str | None = None,
+    blocks: list[dict] | None = None,
 ) -> dict:
     """Post via chat.postMessage. If thread_ts is set, replies into that
     Slack thread; otherwise posts at the top level. Returns {ts, channel}.
@@ -157,6 +158,9 @@ async def post_message_in_thread(
     install — without it, Slack rejects the post with `not_allowed`. The
     caller (slack_runner / oauth callback) gates these via
     `oauth.persona_for(agent_slug, scopes)` so older installs don't break.
+
+    `blocks` is for Block Kit messages (approval cards, etc). When
+    blocks are present, `text` is used as the notification fallback.
     """
     payload: dict = {"channel": channel, "text": text}
     if thread_ts:
@@ -165,8 +169,60 @@ async def post_message_in_thread(
         payload["username"] = username
     if icon_emoji:
         payload["icon_emoji"] = icon_emoji
+    if blocks:
+        payload["blocks"] = blocks
     body = await _slack_post(access_token, "chat.postMessage", payload)
     return {"ts": body.get("ts"), "channel": body.get("channel")}
+
+
+async def update_message(
+    access_token: str,
+    channel: str,
+    ts: str,
+    text: str,
+    *,
+    blocks: list[dict] | None = None,
+) -> dict:
+    """chat.update an existing message in place. Used to flip an approval
+    card to its post-resolution form (✅ Approved / ❌ Rejected)."""
+    payload: dict = {"channel": channel, "ts": ts, "text": text}
+    if blocks:
+        payload["blocks"] = blocks
+    body = await _slack_post(access_token, "chat.update", payload)
+    return {"ts": body.get("ts"), "channel": body.get("channel")}
+
+
+async def open_modal(access_token: str, trigger_id: str, view: dict) -> dict:
+    """Open a Slack modal via views.open. `trigger_id` is short-lived
+    (≈3 s after the user clicks); call this synchronously from the
+    interactive handler before doing any other work."""
+    body = await _slack_post(
+        access_token, "views.open", {"trigger_id": trigger_id, "view": view}
+    )
+    return body.get("view") or {}
+
+
+async def get_message(
+    access_token: str, channel: str, ts: str
+) -> dict | None:
+    """Fetch a single posted message by `ts` via conversations.history with
+    a tight `oldest`/`latest` window. Used to grab the original blocks of an
+    approval card so `chat.update` can render the resolved form on top of
+    the same content. Returns None if not found (rare — mostly when ts has
+    drifted off due to retention)."""
+    body = await _slack_get(
+        access_token,
+        "conversations.history",
+        {
+            "channel": channel,
+            "oldest": ts,
+            "latest": ts,
+            "inclusive": "true",
+            "limit": 1,
+        },
+    )
+    msgs = body.get("messages") or []
+    return msgs[0] if msgs else None
 
 
 async def post_message(access_token: str, channel: str, text: str) -> dict:
