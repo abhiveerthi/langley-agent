@@ -18,11 +18,11 @@ import {
   Briefcase,
   Plug,
   Settings,
-  Bot,
   Compass,
   Megaphone,
   ListChecks,
   CheckSquare,
+  Send,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -36,17 +36,14 @@ const studioItems = [
 ];
 
 // The live agent roster — these are the registered agents in the backend.
-// Strategist / Brand Manager / Community Manager don't have dedicated pages
-// yet, so their links go to the chat with `?agent=<slug>` and the chat page
-// reads that to route the right agent. Publisher has its own page (and a
-// MiniChat embedded). The "general" assistant slug is reserved for a
+// Each link goes to the agent's dashboard, which embeds a MiniChat for
+// in-context conversations. The "general" assistant slug is reserved for a
 // future general-purpose bot — kept off the sidebar until it ships.
 const agentItems = [
-  { label: "All Agents", href: "/app/agents", icon: Bot, exact: true },
-  { label: "Strategist", href: "/app/chat?agent=strategist", icon: Compass },
+  { label: "Strategist", href: "/app/agents/strategist", icon: Compass },
   { label: "Publisher", href: "/app/agents/publisher", icon: Megaphone },
-  { label: "Community Manager", href: "/app/chat?agent=community-manager", icon: MessageCircle },
-  { label: "Brand Manager", href: "/app/chat?agent=brand-manager", icon: Briefcase },
+  { label: "Community Manager", href: "/app/agents/community-manager", icon: MessageCircle },
+  { label: "Brand Manager", href: "/app/agents/brand-manager", icon: Briefcase },
 ];
 
 const analyzeItems = [
@@ -55,9 +52,14 @@ const analyzeItems = [
   { label: "Trends", href: "/app/analytics/trends", icon: TrendingUp },
 ];
 
+// Dispatch is where the agents reach out from — Slack today, Discord/Telegram
+// later. Visually grouped with Integrations because both are about external
+// connections, not in the Agents section because it's a configuration concern,
+// not a per-agent surface.
 const businessItems = [
   { label: "Brand Deals", href: "/app/crm", icon: Briefcase },
   { label: "Integrations", href: "/app/integrations", icon: Plug },
+  { label: "Dispatch", href: "/app/agents/bots", icon: Send },
 ];
 
 function NavItem({ label, href, icon: Icon, exact }: { label: string; href: string; icon: React.ElementType; exact?: boolean }) {
@@ -85,26 +87,6 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
     <p className="px-3 pb-1 pt-4 text-xs font-semibold uppercase tracking-widest text-muted-foreground/60">
       {children}
     </p>
-  );
-}
-
-function BotConnectionsItem() {
-  const pathname = usePathname();
-  const isActive = pathname.startsWith("/app/agents/bots");
-  return (
-    <Link
-      href="/app/agents/bots"
-      className={cn(
-        "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
-        isActive
-          ? "bg-primary/15 text-primary font-medium"
-          : "text-muted-foreground hover:bg-accent hover:text-foreground"
-      )}
-    >
-      <MessageSquare className="h-4 w-4 shrink-0" />
-      Bot Connections
-      <span className="ml-auto flex h-4 min-w-4 items-center justify-center rounded-full bg-primary/20 text-[10px] font-medium text-primary">3</span>
-    </Link>
   );
 }
 
@@ -194,7 +176,6 @@ export function Sidebar() {
         {agentItems.map((item) => (
           <NavItem key={item.href} {...item} />
         ))}
-        <BotConnectionsItem />
 
         <SectionLabel>Work</SectionLabel>
         <TasksItem />
