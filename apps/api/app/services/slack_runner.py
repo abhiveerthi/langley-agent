@@ -5,12 +5,15 @@ HTTP handler: it takes a Slack message event, resolves it to a Marcus
 (org, user, thread), invokes the existing graph orchestrator, accumulates
 the SSE stream, and posts the final reply back to the Slack thread.
 
-Phase A scope:
-  - Publisher only (only `#marcus-publisher` channels are wired up at
-    install time; this runner reads `agent_slug` from `slack_channels`).
-  - Final-message-only response. Mid-stream "thinking..." updates,
-    tool-call surfacing, and approval cards are deferred to Phase C/D.
-  - Email-match identity. Per-user OAuth fallback is Phase B+.
+Two entry points share the same SSE-consumption + posting logic via
+`_run_and_post`:
+  - `handle_message`: a fresh user message → `stream_new_run`
+  - `handle_resume`:   an Approve/Reject button click → `stream_resume_*`
+
+When the run pauses at an approval gate, `_run_and_post` posts a Block
+Kit approval card in the Slack thread and persists `slack_message_ts` /
+`slack_channel_id` onto the `approvals` row. The interactive handler
+later uses these to `chat.update` the same card with the resolution.
 
 Per-Slack-thread = per-Marcus-thread:
   - A top-level Slack message starts a new Marcus thread (UUID generated
@@ -21,12 +24,17 @@ Per-Slack-thread = per-Marcus-thread:
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, AsyncIterator
 from uuid import uuid4
 
 from app.auth import with_tool_context
-from app.services.graph_orchestrator import stream_new_run
+from app.services.graph_orchestrator import (
+    stream_new_run,
+    stream_resume_approved,
+    stream_resume_rejected,
+)
 from packages.integrations.slack import client as slack_client
+from packages.integrations.slack.blocks import build_approval_card
 from packages.integrations.slack.identity import resolve_marcus_user
 from packages.integrations.slack.oauth import persona_for
 
@@ -117,10 +125,7 @@ async def handle_message(
         },
     )
 
-    accumulated: list[str] = []
-    error_msg: str | None = None
-
-    async for sse in with_tool_context(
+    stream = with_tool_context(
         stream_new_run(
             agent_slug=agent_slug,
             message=text,
@@ -131,22 +136,197 @@ async def handle_message(
         org_id=org_id,
         user_id=ident["user_id"],
         supabase=supabase,
-    ):
+    )
+    await _run_and_post(
+        stream=stream,
+        supabase=supabase,
+        bot_token=bot_token,
+        slack_channel_id=slack_channel_id,
+        root_ts=root_ts,
+        persona=persona,
+        marcus_thread_id=marcus_thread_id,
+    )
+
+
+async def handle_resume(
+    *,
+    supabase: Any,
+    approval_id: str,
+    decision: str,                # "approved" | "rejected"
+    feedback: str | None = None,
+    reviewer_user_id: str,
+) -> None:
+    """Resume a paused agent run after a Slack button click.
+
+    Reads the `approvals` row to find the org, agent, Slack channel, and
+    Slack message ts (set when the card was posted). Calls the matching
+    `stream_resume_*` orchestrator entry point, then runs continuation
+    output through `_run_and_post` so any continuation tokens / further
+    approval gates land in the same Slack thread.
+    """
+    approval = (
+        supabase.table("approvals")
+        .select("*")
+        .eq("id", approval_id)
+        .limit(1)
+        .execute()
+    )
+    if not approval.data:
+        return
+    row = approval.data[0]
+    if row.get("status") != "pending":
+        # Already resolved (probably from the web UI or a duplicate click).
+        return
+
+    slack_channel_id = row.get("slack_channel_id")
+    if not slack_channel_id:
+        # Approval wasn't surfaced in Slack — nothing to post back to.
+        return
+
+    install = _lookup_install(supabase, _slack_team_for_channel(supabase, slack_channel_id))
+    if install is None:
+        return
+    bot_token = install["access_token"]
+    persona = persona_for(row["requested_by_agent"], install.get("scopes") or [])
+
+    marcus_thread_id = row["thread_id"]
+    # Resume continues posting in the same Slack thread the card was in;
+    # find that thread root by looking up the per-thread row.
+    chan_row = (
+        supabase.table("slack_channels")
+        .select("slack_thread_root_ts")
+        .eq("marcus_thread_id", marcus_thread_id)
+        .not_.is_("slack_thread_root_ts", "null")
+        .limit(1)
+        .execute()
+    )
+    root_ts = chan_row.data[0]["slack_thread_root_ts"] if chan_row.data else None
+
+    if decision == "approved":
+        gen = stream_resume_approved(
+            approval_id=approval_id, reviewer_user_id=reviewer_user_id
+        )
+    else:
+        gen = stream_resume_rejected(
+            approval_id=approval_id,
+            reviewer_user_id=reviewer_user_id,
+            feedback=feedback,
+        )
+
+    org_id = row["org_id"]
+    stream = with_tool_context(
+        gen, org_id=org_id, user_id=reviewer_user_id, supabase=supabase
+    )
+    await _run_and_post(
+        stream=stream,
+        supabase=supabase,
+        bot_token=bot_token,
+        slack_channel_id=slack_channel_id,
+        root_ts=root_ts,
+        persona=persona,
+        marcus_thread_id=marcus_thread_id,
+    )
+
+
+# ── Shared SSE consumer + Slack poster ────────────────────────────────────
+
+async def _run_and_post(
+    *,
+    stream: AsyncIterator[str],
+    supabase: Any,
+    bot_token: str,
+    slack_channel_id: str,
+    root_ts: str | None,
+    persona: dict,
+    marcus_thread_id: str,
+) -> None:
+    """Drain an orchestrator SSE stream and post results to Slack.
+
+    Three terminal states on the stream:
+      - `done`             → post accumulated tokens as a single message
+      - `error`            → post a "Run failed: ..." message
+      - `waiting_approval` → post the accumulated tokens (if any) as a
+                             pre-card message, then post the approval
+                             card and persist its ts onto the approvals
+                             row. Return; the next event arrives via the
+                             interactive webhook.
+    """
+    accumulated: list[str] = []
+    last_token: str | None = None
+    error_msg: str | None = None
+    paused: dict | None = None
+
+    async for sse in stream:
         ev = _parse_sse(sse)
         if ev is None:
             continue
-        if ev["type"] == "token":
-            content = (ev.get("data") or {}).get("content") or ""
-            if content:
+        kind = ev["type"]
+        data = ev.get("data") or {}
+        if kind == "token":
+            content = data.get("content") or ""
+            # The orchestrator emits a `token` event per AIMessage, per
+            # node update (stream_mode="updates"). When the same final
+            # AIMessage is seen by multiple node updates (e.g. the
+            # `agent` and `respond` nodes both surface it), we get the
+            # exact same content back-to-back — which would render in
+            # Slack as the message twice in a row. Dedupe.
+            if content and content != last_token:
                 accumulated.append(content)
-        elif ev["type"] == "error":
-            error_msg = (ev.get("data") or {}).get("message") or "unknown error"
-        # Phase A: ignore tool_call_*, waiting_approval, done.
+                last_token = content
+        elif kind == "error":
+            error_msg = data.get("message") or "unknown error"
+        elif kind == "waiting_approval":
+            paused = data
+            break  # the run is paused; stop draining
+        # tool_call_*, approval_recorded, done are no-ops here.
 
+    preamble = "".join(accumulated).strip()
+
+    if paused:
+        # Post any preamble the agent produced before the gate (e.g. "I've
+        # drafted the title — review below"), then the approval card.
+        if preamble:
+            _insert_message(
+                supabase,
+                thread_id=marcus_thread_id,
+                role="assistant",
+                content=preamble,
+                metadata={"source": "slack"},
+            )
+            await slack_client.post_message_in_thread(
+                bot_token,
+                slack_channel_id,
+                preamble,
+                thread_ts=root_ts,
+                blocks=_markdown_blocks(preamble),
+                **persona,
+            )
+
+        card = build_approval_card(paused)
+        posted = await slack_client.post_message_in_thread(
+            bot_token,
+            slack_channel_id,
+            card["text"],
+            thread_ts=root_ts,
+            blocks=card["blocks"],
+            **persona,
+        )
+        # Persist the Slack message coordinates onto the approvals row so
+        # the interactive handler can chat.update the card on resolution.
+        try:
+            supabase.table("approvals").update(
+                {
+                    "slack_message_ts": posted.get("ts"),
+                    "slack_channel_id": slack_channel_id,
+                }
+            ).eq("id", paused.get("approval_id")).execute()
+        except Exception as e:
+            print(f"[slack_runner] approval ts persist failed: {e!r}", flush=True)
+        return
+
+    final = preamble or "(no response)"
     if error_msg:
         final = f"Run failed: {error_msg}"
-    else:
-        final = "".join(accumulated).strip() or "(no response)"
 
     _insert_message(
         supabase,
@@ -155,14 +335,28 @@ async def handle_message(
         content=final,
         metadata={"source": "slack"},
     )
-
     await slack_client.post_message_in_thread(
         bot_token,
         slack_channel_id,
         final,
         thread_ts=root_ts,
+        blocks=_markdown_blocks(final),
         **persona,
     )
+
+
+def _slack_team_for_channel(supabase: Any, slack_channel_id: str) -> str:
+    """Look up the Slack team_id for a channel via slack_channels. Used by
+    handle_resume to find the right install (bot token + scopes). Returns
+    empty string on miss so _lookup_install short-circuits cleanly."""
+    resp = (
+        supabase.table("slack_channels")
+        .select("slack_team_id")
+        .eq("slack_channel_id", slack_channel_id)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0]["slack_team_id"] if resp.data else ""
 
 
 # ── Lookup helpers ─────────────────────────────────────────────────────────
@@ -285,6 +479,36 @@ def _insert_message(
         # Persistence is best-effort; the user-visible reply still goes to
         # Slack. Log so we can spot if the chat history page misses runs.
         print(f"[slack_runner] message insert failed: {e!r}", flush=True)
+
+
+def _markdown_blocks(text: str) -> list[dict]:
+    """Wrap an agent reply in Slack's `markdown` Block Kit element so
+    standard GitHub-flavored markdown (`**bold**`, `# headers`, bullet
+    lists) renders correctly. Without this, Slack treats the text as
+    `mrkdwn` (single-asterisk bold) and `**bold**` shows up as literal
+    asterisks around the word.
+
+    Slack's per-block text limit is 12000 chars. We chunk on paragraph
+    boundaries to stay under that — agents shouldn't normally produce
+    that much, but a transcript dump can.
+    """
+    LIMIT = 12000
+    if len(text) <= LIMIT:
+        return [{"type": "markdown", "text": text}]
+
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > LIMIT:
+        # Prefer to split on a double-newline near the limit; fall back to
+        # a hard cut if there's no paragraph boundary in range.
+        cut = remaining.rfind("\n\n", 0, LIMIT)
+        if cut <= 0:
+            cut = LIMIT
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return [{"type": "markdown", "text": c} for c in chunks]
 
 
 def _parse_sse(line: str) -> dict | None:
