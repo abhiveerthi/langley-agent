@@ -19,11 +19,10 @@ import {
   Plug,
   Settings,
   Bot,
-  Radar,
-  Lightbulb,
-  Rocket,
+  Compass,
   Megaphone,
   ListChecks,
+  CheckSquare,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -36,12 +35,18 @@ const studioItems = [
   { label: "SEO Optimizer", href: "/app/studio/seo", icon: Search },
 ];
 
+// The live agent roster — these are the registered agents in the backend.
+// Strategist / Brand Manager / Community Manager don't have dedicated pages
+// yet, so their links go to the chat with `?agent=<slug>` and the chat page
+// reads that to route the right agent. Publisher has its own page (and a
+// MiniChat embedded). The "general" assistant slug is reserved for a
+// future general-purpose bot — kept off the sidebar until it ships.
 const agentItems = [
   { label: "All Agents", href: "/app/agents", icon: Bot, exact: true },
-  { label: "Trend Scout", href: "/app/agents/research", icon: Radar },
-  { label: "Content Strategist", href: "/app/agents/intel", icon: Lightbulb },
+  { label: "Strategist", href: "/app/chat?agent=strategist", icon: Compass },
   { label: "Publisher", href: "/app/agents/publisher", icon: Megaphone },
-  { label: "Growth Engine", href: "/app/agents/comms", icon: Rocket },
+  { label: "Community Manager", href: "/app/chat?agent=community-manager", icon: MessageCircle },
+  { label: "Brand Manager", href: "/app/chat?agent=brand-manager", icon: Briefcase },
 ];
 
 const analyzeItems = [
@@ -123,6 +128,25 @@ function TasksItem() {
   );
 }
 
+function ApprovalsItem() {
+  const pathname = usePathname();
+  const isActive = pathname.startsWith("/app/approvals");
+  return (
+    <Link
+      href="/app/approvals"
+      className={cn(
+        "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
+        isActive
+          ? "bg-primary/15 text-primary font-medium"
+          : "text-muted-foreground hover:bg-accent hover:text-foreground"
+      )}
+    >
+      <CheckSquare className="h-4 w-4 shrink-0" />
+      Approvals
+    </Link>
+  );
+}
+
 export function Sidebar() {
   const pathname = usePathname();
   const isChatActive = pathname.startsWith("/app/chat");
@@ -174,6 +198,7 @@ export function Sidebar() {
 
         <SectionLabel>Work</SectionLabel>
         <TasksItem />
+        <ApprovalsItem />
 
         <SectionLabel>Analyze</SectionLabel>
         {analyzeItems.map((item) => (

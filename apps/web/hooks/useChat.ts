@@ -33,6 +33,24 @@ export interface ToolCallEvent {
   completed_at?: string;
 }
 
+/**
+ * Emitted by the backend orchestrator when an agent's graph hits an
+ * `interrupt_before` node and is waiting for human review. The frontend
+ * inserts an inline approval card into the chat (see MessageList) and lets
+ * the user approve / reject without leaving the conversation.
+ *
+ * Shape mirrors the SSE payload — see
+ * apps/api/app/services/graph_orchestrator.py:_stream_until_done_or_pause.
+ */
+export interface PendingApproval {
+  approval_id: string;
+  thread_id: string;
+  agent_slug: string;
+  action_type: string;
+  preview: string;
+  payload: Record<string, unknown>;
+}
+
 interface UseChatOptions {
   threadId?: string;
   agentSlug?: string;
@@ -44,7 +62,141 @@ export function useChat(options: UseChatOptions = {}) {
   const [threadId, setThreadId] = useState<string | undefined>(options.threadId);
   const [thinkingNode, setThinkingNode] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  /**
+   * Drain an SSE response body into our message/state updates. Shared
+   * between the fresh-message path (`sendMessage`) and the resume path
+   * (`resumeApproval`) — same event grammar either way, so the parser
+   * is too.
+   */
+  const consumeSseStream = useCallback(
+    async (res: Response) => {
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      if (!reader) throw new Error("No reader available");
+
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const jsonStr = line.slice(6).trim();
+          if (!jsonStr || jsonStr === "[DONE]") continue;
+
+          try {
+            const event = JSON.parse(jsonStr);
+
+            switch (event.type) {
+              case "token":
+                setMessages((prev) => {
+                  const lastIdx = prev.length - 1;
+                  const last = prev[lastIdx];
+                  if (last && last.role === "assistant") {
+                    return [
+                      ...prev.slice(0, lastIdx),
+                      { ...last, content: last.content + (event.data.content || "") },
+                    ];
+                  }
+                  // Resume path: no assistant placeholder yet — create one.
+                  return [
+                    ...prev,
+                    {
+                      id: crypto.randomUUID(),
+                      role: "assistant",
+                      content: event.data.content || "",
+                      toolCalls: [],
+                      createdAt: new Date().toISOString(),
+                    },
+                  ];
+                });
+                setThinkingNode(null);
+                break;
+
+              case "tool_call_start":
+                setMessages((prev) => {
+                  const lastIdx = prev.length - 1;
+                  const last = prev[lastIdx];
+                  if (last && last.role === "assistant") {
+                    return [
+                      ...prev.slice(0, lastIdx),
+                      { ...last, toolCalls: [...(last.toolCalls || []), event.data] },
+                    ];
+                  }
+                  return prev;
+                });
+                break;
+
+              case "tool_call_end":
+                setMessages((prev) => {
+                  const lastIdx = prev.length - 1;
+                  const last = prev[lastIdx];
+                  if (last && last.role === "assistant" && last.toolCalls) {
+                    return [
+                      ...prev.slice(0, lastIdx),
+                      {
+                        ...last,
+                        toolCalls: last.toolCalls.map((tc) =>
+                          tc.id === event.data.id ? { ...tc, ...event.data } : tc
+                        ),
+                      },
+                    ];
+                  }
+                  return prev;
+                });
+                break;
+
+              case "agent_thinking":
+                setThinkingNode(event.data.node);
+                break;
+
+              case "waiting_approval":
+                // Graph paused at an interrupt — surface the approval card
+                // inline. Includes the action_payload (recipient/subject/body
+                // for Brand Manager, original comment + reply for CM, etc.)
+                // so the renderer doesn't need a second fetch.
+                setPendingApproval({
+                  approval_id: event.data.approval_id,
+                  thread_id: event.data.thread_id,
+                  agent_slug: event.data.agent_slug,
+                  action_type: event.data.action_type,
+                  preview: event.data.preview,
+                  payload: event.data.payload || {},
+                });
+                setThinkingNode(null);
+                break;
+
+              case "approval_recorded":
+                // Audit-trail event ahead of the resumed graph's tokens.
+                // Hide the pending card immediately so the user doesn't
+                // double-click; the resumed graph may emit a new
+                // `waiting_approval` shortly (revise-pitch loop) and we'll
+                // show that one fresh.
+                setPendingApproval(null);
+                break;
+
+              case "error":
+                setError(event.data.message);
+                break;
+
+              case "done":
+                break;
+            }
+          } catch {
+            // skip malformed JSON
+          }
+        }
+      }
+    },
+    []
+  );
 
   const sendMessage = useCallback(
     async (content: string) => {
@@ -92,102 +244,12 @@ export function useChat(options: UseChatOptions = {}) {
           throw new Error(`Stream failed: ${res.statusText}`);
         }
 
-        // Capture thread ID from headers
         const newThreadId = res.headers.get("X-Thread-Id");
         if (newThreadId && !threadId) {
           setThreadId(newThreadId);
         }
 
-        const reader = res.body?.getReader();
-        const decoder = new TextDecoder();
-
-        if (!reader) throw new Error("No reader available");
-
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const jsonStr = line.slice(6).trim();
-            if (!jsonStr || jsonStr === "[DONE]") continue;
-
-            try {
-              const event = JSON.parse(jsonStr);
-
-              switch (event.type) {
-                case "token":
-                  setMessages((prev) => {
-                    const lastIdx = prev.length - 1;
-                    const last = prev[lastIdx];
-                    if (last.role === "assistant") {
-                      return [
-                        ...prev.slice(0, lastIdx),
-                        { ...last, content: last.content + (event.data.content || "") },
-                      ];
-                    }
-                    return prev;
-                  });
-                  setThinkingNode(null);
-                  break;
-
-                case "tool_call_start":
-                  setMessages((prev) => {
-                    const lastIdx = prev.length - 1;
-                    const last = prev[lastIdx];
-                    if (last.role === "assistant") {
-                      return [
-                        ...prev.slice(0, lastIdx),
-                        { ...last, toolCalls: [...(last.toolCalls || []), event.data] },
-                      ];
-                    }
-                    return prev;
-                  });
-                  break;
-
-                case "tool_call_end":
-                  setMessages((prev) => {
-                    const lastIdx = prev.length - 1;
-                    const last = prev[lastIdx];
-                    if (last.role === "assistant" && last.toolCalls) {
-                      return [
-                        ...prev.slice(0, lastIdx),
-                        {
-                          ...last,
-                          toolCalls: last.toolCalls.map((tc) =>
-                            tc.id === event.data.id
-                              ? { ...tc, ...event.data }
-                              : tc
-                          ),
-                        },
-                      ];
-                    }
-                    return prev;
-                  });
-                  break;
-
-                case "agent_thinking":
-                  setThinkingNode(event.data.node);
-                  break;
-
-                case "error":
-                  setError(event.data.message);
-                  break;
-
-                case "done":
-                  break;
-              }
-            } catch {
-              // skip malformed JSON
-            }
-          }
-        }
+        await consumeSseStream(res);
       } catch (err) {
         if (err instanceof Error && err.name !== "AbortError") {
           setError(err.message);
@@ -198,7 +260,62 @@ export function useChat(options: UseChatOptions = {}) {
         abortRef.current = null;
       }
     },
-    [threadId, options.agentSlug]
+    [threadId, options.agentSlug, consumeSseStream]
+  );
+
+  /**
+   * Resume a paused graph from the inline approval card. Streams the
+   * continuation events back into the same chat — token/tool events flow
+   * through the existing SSE handler. If the graph re-pauses (e.g. Brand
+   * Manager's revise_pitch → approval_gate loop), `setPendingApproval`
+   * fires again with the next approval id.
+   */
+  const resumeApproval = useCallback(
+    async (
+      approvalId: string,
+      decision: "approved" | "rejected",
+      feedback?: string
+    ) => {
+      setError(null);
+      setIsStreaming(true);
+
+      const abortController = new AbortController();
+      abortRef.current = abortController;
+
+      try {
+        const auth = await authHeader();
+        const path = decision === "approved"
+          ? `/api/approvals/${approvalId}/approve`
+          : `/api/approvals/${approvalId}/reject`;
+        const body = decision === "rejected" && feedback
+          ? JSON.stringify({ feedback })
+          : undefined;
+        const res = await fetch(`${API_URL}${path}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...auth,
+          },
+          body,
+          signal: abortController.signal,
+        });
+
+        if (!res.ok) {
+          throw new Error(`Resume failed: ${res.statusText}`);
+        }
+
+        await consumeSseStream(res);
+      } catch (err) {
+        if (err instanceof Error && err.name !== "AbortError") {
+          setError(err.message);
+        }
+      } finally {
+        setIsStreaming(false);
+        setThinkingNode(null);
+        abortRef.current = null;
+      }
+    },
+    [consumeSseStream]
   );
 
   const stopStreaming = useCallback(() => {
@@ -221,6 +338,7 @@ export function useChat(options: UseChatOptions = {}) {
           createdAt: m.created_at as string,
         }))
       );
+      setPendingApproval(null);
     },
     []
   );
@@ -231,7 +349,9 @@ export function useChat(options: UseChatOptions = {}) {
     threadId,
     thinkingNode,
     error,
+    pendingApproval,
     sendMessage,
+    resumeApproval,
     stopStreaming,
     loadThread,
   };
