@@ -343,6 +343,7 @@ async def slack_callback(
     # channel — if `marcus-strategist` already exists in the workspace we
     # still want `marcus-publisher` to provision. The UI can offer a retry
     # for any that failed.
+    granted_scopes = saved.get("scopes") or []
     provisioned: list[dict] = []
     channel_errors: list[dict] = []
     for agent_slug, channel_name in slack_oauth.SLACK_AGENT_CHANNELS:
@@ -353,6 +354,7 @@ async def slack_callback(
                 org_id=user.org_id,
                 agent_slug=agent_slug,
                 channel_name=channel_name,
+                granted_scopes=granted_scopes,
             )
             provisioned.append(chan)
         except RuntimeError as e:
@@ -378,10 +380,11 @@ async def _provision_agent_channel(
     org_id: str,
     agent_slug: str,
     channel_name: str,
+    granted_scopes: list[str],
 ) -> dict:
     """Create a private channel for one agent + persist the mapping row +
-    post a greeting. Raises RuntimeError on Slack API failure; the caller
-    isolates per-channel failures."""
+    post a greeting under the agent's persona. Raises RuntimeError on
+    Slack API failure; the caller isolates per-channel failures."""
     chan = await slack_client.create_private_channel(
         install.access_token,
         name=channel_name,
@@ -402,11 +405,13 @@ async def _provision_agent_channel(
         },
         on_conflict="slack_channel_id,slack_thread_root_ts",
     ).execute()
+    persona = slack_oauth.persona_for(agent_slug, granted_scopes)
     display_name = agent_slug.replace("-", " ").title()
     await slack_client.post_message_in_thread(
         install.access_token,
         chan["channel_id"],
-        f"Marcus {display_name} is online. Post a message in this channel to start a run.",
+        f"Backroom {display_name} is online. Post a message in this channel to start a run.",
+        **persona,
     )
     return {
         "agent_slug": agent_slug,

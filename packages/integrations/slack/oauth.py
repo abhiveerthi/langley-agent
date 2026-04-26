@@ -23,6 +23,10 @@ import httpx
 SLACK_BOT_SCOPES = [
     "chat:write",
     "chat:write.public",
+    # Lets the bot post under per-agent display names + icons, so each of
+    # the 4 channels feels like talking to that specific agent rather than
+    # the underlying Slack app's bot user.
+    "chat:write.customize",
     "channels:read",
     "groups:read",
     "groups:write",
@@ -40,11 +44,36 @@ SLACK_BOT_SCOPES = [
 # no periods. The `marcus-` prefix keeps them grouped in the workspace
 # sidebar; future work can make this configurable per-org.
 SLACK_AGENT_CHANNELS: list[tuple[str, str]] = [
-    ("strategist", "marcus-strategist"),
-    ("publisher", "marcus-publisher"),
-    ("brand-manager", "marcus-brand-manager"),
-    ("community-manager", "marcus-community-manager"),
+    ("strategist", "backroom-strategist"),
+    ("publisher", "backroom-publisher"),
+    ("brand-manager", "backroom-brand-manager"),
+    ("community-manager", "backroom-community-manager"),
 ]
+
+
+# Per-agent display persona for chat.postMessage. With `chat:write.customize`
+# granted, posts go out under these names + emoji icons, so a message in
+# `#backroom-publisher` reads as from "Backroom Publisher" not the
+# underlying Slack app's single bot user. Standard pattern for
+# multi-persona apps (Linear, Loom, etc).
+SLACK_AGENT_PERSONAS: dict[str, dict[str, str]] = {
+    "strategist": {"username": "Backroom Strategist", "icon_emoji": ":dart:"},
+    "publisher": {"username": "Backroom Publisher", "icon_emoji": ":package:"},
+    "brand-manager": {"username": "Backroom Brand Manager", "icon_emoji": ":handshake:"},
+    "community-manager": {"username": "Backroom Community Manager", "icon_emoji": ":speech_balloon:"},
+}
+
+
+def persona_for(agent_slug: str, scopes: list[str] | None) -> dict[str, str]:
+    """Persona to pass to chat.postMessage for the given agent.
+
+    Returns an empty dict when `chat:write.customize` isn't granted (an
+    older install hasn't reauthed yet) so posts still go out as the
+    default bot user instead of being rejected with `not_allowed`.
+    """
+    if not scopes or "chat:write.customize" not in scopes:
+        return {}
+    return SLACK_AGENT_PERSONAS.get(agent_slug, {})
 
 AUTH_ENDPOINT = "https://slack.com/oauth/v2/authorize"
 TOKEN_ENDPOINT = "https://slack.com/api/oauth.v2.access"

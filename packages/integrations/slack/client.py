@@ -146,12 +146,25 @@ async def post_message_in_thread(
     text: str,
     *,
     thread_ts: str | None = None,
+    username: str | None = None,
+    icon_emoji: str | None = None,
 ) -> dict:
     """Post via chat.postMessage. If thread_ts is set, replies into that
-    Slack thread; otherwise posts at the top level. Returns {ts, channel}."""
+    Slack thread; otherwise posts at the top level. Returns {ts, channel}.
+
+    `username` + `icon_emoji` let one bot user post under per-agent
+    display names. They require the `chat:write.customize` scope on the
+    install — without it, Slack rejects the post with `not_allowed`. The
+    caller (slack_runner / oauth callback) gates these via
+    `oauth.persona_for(agent_slug, scopes)` so older installs don't break.
+    """
     payload: dict = {"channel": channel, "text": text}
     if thread_ts:
         payload["thread_ts"] = thread_ts
+    if username:
+        payload["username"] = username
+    if icon_emoji:
+        payload["icon_emoji"] = icon_emoji
     body = await _slack_post(access_token, "chat.postMessage", payload)
     return {"ts": body.get("ts"), "channel": body.get("channel")}
 

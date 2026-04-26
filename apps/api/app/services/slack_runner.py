@@ -28,12 +28,13 @@ from app.auth import with_tool_context
 from app.services.graph_orchestrator import stream_new_run
 from packages.integrations.slack import client as slack_client
 from packages.integrations.slack.identity import resolve_marcus_user
+from packages.integrations.slack.oauth import persona_for
 
 
 LINK_ACCOUNT_FALLBACK = (
-    "I can't link your Slack account to Marcus — your Slack email doesn't "
-    "match a Marcus user in this workspace's org. Sign in to Marcus with the "
-    "same email you use on Slack and try again."
+    "I can't link your Slack account to Backroom — your Slack email doesn't "
+    "match a Backroom user in this workspace's org. Sign in to Backroom with "
+    "the same email you use on Slack and try again."
 )
 
 
@@ -60,10 +61,12 @@ async def handle_message(
     org_id = chan["org_id"]
     agent_slug = chan["agent_slug"]
 
-    bot_token = _lookup_bot_token(supabase, slack_team_id)
-    if not bot_token:
+    install = _lookup_install(supabase, slack_team_id)
+    if install is None:
         # Workspace's Slack install was deleted; nothing to do.
         return
+    bot_token = install["access_token"]
+    persona = persona_for(agent_slug, install.get("scopes") or [])
 
     ident = await resolve_marcus_user(
         supabase=supabase,
@@ -77,6 +80,7 @@ async def handle_message(
             slack_channel_id,
             LINK_ACCOUNT_FALLBACK,
             thread_ts=slack_thread_ts or slack_message_ts,
+            **persona,
         )
         return
 
@@ -97,7 +101,7 @@ async def handle_message(
         thread_id=marcus_thread_id,
         org_id=org_id,
         user_id=ident["user_id"],
-        title=f"#marcus-{agent_slug} (Slack)",
+        title=f"#backroom-{agent_slug} (Slack)",
     )
 
     _insert_message(
@@ -157,6 +161,7 @@ async def handle_message(
         slack_channel_id,
         final,
         thread_ts=root_ts,
+        **persona,
     )
 
 
@@ -176,17 +181,19 @@ def _lookup_channel_mapping(supabase: Any, slack_channel_id: str) -> dict | None
     return resp.data[0] if resp.data else None
 
 
-def _lookup_bot_token(supabase: Any, slack_team_id: str) -> str | None:
-    """Bot token (xoxb-) for this Slack workspace, by team_id."""
+def _lookup_install(supabase: Any, slack_team_id: str) -> dict | None:
+    """Bot token + granted scopes for this Slack workspace, by team_id.
+    Scopes drive whether per-agent persona customization (username +
+    icon_emoji) gets sent to chat.postMessage."""
     resp = (
         supabase.table("integrations")
-        .select("access_token")
+        .select("access_token, scopes")
         .eq("provider", "slack")
         .filter("metadata->>team_id", "eq", slack_team_id)
         .limit(1)
         .execute()
     )
-    return resp.data[0]["access_token"] if resp.data else None
+    return resp.data[0] if resp.data else None
 
 
 def _resolve_marcus_thread(
