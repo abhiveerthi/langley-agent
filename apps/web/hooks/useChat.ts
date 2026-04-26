@@ -20,7 +20,35 @@ export interface ChatMessage {
   role: "user" | "assistant" | "tool" | "system";
   content: string;
   toolCalls?: ToolCallEvent[];
+  /**
+   * Per-message structured outputs the backend emits via the
+   * `structured_output` SSE event. Keyed by `kind` — currently
+   * only "brief" (Strategist's WeeklyBrief), Publisher's "package" is on deck.
+   * Renderers live in `components/structured/`.
+   */
+  structured?: Record<string, unknown>;
   createdAt: string;
+}
+
+/**
+ * Strategist's WeeklyBrief — Pydantic schema in
+ * packages/agents/strategist/agent.py mirrored here. The `compose_brief`
+ * node fills this and `get_structured_outputs` surfaces it in the SSE
+ * stream as `{kind: "brief", data: WeeklyBrief}`. Optional fields tolerate
+ * older saved briefs that may lack newer keys.
+ */
+export interface WeeklyBrief {
+  headline: string;
+  ideas: VideoIdea[];
+}
+
+export interface VideoIdea {
+  title: string;
+  hook: string;
+  why_now: string;
+  confidence: "high" | "medium" | "low";
+  rationale: string;
+  citations?: string[];
 }
 
 export interface ToolCallEvent {
@@ -180,6 +208,31 @@ export function useChat(options: UseChatOptions = {}) {
                 // `waiting_approval` shortly (revise-pitch loop) and we'll
                 // show that one fresh.
                 setPendingApproval(null);
+                break;
+
+              case "structured_output":
+                // Per-run typed payload (Strategist's WeeklyBrief, eventually
+                // Publisher's package). Attach to the latest assistant message
+                // so the renderer (MessageBubble) can show a rich card next
+                // to the agent's prose. `kind` discriminates which renderer
+                // fires — see components/structured/* for the per-kind UI.
+                setMessages((prev) => {
+                  const lastIdx = prev.length - 1;
+                  const last = prev[lastIdx];
+                  if (last && last.role === "assistant") {
+                    return [
+                      ...prev.slice(0, lastIdx),
+                      {
+                        ...last,
+                        structured: {
+                          ...(last.structured || {}),
+                          [event.data.kind]: event.data.data,
+                        },
+                      },
+                    ];
+                  }
+                  return prev;
+                });
                 break;
 
               case "error":

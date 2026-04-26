@@ -87,6 +87,29 @@ class BaseAgent:
         """
         return None
 
+    def get_structured_outputs(
+        self, state: dict, visited_nodes: list[str]
+    ) -> dict[str, dict]:
+        """Return per-run structured outputs the frontend should render as
+        rich cards alongside the chat (Strategist's WeeklyBrief, eventually
+        Publisher's package, etc.).
+
+        The orchestrator calls this after `astream` finishes for a given
+        run and emits one `structured_output` SSE event per (kind, data)
+        entry. Default: nothing — agents that produce structured output
+        override this. `visited_nodes` is the list of LangGraph nodes that
+        executed THIS run (not historical state on the thread); use it to
+        gate emission so a brief generated on turn 1 isn't re-emitted on
+        every subsequent turn that happens to inherit the state.
+
+        Return shape:
+            {
+                "brief": {...WeeklyBrief.model_dump()...},
+                "package": {...PublisherPackage.model_dump()...},
+            }
+        """
+        return {}
+
     async def run(self, input_data: dict, thread_id: str, stream: bool = False):
         app = await self.compile()
         config = {"configurable": {"thread_id": thread_id}}
