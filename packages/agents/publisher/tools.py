@@ -349,6 +349,203 @@ async def post_tweet(text: str) -> str:
     return f"✓ Posted to X: tweet_id={tweet_id}{suffix}"
 
 
+@tool
+async def list_packages(limit: int = 10) -> str:
+    """List recent Publisher packages for this org.
+
+    Args:
+        limit: How many packages to return (1–50, default 10).
+
+    Returns a compact markdown table: short id, video title, status,
+    push state for YouTube + X, created date. Use this when the user
+    asks "what have we packaged this week?" or refers to a video by
+    title (e.g. "the lasagna video") — find the matching row, then
+    call `get_package` for full content.
+    """
+    org_id = current_org_id.get()
+    supabase = current_supabase.get()
+    if not org_id or supabase is None:
+        return "No org context."
+    limit = min(max(limit, 1), 50)
+    resp = (
+        supabase.table("publisher_packages")
+        .select(
+            "id, video_id, video_title, status, "
+            "youtube_pushed_at, x_posted_at, created_at"
+        )
+        .eq("org_id", org_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    rows = resp.data or []
+    if not rows:
+        return "No packages yet for this channel."
+    lines = [
+        "| id | video | status | YT | X | created |",
+        "|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        title = (r.get("video_title") or r.get("video_id") or "(untitled)")[:60]
+        lines.append(
+            f"| `{r['id'][:8]}` | {title} | {r['status']} | "
+            f"{'✓' if r.get('youtube_pushed_at') else '—'} | "
+            f"{'✓' if r.get('x_posted_at') else '—'} | "
+            f"{(r.get('created_at') or '')[:10]} |"
+        )
+    return "\n".join(lines)
+
+
+@tool
+async def get_package(package_id: str) -> str:
+    """Get full content of a Publisher package by id.
+
+    Args:
+        package_id: UUID (or short prefix) of the package. The list_packages
+            output shows the first 8 chars; this accepts that or the full UUID.
+
+    Returns the entire package: title variants, description, tags,
+    chapters, pinned comment, thumbnail copy, and the full social kit
+    (tweets, X thread, LinkedIn, IG, newsletter). Use when the user
+    asks "show me the X thread" / "what's the description we drafted"
+    so you can quote it back without hallucinating.
+    """
+    org_id = current_org_id.get()
+    supabase = current_supabase.get()
+    if not org_id or supabase is None:
+        return "No org context."
+
+    pkg = _fetch_package_by_id_prefix(supabase, org_id, package_id)
+    if not pkg:
+        return f"No package found matching `{package_id}`."
+    return _format_package(pkg)
+
+
+@tool
+async def get_package_by_video(video_id: str) -> str:
+    """Find an existing Publisher package for a YouTube video.
+
+    Args:
+        video_id: YouTube video id (the 11-char string after `v=` in the URL).
+
+    USE THIS BEFORE creating a new package for a video the user has
+    referenced — if a package already exists, retrieve it instead of
+    re-running the full create flow. Returns the full package content
+    on hit, or a "no package yet" line on miss.
+    """
+    org_id = current_org_id.get()
+    supabase = current_supabase.get()
+    if not org_id or supabase is None:
+        return "No org context."
+    resp = (
+        supabase.table("publisher_packages")
+        .select("*")
+        .eq("org_id", org_id)
+        .eq("video_id", video_id)
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        return f"No package yet for video `{video_id}`."
+    return _format_package(resp.data[0])
+
+
+# ── Package formatters (private) ───────────────────────────────────────────
+
+def _fetch_package_by_id_prefix(supabase, org_id: str, prefix: str) -> dict | None:
+    """Fetch a package whose id starts with `prefix`. Accepts either the
+    8-char short id from list_packages or a full UUID. Scoped to org_id
+    so a prefix collision across tenants can't leak data."""
+    prefix = (prefix or "").strip()
+    if not prefix:
+        return None
+    if len(prefix) >= 32:
+        # Looks like a full UUID; equality match is faster + index-friendly.
+        resp = (
+            supabase.table("publisher_packages")
+            .select("*")
+            .eq("org_id", org_id)
+            .eq("id", prefix)
+            .limit(1)
+            .execute()
+        )
+    else:
+        # Short id — pull recent rows and prefix-match in Python. Cheaper
+        # than ILIKE on a uuid column (which would force a cast scan).
+        resp = (
+            supabase.table("publisher_packages")
+            .select("*")
+            .eq("org_id", org_id)
+            .order("created_at", desc=True)
+            .limit(50)
+            .execute()
+        )
+        rows = [r for r in (resp.data or []) if str(r["id"]).startswith(prefix)]
+        return rows[0] if rows else None
+    return resp.data[0] if resp.data else None
+
+
+def _format_package(pkg: dict) -> str:
+    """Markdown view of a package, suitable for both Slack and the chat
+    UI (both render markdown). Skips empty fields so the output is
+    proportional to what was actually generated."""
+    parts: list[str] = []
+    title = pkg.get("video_title") or pkg.get("video_id") or "(untitled)"
+    parts.append(f"# {title}")
+    parts.append(
+        f"_id: `{pkg['id']}` · status: `{pkg.get('status', 'unknown')}` · "
+        f"YT: {'pushed' if pkg.get('youtube_pushed_at') else 'not pushed'} · "
+        f"X: {'posted' if pkg.get('x_posted_at') else 'not posted'}_"
+    )
+
+    titles = pkg.get("title_variants") or []
+    if titles:
+        parts.append("## Title variants")
+        parts.extend(f"- {t}" for t in titles)
+
+    if pkg.get("description"):
+        parts.append("## Description")
+        parts.append(pkg["description"])
+
+    tags = pkg.get("tags") or []
+    if tags:
+        parts.append("## Tags")
+        parts.append(", ".join(f"`{t}`" for t in tags))
+
+    chapters = pkg.get("chapters") or []
+    if chapters:
+        parts.append("## Chapters")
+        for c in chapters:
+            ts = c.get("timestamp") or c.get("ts") or ""
+            label = c.get("title") or c.get("label") or ""
+            parts.append(f"- {ts} — {label}" if ts else f"- {label}")
+
+    if pkg.get("pinned_comment"):
+        parts.append("## Pinned comment")
+        parts.append(pkg["pinned_comment"])
+
+    thumbs = pkg.get("thumbnail_ideas") or []
+    if thumbs:
+        parts.append("## Thumbnail copy")
+        parts.extend(f"- {t}" for t in thumbs)
+
+    social = pkg.get("social") or {}
+    if social:
+        parts.append("## Social kit")
+        for platform in ("twitter", "x_thread", "linkedin", "instagram", "newsletter"):
+            content = social.get(platform)
+            if content:
+                parts.append(f"### {platform}")
+                parts.append(
+                    content if isinstance(content, str) else str(content)
+                )
+
+    if pkg.get("warning"):
+        parts.append(f"> ⚠️ {pkg['warning']}")
+
+    return "\n\n".join(parts)
+
+
 def get_publisher_tools():
     return [
         get_video_details,
@@ -358,4 +555,7 @@ def get_publisher_tools():
         get_video_transcript,
         update_video_metadata,
         post_tweet,
+        list_packages,
+        get_package,
+        get_package_by_video,
     ]
