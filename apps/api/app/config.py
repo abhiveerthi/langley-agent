@@ -28,10 +28,12 @@ class Settings(BaseSettings):
     # Encryption
     encryption_key: str = ""
 
-    # Google OAuth (YouTube + future Google services)
+    # Google OAuth (YouTube + Gmail share the same OAuth client; each
+    # service has its own redirect URI registered in the Google console).
     google_client_id: str = ""
     google_client_secret: str = ""
     youtube_oauth_redirect_uri: str = "http://localhost:3000/auth/youtube/callback"
+    gmail_oauth_redirect_uri: str = "http://localhost:3000/auth/gmail/callback"
 
     # X (Twitter) OAuth 2.0 with PKCE.
     # client_secret is optional — leave it blank for Public clients (PKCE only).

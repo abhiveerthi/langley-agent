@@ -82,6 +82,7 @@ export const brandDeals = [
 // Integrations
 export const integrations = [
   { id: "youtube", name: "YouTube Studio", description: "Read uploads, push titles and metadata", category: "Platform", connected: false, lastSync: null, icon: "youtube" },
+  { id: "gmail", name: "Gmail", description: "Send emails on your behalf — sponsor pitches, replies, follow-ups", category: "Communication", connected: false, lastSync: null, icon: "gmail" },
   { id: "twitter", name: "X (Twitter)", description: "Auto-post tweet drafts from Publisher", category: "Platform", connected: false, lastSync: null, icon: "twitter" },
   { id: "slack", name: "Slack", description: "Team notifications and approval pings", category: "Communication", connected: false, lastSync: null, icon: "slack" },
   { id: "dropbox", name: "Dropbox", description: "Sync raw footage and exports", category: "Storage", connected: false, lastSync: null, icon: "dropbox" },
