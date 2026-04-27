@@ -9,6 +9,8 @@ from app.config import Settings, get_settings
 from app.dependencies import CurrentUser, get_current_user, get_supabase
 from packages.integrations.dropbox import client as dropbox_client
 from packages.integrations.dropbox import oauth as dropbox_oauth
+from packages.integrations.gmail import client as gmail_client
+from packages.integrations.gmail import oauth as gmail_oauth
 from packages.integrations.monday import client as monday_client
 from packages.integrations.monday import oauth as monday_oauth
 from packages.integrations.slack import client as slack_client
@@ -181,6 +183,106 @@ async def youtube_uploads(
         }
         for i in items
     ]
+
+
+# ── Gmail ───────────────────────────────────────────────────────────────────
+# Same Google OAuth client as YouTube; different scope (gmail.send only) and
+# different redirect URI. Sensitive scope, light verification path.
+
+@router.post("/integrations/gmail/auth-url", response_model=AuthUrlResponse)
+async def gmail_auth_url(
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    if not settings.google_client_id or not settings.google_client_secret:
+        raise HTTPException(500, "Google OAuth is not configured")
+    if not settings.jwt_secret:
+        raise HTTPException(500, "JWT secret is not configured")
+
+    state = gmail_oauth.sign_state(
+        {"org_id": user.org_id, "user_id": user.id},
+        settings.jwt_secret,
+    )
+    url = gmail_oauth.build_auth_url(
+        client_id=settings.google_client_id,
+        redirect_uri=settings.gmail_oauth_redirect_uri,
+        state=state,
+    )
+    return AuthUrlResponse(auth_url=url)
+
+
+@router.post("/integrations/gmail/callback")
+async def gmail_callback(
+    body: CallbackRequest,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    supabase: Client = Depends(get_supabase),
+):
+    try:
+        payload = gmail_oauth.verify_state(body.state, settings.jwt_secret)
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid state: {e}")
+
+    if payload.get("org_id") != user.org_id:
+        raise HTTPException(403, "State does not match current org")
+
+    try:
+        tokens = await gmail_oauth.exchange_code(
+            code=body.code,
+            client_id=settings.google_client_id,
+            client_secret=settings.google_client_secret,
+            redirect_uri=settings.gmail_oauth_redirect_uri,
+        )
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+    try:
+        userinfo = await gmail_oauth.fetch_userinfo(tokens.access_token)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+    # Sanity check: only the gmail.send scope earns the integration; if Google
+    # didn't grant it (user dismissed it on the consent screen), surface that
+    # so the UI can prompt a retry instead of silently saving a useless conn.
+    granted = (tokens.scope or "").split()
+    if "https://www.googleapis.com/auth/gmail.send" not in granted:
+        raise HTTPException(
+            400,
+            "gmail.send scope was not granted; reconnect and accept all permissions",
+        )
+
+    saved = gmail_client.save_connection(supabase, user.org_id, tokens, userinfo)
+    return {
+        "status": "ok",
+        "email": userinfo.get("email"),
+        "scopes": saved.get("scopes", []),
+    }
+
+
+@router.get("/integrations/gmail/status")
+async def gmail_status(
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    conn = gmail_client.get_connection(supabase, user.org_id)
+    if not conn:
+        return {"connected": False}
+    return {
+        "connected": True,
+        "status": conn.get("status", "active"),
+        "userinfo": conn.get("metadata") or {},
+        "scopes": conn.get("scopes") or [],
+        "token_expires_at": conn.get("token_expires_at"),
+    }
+
+
+@router.delete("/integrations/gmail")
+async def gmail_disconnect(
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    gmail_client.delete_connection(supabase, user.org_id)
+    return {"status": "disconnected"}
 
 
 # ── X (Twitter) ──────────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ const categories = ["All", "Platform", "Communication", "Storage", "Productivity
 
 const iconColors: Record<string, string> = {
   youtube: "bg-red-600/20",
+  gmail: "bg-red-500/15",
   twitter: "bg-foreground/10",
   slack: "bg-violet-500/15",
   dropbox: "bg-blue-500/15",
@@ -19,6 +20,7 @@ const iconColors: Record<string, string> = {
 
 const iconSrc: Record<string, string> = {
   youtube: "/integrations/youtube.svg",
+  gmail: "/integrations/gmail.svg",
   twitter: "/integrations/x.svg",
   slack: "/integrations/slack.svg",
   dropbox: "/integrations/dropbox.svg",
@@ -86,6 +88,16 @@ type MondayState =
     }
   | { state: "error"; message: string };
 
+type GmailState =
+  | { state: "loading" }
+  | { state: "disconnected" }
+  | {
+      state: "connected";
+      userinfo: { email?: string; name?: string; picture?: string; verified_email?: boolean };
+      scopes: string[];
+    }
+  | { state: "error"; message: string };
+
 export default function IntegrationsPage() {
   const [activeCategory, setActiveCategory] = useState("All");
   const [requestText, setRequestText] = useState("");
@@ -95,11 +107,13 @@ export default function IntegrationsPage() {
   const [slack, setSlack] = useState<SlackState>({ state: "loading" });
   const [dropbox, setDropbox] = useState<DropboxState>({ state: "loading" });
   const [monday, setMonday] = useState<MondayState>({ state: "loading" });
+  const [gmail, setGmail] = useState<GmailState>({ state: "loading" });
   const [busy, setBusy] = useState(false);
   const [twitterBusy, setTwitterBusy] = useState(false);
   const [slackBusy, setSlackBusy] = useState(false);
   const [dropboxBusy, setDropboxBusy] = useState(false);
   const [mondayBusy, setMondayBusy] = useState(false);
+  const [gmailBusy, setGmailBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
   const router = useRouter();
@@ -265,6 +279,36 @@ export default function IntegrationsPage() {
     fetchMonday();
   }, [fetchMonday]);
 
+  const fetchGmail = useCallback(async () => {
+    try {
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        setGmail({ state: "error", message: "Not signed in" });
+        return;
+      }
+      const res = await fetch(`${API}/api/integrations/gmail/status`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) {
+        setGmail({ state: "error", message: `HTTP ${res.status}` });
+        return;
+      }
+      const data = await res.json();
+      if (!data.connected) {
+        setGmail({ state: "disconnected" });
+        return;
+      }
+      setGmail({ state: "connected", userinfo: data.userinfo || {}, scopes: data.scopes || [] });
+    } catch (e) {
+      setGmail({ state: "error", message: (e as Error).message });
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchGmail();
+  }, [fetchGmail]);
+
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(null), 2200);
@@ -348,6 +392,22 @@ export default function IntegrationsPage() {
     url.searchParams.delete("reason");
     router.replace(url.pathname + (url.search ? url.search : ""));
   }, [searchParams, router, fetchMonday]);
+
+  useEffect(() => {
+    const gm = searchParams.get("gmail");
+    if (!gm) return;
+    if (gm === "connected") {
+      setToast("Gmail connected");
+      fetchGmail();
+    } else if (gm === "error") {
+      const reason = searchParams.get("reason") || "unknown";
+      setToast(`Gmail connect failed: ${reason.slice(0, 80)}`);
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.delete("gmail");
+    url.searchParams.delete("reason");
+    router.replace(url.pathname + (url.search ? url.search : ""));
+  }, [searchParams, router, fetchGmail]);
 
   async function connectYouTube() {
     setBusy(true);
@@ -574,6 +634,51 @@ export default function IntegrationsPage() {
     }
   }
 
+  async function connectGmail() {
+    setGmailBusy(true);
+    try {
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        setToast("Sign in first");
+        return;
+      }
+      const res = await fetch(`${API}/api/integrations/gmail/auth-url`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) {
+        setToast(`Failed to start connect (HTTP ${res.status})`);
+        return;
+      }
+      const { auth_url } = await res.json();
+      window.location.href = auth_url;
+    } finally {
+      setGmailBusy(false);
+    }
+  }
+
+  async function disconnectGmail() {
+    setGmailBusy(true);
+    try {
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+      const res = await fetch(`${API}/api/integrations/gmail`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (res.ok) {
+        setToast("Gmail disconnected");
+        setGmail({ state: "disconnected" });
+      } else {
+        setToast(`Failed to disconnect (HTTP ${res.status})`);
+      }
+    } finally {
+      setGmailBusy(false);
+    }
+  }
+
   const filtered =
     activeCategory === "All"
       ? integrations
@@ -581,6 +686,7 @@ export default function IntegrationsPage() {
 
   const connectedCount =
     (youtube.state === "connected" ? 1 : 0) +
+    (gmail.state === "connected" ? 1 : 0) +
     (twitter.state === "connected" ? 1 : 0) +
     (slack.state === "connected" ? 1 : 0) +
     (dropbox.state === "connected" ? 1 : 0) +
@@ -588,6 +694,7 @@ export default function IntegrationsPage() {
     filtered.filter(
       (i) =>
         i.id !== "youtube" &&
+        i.id !== "gmail" &&
         i.id !== "twitter" &&
         i.id !== "slack" &&
         i.id !== "dropbox" &&
@@ -701,6 +808,18 @@ export default function IntegrationsPage() {
                 onConnect={connectMonday}
                 onDisconnect={disconnectMonday}
                 onRefresh={fetchMonday}
+              />
+            );
+          }
+          if (integration.id === "gmail") {
+            return (
+              <GmailCard
+                key={integration.id}
+                state={gmail}
+                busy={gmailBusy}
+                onConnect={connectGmail}
+                onDisconnect={disconnectGmail}
+                onRefresh={fetchGmail}
               />
             );
           }
@@ -1572,6 +1691,146 @@ function MondayCard({
                 Workspace
               </a>
             )}
+            <button
+              onClick={onRefresh}
+              disabled={busy}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+            >
+              <RefreshCw className="h-3 w-3" />
+              Refresh
+            </button>
+            <button
+              onClick={onDisconnect}
+              disabled={busy}
+              className="flex-1 rounded-md border border-red-500/30 py-1.5 text-xs font-medium text-red-400 transition-colors hover:bg-red-500/10 disabled:opacity-50"
+            >
+              {busy ? "…" : "Disconnect"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GmailCard({
+  state,
+  busy,
+  onConnect,
+  onDisconnect,
+  onRefresh,
+}: {
+  state: GmailState;
+  busy: boolean;
+  onConnect: () => void;
+  onDisconnect: () => void;
+  onRefresh: () => void;
+}) {
+  const isConnected = state.state === "connected";
+  const isLoading = state.state === "loading";
+  // gmail.send is the only scope the agents currently use; show a clear
+  // 'Send only' badge so the user knows we don't read their inbox.
+  const hasSendScope =
+    state.state === "connected" &&
+    state.scopes.includes("https://www.googleapis.com/auth/gmail.send");
+
+  return (
+    <div
+      className={cn(
+        "rounded-lg border bg-card p-5 transition-colors",
+        isConnected ? "border-border" : "border-border hover:border-border/80",
+      )}
+    >
+      <div className="mb-4 flex items-start justify-between">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-red-500/15 p-2">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/integrations/gmail.svg" alt="" className="h-full w-full object-contain" />
+          </div>
+          <div className="min-w-0">
+            <p className="font-medium text-foreground">Gmail</p>
+            {state.state === "connected" && state.userinfo.email ? (
+              <p className="text-xs text-muted-foreground truncate flex items-center gap-1.5">
+                {state.userinfo.picture && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={state.userinfo.picture} alt="" className="h-3.5 w-3.5 rounded-full" />
+                )}
+                {state.userinfo.email}
+              </p>
+            ) : (
+              <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-xs font-medium text-violet-400">
+                Communication
+              </span>
+            )}
+          </div>
+        </div>
+        {isConnected && (
+          <div className="flex items-center gap-1 text-xs text-emerald-400">
+            <div className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+            Live
+          </div>
+        )}
+      </div>
+
+      <p className="mb-4 text-sm text-muted-foreground">
+        Lets agents send email from your Gmail — Brand Manager pitches, Publisher follow-ups. Send-only scope; we don&apos;t read your inbox.
+      </p>
+
+      {isLoading && (
+        <button
+          disabled
+          className="flex w-full items-center justify-center gap-2 rounded-md border border-border bg-muted/30 py-2 text-xs font-medium text-muted-foreground"
+        >
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Checking…
+        </button>
+      )}
+
+      {state.state === "disconnected" && (
+        <button
+          onClick={onConnect}
+          disabled={busy}
+          className="flex w-full items-center justify-center gap-2 rounded-md bg-primary py-2 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+        >
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          Connect Gmail
+        </button>
+      )}
+
+      {state.state === "error" && (
+        <div>
+          <div className="mb-2 flex items-center gap-2 text-xs text-red-400">
+            <AlertCircle className="h-3.5 w-3.5" />
+            {state.message}
+          </div>
+          <button
+            onClick={onRefresh}
+            className="w-full rounded-md border border-border py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {isConnected && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+            <div className="flex items-center gap-2">
+              <CheckCircle className="h-3.5 w-3.5 text-emerald-400" />
+              <span>Connected</span>
+            </div>
+            <span
+              className={cn(
+                "rounded-full border px-2 py-0.5 text-[10px] font-medium",
+                hasSendScope
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                  : "border-amber-500/30 bg-amber-500/10 text-amber-400",
+              )}
+            >
+              {hasSendScope ? "Send only" : "Missing send scope"}
+            </span>
+          </div>
+          <div className="flex gap-2">
             <button
               onClick={onRefresh}
               disabled={busy}
