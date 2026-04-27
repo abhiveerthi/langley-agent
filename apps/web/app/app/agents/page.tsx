@@ -1,31 +1,204 @@
+"use client";
+
 import Link from "next/link";
-import { Plus, Radar, Lightbulb, Rocket, Megaphone, ArrowRight, CheckCircle2, Clock, MessageSquare } from "lucide-react";
-import { agents, botConnections } from "@/lib/mock-data";
+import { useCallback, useEffect, useState } from "react";
+import { createClient } from "@/lib/supabase/client";
+import {
+  ArrowRight,
+  Compass,
+  Megaphone,
+  MessageCircle,
+  Briefcase,
+  Scissors,
+  Loader2,
+  AlertCircle,
+  RefreshCw,
+  CheckSquare,
+  Sparkles,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const agentColors: Record<string, { bg: string; icon: string; dot: string; border: string }> = {
-  research:  { bg: "bg-indigo-500/10", icon: "text-indigo-400", dot: "bg-indigo-500", border: "border-indigo-500/20" },
-  intel:     { bg: "bg-violet-500/10", icon: "text-violet-400", dot: "bg-violet-500", border: "border-violet-500/20" },
-  comms:     { bg: "bg-emerald-500/10", icon: "text-emerald-400", dot: "bg-emerald-500", border: "border-emerald-500/20" },
-  publisher: { bg: "bg-sky-500/10", icon: "text-sky-400", dot: "bg-sky-500", border: "border-sky-500/20" },
+const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+// Mirrors packages/agents/registry.py. Editor lives here too even though it
+// has no dashboard yet — surfacing the "coming soon" state is the entire
+// point of this page.
+type AgentMeta = {
+  slug: string;
+  name: string;
+  tagline: string;
+  href: string | null; // null = no dedicated dashboard yet
+  icon: React.ElementType;
+  accent: { bg: string; icon: string; border: string };
+  status: "active" | "coming-soon";
+  highlights: string[];
 };
 
-const agentIcons: Record<string, React.ElementType> = {
-  research:  Radar,
-  intel:     Lightbulb,
-  comms:     Rocket,
-  publisher: Megaphone,
-};
-
-const activityLog = [
-  { agentId: "research", text: "Trend Scout completed Research Brief #47", time: "Today 8:04 AM", href: "/app/tasks" },
-  { agentId: "intel",    text: "Content Strategist completed Brand Brief #23", time: "Today 9:02 AM", href: "/app/tasks" },
-  { agentId: "comms",    text: "Growth Engine discovered 4 new sponsor leads", time: "3 days ago", href: "/agents/comms" },
-  { agentId: "research", text: "Trend Scout identified 12 new trends in Creator Economy", time: "Last Monday 8:11 AM", href: "/agents/research" },
-  { agentId: "comms",    text: "Growth Engine drafted email blast for 'AI Tools' video", time: "4 days ago", href: "/agents/comms" },
+const AGENTS: AgentMeta[] = [
+  {
+    slug: "strategist",
+    name: "Strategist",
+    tagline: "Decides what to make next — channel analytics, niche trends, ranked video ideas.",
+    href: "/app/agents/strategist",
+    icon: Compass,
+    accent: {
+      bg: "bg-indigo-500/10",
+      icon: "text-indigo-400",
+      border: "border-indigo-500/20",
+    },
+    status: "active",
+    highlights: ["Weekly briefs", "Hooks & outlines", "Competitor scan"],
+  },
+  {
+    slug: "publisher",
+    name: "Publisher",
+    tagline: "Ships every video end-to-end — metadata, chapters, social drafts, approval-gated YouTube push.",
+    href: "/app/agents/publisher",
+    icon: Megaphone,
+    accent: {
+      bg: "bg-sky-500/10",
+      icon: "text-sky-400",
+      border: "border-sky-500/20",
+    },
+    status: "active",
+    highlights: ["Metadata kits", "Tweet + newsletter", "Push to YouTube"],
+  },
+  {
+    slug: "community-manager",
+    name: "Community Manager",
+    tagline: "Triages YouTube comments, drafts replies in your voice, posts approved replies.",
+    href: "/app/agents/community-manager",
+    icon: MessageCircle,
+    accent: {
+      bg: "bg-emerald-500/10",
+      icon: "text-emerald-400",
+      border: "border-emerald-500/20",
+    },
+    status: "active",
+    highlights: ["Comment triage", "Voice-matched drafts", "Gated replies"],
+  },
+  {
+    slug: "brand-manager",
+    name: "Brand Manager",
+    tagline: "Drafts sponsor outreach + tailored pitches, sends approved emails via Resend.",
+    href: "/app/agents/brand-manager",
+    icon: Briefcase,
+    accent: {
+      bg: "bg-amber-500/10",
+      icon: "text-amber-400",
+      border: "border-amber-500/20",
+    },
+    status: "active",
+    highlights: ["Lead discovery", "Brand research", "Pitch sending"],
+  },
+  {
+    slug: "editor",
+    name: "Editor",
+    tagline: "Cuts long-form video into shorts, dubs, captions, and thumbnails. Video worker not yet available.",
+    href: "/app/agents/editor",
+    icon: Scissors,
+    accent: {
+      bg: "bg-zinc-500/10",
+      icon: "text-zinc-400",
+      border: "border-zinc-500/20",
+    },
+    status: "coming-soon",
+    highlights: ["Clips", "Dubbing", "Subtitles", "Thumbnails"],
+  },
 ];
 
+type Run = {
+  id: string;
+  agent_id: string | null;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  agents?: { name: string; slug: string; icon?: string } | null;
+};
+
+type RunsState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ok"; items: Run[] };
+
+type Approval = {
+  id: string;
+  agent_slug: string | null;
+  action_type: string;
+  preview: string | null;
+  created_at: string;
+  status: string;
+};
+
+type ApprovalsState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ok"; items: Approval[] };
+
+async function authHeader(): Promise<Record<string, string>> {
+  const supabase = createClient();
+  const { data: { session } } = await supabase.auth.getSession();
+  return session ? { Authorization: `Bearer ${session.access_token}` } : {};
+}
+
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  const diff = Date.now() - then;
+  const hours = diff / 3600_000;
+  if (hours < 1) return "Just now";
+  if (hours < 24) return `${Math.floor(hours)}h ago`;
+  const days = hours / 24;
+  if (days < 7) return `${Math.floor(days)}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
 export default function AgentsPage() {
+  const [runs, setRuns] = useState<RunsState>({ status: "loading" });
+  const [approvals, setApprovals] = useState<ApprovalsState>({ status: "loading" });
+
+  const fetchRuns = useCallback(async () => {
+    try {
+      const auth = await authHeader();
+      if (!auth.Authorization) {
+        setRuns({ status: "error", message: "Not signed in" });
+        return;
+      }
+      const res = await fetch(`${API}/api/runs`, { headers: auth });
+      if (!res.ok) {
+        setRuns({ status: "error", message: `HTTP ${res.status}` });
+        return;
+      }
+      const items = (await res.json()) as Run[];
+      setRuns({ status: "ok", items: items.slice(0, 8) });
+    } catch (e) {
+      setRuns({ status: "error", message: (e as Error).message });
+    }
+  }, []);
+
+  const fetchApprovals = useCallback(async () => {
+    try {
+      const auth = await authHeader();
+      if (!auth.Authorization) {
+        setApprovals({ status: "error", message: "Not signed in" });
+        return;
+      }
+      const res = await fetch(`${API}/api/approvals`, { headers: auth });
+      if (!res.ok) {
+        setApprovals({ status: "error", message: `HTTP ${res.status}` });
+        return;
+      }
+      const items = (await res.json()) as Approval[];
+      setApprovals({ status: "ok", items });
+    } catch (e) {
+      setApprovals({ status: "error", message: (e as Error).message });
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchRuns();
+    fetchApprovals();
+  }, [fetchRuns, fetchApprovals]);
+
   return (
     <div className="p-6 space-y-8">
       {/* Header */}
@@ -33,177 +206,195 @@ export default function AgentsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">Agents</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Autonomous AI workers running in the background for your channel
+            Your back-office team. Each agent has a focused job and tools to do it.
           </p>
         </div>
-        <button className="flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90">
-          <Plus className="h-4 w-4" />
-          Deploy New Agent
+      </div>
+
+      {/* Pending approvals */}
+      <PendingApprovals state={approvals} />
+
+      {/* Roster */}
+      <div className="grid gap-4 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
+        {AGENTS.map((agent) => (
+          <AgentCard key={agent.slug} agent={agent} />
+        ))}
+      </div>
+
+      {/* Recent activity */}
+      <RecentRuns state={runs} onRefresh={fetchRuns} />
+    </div>
+  );
+}
+
+function AgentCard({ agent }: { agent: AgentMeta }) {
+  const Icon = agent.icon;
+  const isActive = agent.status === "active";
+
+  const inner = (
+    <div
+      className={cn(
+        "rounded-lg border bg-card p-5 flex flex-col gap-4 h-full transition-shadow",
+        agent.accent.border,
+        isActive && "hover:shadow-md"
+      )}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-lg", agent.accent.bg)}>
+            <Icon className={cn("h-5 w-5", agent.accent.icon)} />
+          </div>
+          <div className="min-w-0">
+            <h2 className="font-semibold text-foreground leading-tight">{agent.name}</h2>
+            <code className="text-[11px] font-mono text-muted-foreground">{agent.slug}</code>
+          </div>
+        </div>
+        {isActive ? (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-400 shrink-0">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+            Active
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-500/10 px-2.5 py-1 text-xs font-medium text-zinc-400 shrink-0">
+            Coming soon
+          </span>
+        )}
+      </div>
+
+      <p className="text-xs text-muted-foreground leading-relaxed">{agent.tagline}</p>
+
+      <div className="flex flex-wrap gap-1.5">
+        {agent.highlights.map((h) => (
+          <span
+            key={h}
+            className="rounded-full border border-border bg-muted/30 px-2 py-0.5 text-[10px] text-muted-foreground"
+          >
+            {h}
+          </span>
+        ))}
+      </div>
+
+      <div className="border-t border-border pt-3 mt-auto">
+        {agent.href ? (
+          <span className={cn("inline-flex items-center gap-1.5 text-xs font-medium", agent.accent.icon)}>
+            {isActive ? "Open dashboard" : "Preview"}
+            <ArrowRight className="h-3 w-3" />
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">No dashboard yet</span>
+        )}
+      </div>
+    </div>
+  );
+
+  if (agent.href) {
+    return (
+      <Link href={agent.href} className="block">
+        {inner}
+      </Link>
+    );
+  }
+  return <div className="opacity-70 cursor-not-allowed">{inner}</div>;
+}
+
+function PendingApprovals({ state }: { state: ApprovalsState }) {
+  if (state.status !== "ok" || state.items.length === 0) return null;
+  return (
+    <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 flex items-center gap-3">
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500/10 border border-amber-500/20">
+        <CheckSquare className="h-4 w-4 text-amber-400" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-medium text-foreground">
+          {state.items.length} pending approval{state.items.length === 1 ? "" : "s"}
+        </div>
+        <div className="text-xs text-muted-foreground mt-0.5">
+          Drafts your agents are holding for your sign-off.
+        </div>
+      </div>
+      <Link
+        href="/app/approvals"
+        className="flex items-center gap-1.5 rounded-md bg-amber-500/10 border border-amber-500/20 px-3 py-1.5 text-xs font-medium text-amber-400 hover:bg-amber-500/20 transition-colors shrink-0"
+      >
+        Review
+        <ArrowRight className="h-3 w-3" />
+      </Link>
+    </div>
+  );
+}
+
+function RecentRuns({ state, onRefresh }: { state: RunsState; onRefresh: () => void }) {
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-base font-semibold text-foreground">Recent activity</h2>
+        <button
+          onClick={onRefresh}
+          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <RefreshCw className="h-3 w-3" />
+          Refresh
         </button>
       </div>
+      <RecentRunsBody state={state} />
+    </div>
+  );
+}
 
-      {/* Agent Cards */}
-      <div className="grid gap-5 lg:grid-cols-3">
-        {agents.map((agent) => {
-          const colors = agentColors[agent.id];
-          const Icon = agentIcons[agent.id];
-          const href = `/agents/${agent.id}`;
-
-          return (
-            <div
-              key={agent.id}
-              className={cn(
-                "rounded-lg border bg-card flex flex-col gap-5 p-5 transition-shadow hover:shadow-md",
-                colors.border
-              )}
-            >
-              {/* Top row */}
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-lg", colors.bg)}>
-                    <Icon className={cn("h-5 w-5", colors.icon)} />
-                  </div>
-                  <div>
-                    <h2 className="font-semibold text-foreground leading-tight">{agent.name}</h2>
-                    <p className="text-xs text-muted-foreground mt-0.5 leading-snug line-clamp-2">{agent.description}</p>
-                  </div>
-                </div>
-                <div className="shrink-0">
-                  {agent.status === "active" ? (
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-400">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                      Active
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-500/10 px-2.5 py-1 text-xs font-medium text-zinc-400">
-                      <span className="h-1.5 w-1.5 rounded-full bg-zinc-400" />
-                      Idle
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* Stats row */}
-              <div className="grid grid-cols-3 gap-2">
-                <div className="rounded-md bg-muted/40 p-3 text-center">
-                  <div className="text-lg font-bold text-foreground">{agent.reportsGenerated}</div>
-                  <div className="text-[10px] text-muted-foreground mt-0.5 leading-tight">Reports</div>
-                </div>
-                <div className="rounded-md bg-muted/40 p-3 text-center">
-                  <div className="text-lg font-bold text-foreground">{agent.trendsIdentified}</div>
-                  <div className="text-[10px] text-muted-foreground mt-0.5 leading-tight">Insights</div>
-                </div>
-                <div className="rounded-md bg-muted/40 p-3 text-center">
-                  <div className="text-[11px] font-bold text-foreground leading-tight">
-                    {agent.schedule.split(",")[0]}
-                  </div>
-                  <div className="text-[10px] text-muted-foreground mt-0.5 leading-tight">Schedule</div>
-                </div>
-              </div>
-
-              {/* Timing */}
-              <div className="flex items-center justify-between text-xs text-muted-foreground">
-                <span>Last run: <span className="text-foreground/80">{agent.lastRun}</span></span>
-                <span>Next: <span className="text-foreground/80">{agent.nextRun}</span></span>
-              </div>
-
-              {/* Connected sources */}
-              <div className="flex flex-wrap gap-1.5">
-                {agent.connectedSources.map((src) => (
-                  <span
-                    key={src}
-                    className="rounded-full border border-border bg-muted/30 px-2 py-0.5 text-[10px] text-muted-foreground"
-                  >
-                    {src}
-                  </span>
-                ))}
-              </div>
-
-              {/* Actions */}
-              <div className="flex items-center gap-2 border-t border-border pt-4 mt-auto">
-                <Link
-                  href={href}
-                  className="flex-1 rounded-md border border-border px-3 py-1.5 text-center text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                >
-                  Configure
-                </Link>
-                <Link
-                  href={href}
-                  className={cn(
-                    "flex flex-1 items-center justify-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
-                    colors.bg,
-                    colors.icon,
-                    "hover:opacity-80"
-                  )}
-                >
-                  View Outputs
-                  <ArrowRight className="h-3 w-3" />
-                </Link>
-              </div>
-            </div>
-          );
-        })}
+function RecentRunsBody({ state }: { state: RunsState }) {
+  if (state.status === "loading") {
+    return (
+      <div className="rounded-lg border border-dashed border-border bg-muted/10 p-6 text-center">
+        <Loader2 className="h-5 w-5 text-muted-foreground animate-spin mx-auto mb-2" />
+        <div className="text-sm text-muted-foreground">Loading runs…</div>
       </div>
-
-      {/* Agent Activity */}
-      <div>
-        <h2 className="text-base font-semibold text-foreground mb-4">Agent Activity</h2>
-        <div className="rounded-lg border border-border bg-card divide-y divide-border">
-          {activityLog.map((item, i) => {
-            const colors = agentColors[item.agentId];
-            return (
-              <div key={i} className="flex items-center gap-4 px-5 py-3.5">
-                <span className={cn("h-2.5 w-2.5 shrink-0 rounded-full", colors.dot)} />
-                <span className="flex-1 text-sm text-foreground/90">{item.text}</span>
-                <span className="text-xs text-muted-foreground whitespace-nowrap">{item.time}</span>
-                <Link href={item.href} className="text-xs text-primary hover:underline whitespace-nowrap">
-                  View
-                </Link>
-              </div>
-            );
-          })}
+    );
+  }
+  if (state.status === "error") {
+    return (
+      <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-4">
+        <div className="flex items-center gap-2 mb-1">
+          <AlertCircle className="h-4 w-4 text-red-400" />
+          <span className="text-sm font-medium text-red-400">Couldn&apos;t load runs</span>
+        </div>
+        <div className="text-xs text-muted-foreground">{state.message}</div>
+      </div>
+    );
+  }
+  if (state.items.length === 0) {
+    return (
+      <div className="rounded-lg border border-dashed border-border bg-muted/10 p-8 text-center">
+        <Sparkles className="h-5 w-5 text-muted-foreground mx-auto mb-2" />
+        <div className="text-sm text-foreground font-medium">No agent runs yet</div>
+        <div className="text-xs text-muted-foreground mt-1">
+          Open any agent above and ask for something — it&apos;ll show up here.
         </div>
       </div>
-
-      {/* Bot Connections teaser */}
-      <div className="rounded-lg border border-border bg-card p-5">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h2 className="text-base font-semibold text-foreground">Bot Connections</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">Control your agents from Slack, Discord, or Telegram</p>
-          </div>
-          <Link
-            href="/app/agents/bots"
-            className="flex items-center gap-1 text-sm font-medium text-primary hover:underline"
-          >
-            Manage Bot Connections
-            <ArrowRight className="h-3.5 w-3.5" />
-          </Link>
+    );
+  }
+  return (
+    <div className="rounded-lg border border-border bg-card divide-y divide-border">
+      {state.items.map((r) => (
+        <div key={r.id} className="flex items-center gap-4 px-5 py-3.5">
+          <span
+            className={cn(
+              "h-2.5 w-2.5 shrink-0 rounded-full",
+              r.status === "running"
+                ? "bg-primary animate-pulse"
+                : r.status === "complete"
+                ? "bg-emerald-500"
+                : r.status === "failed"
+                ? "bg-red-500"
+                : "bg-zinc-500"
+            )}
+          />
+          <span className="flex-1 text-sm text-foreground/90 truncate">
+            <span className="text-foreground font-medium">{r.agents?.name || "Agent"}</span>
+            <span className="text-muted-foreground"> · {r.status}</span>
+          </span>
+          <span className="text-xs text-muted-foreground whitespace-nowrap">{relativeTime(r.started_at)}</span>
         </div>
-        <div className="grid grid-cols-3 gap-4">
-          {botConnections.map((bot) => (
-            <div key={bot.id} className="flex items-center gap-3 rounded-md border border-border bg-muted/20 px-4 py-3">
-              <div className={cn("h-8 w-8 shrink-0 rounded-md flex items-center justify-center text-white font-bold text-xs", bot.color)}>
-                {bot.name[0]}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-foreground">{bot.name}</div>
-                {bot.status === "connected" ? (
-                  <div className="flex items-center gap-1 mt-0.5">
-                    <CheckCircle2 className="h-3 w-3 text-emerald-400" />
-                    <span className="text-xs text-emerald-400">Connected</span>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-1 mt-0.5">
-                    <Clock className="h-3 w-3 text-muted-foreground" />
-                    <span className="text-xs text-muted-foreground">Not connected</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
+      ))}
     </div>
   );
 }

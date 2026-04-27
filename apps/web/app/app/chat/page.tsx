@@ -18,20 +18,10 @@ const LIVE_AGENT_SLUGS = new Set([
 ]);
 
 const SPECIALIST_PICKS: { slug: string; label: string; icon: React.ElementType; href: string }[] = [
-  { slug: "strategist", label: "Strategist", icon: Compass, href: "/app/chat?agent=strategist" },
+  { slug: "strategist", label: "Strategist", icon: Compass, href: "/app/agents/strategist" },
   { slug: "publisher", label: "Publisher", icon: Megaphone, href: "/app/agents/publisher" },
-  {
-    slug: "community-manager",
-    label: "Community Manager",
-    icon: MessageCircle,
-    href: "/app/chat?agent=community-manager",
-  },
-  {
-    slug: "brand-manager",
-    label: "Brand Manager",
-    icon: Briefcase,
-    href: "/app/chat?agent=brand-manager",
-  },
+  { slug: "community-manager", label: "Community Manager", icon: MessageCircle, href: "/app/agents/community-manager" },
+  { slug: "brand-manager", label: "Brand Manager", icon: Briefcase, href: "/app/agents/brand-manager" },
 ];
 
 export default function ChatPage() {

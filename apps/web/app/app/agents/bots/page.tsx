@@ -1,4 +1,4 @@
-import { CheckCircle2, XCircle, Terminal, ChevronRight } from "lucide-react";
+import { CheckCircle2, XCircle, Terminal, ChevronRight, Send } from "lucide-react";
 import { botConnections } from "@/lib/mock-data";
 import { cn } from "@/lib/utils";
 
@@ -46,9 +46,16 @@ export default function BotConnectionsPage() {
   return (
     <div className="p-6 space-y-8">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">Bot Connections</h1>
-        <p className="mt-1 text-sm text-muted-foreground">Control your agents from anywhere</p>
+      <div className="flex items-start gap-3">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 border border-primary/20 mt-1">
+          <Send className="h-5 w-5 text-primary" />
+        </div>
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">Dispatch</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Reach your agents from Slack, Discord, or Telegram. Each agent gets its own channel for team-visible conversations.
+          </p>
+        </div>
       </div>
 
       {/* Platform cards */}

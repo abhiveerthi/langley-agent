@@ -20,10 +20,17 @@ import {
   Type,
   Sparkles,
   Check,
+  Wrench,
+  ShieldCheck,
+  FileText,
+  Send,
+  Search,
+  PackageOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { MiniChat } from "@/components/chat/MiniChat";
 import { YouTubeStatusPill } from "@/components/integrations/YouTubeStatusPill";
+import { TwitterStatusPill } from "@/components/integrations/TwitterStatusPill";
 import type { PublisherPackage, PublisherPackageStatus } from "@/lib/types/publisher";
 
 type Tab = "uploads" | "packages";
@@ -95,6 +102,42 @@ const packageStatusLabel: Record<PublisherPackage["status"], string> = {
   pending_push: "Pending Push",
   pushed:       "Pushed to YouTube",
 };
+
+const capabilities: { title: string; body: string; icon: React.ElementType }[] = [
+  {
+    icon: PackageOpen,
+    title: "Package a video end-to-end",
+    body: "Pulls the transcript + comments, then writes a full kit: title variants, description, tags, chapters, pinned comment, thumbnail copy ideas.",
+  },
+  {
+    icon: FileText,
+    title: "Repurpose for every platform",
+    body: "Drafts 3 tweets, an X thread outline, a LinkedIn post, an Instagram caption, and a newsletter blurb — all grounded in the transcript.",
+  },
+  {
+    icon: Send,
+    title: "Push metadata + tweets on approval",
+    body: "Writes new title/description/tags to YouTube via the API, or posts a tweet to X. Both writes pause for your sign-off first.",
+  },
+  {
+    icon: Search,
+    title: "Re-read before re-creating",
+    body: "Knows what's already packaged. If you mention a video by title (\"the lasagna one\"), it surfaces the existing kit instead of regenerating.",
+  },
+];
+
+const tools = [
+  "get_latest_upload",
+  "get_video_details",
+  "get_video_transcript",
+  "get_video_comments",
+  "suggest_seo_keywords",
+  "list_packages",
+  "get_package",
+  "get_package_by_video",
+  "update_video_metadata",
+  "post_tweet",
+];
 
 const privacyStyles: Record<string, { icon: React.ElementType; color: string; label: string }> = {
   public:   { icon: Globe, color: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20", label: "Public" },
@@ -224,7 +267,7 @@ export default function PublisherAgentPage() {
             className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground mb-3 transition-colors"
           >
             <ArrowLeft className="h-3.5 w-3.5" />
-            All Agents
+            Agents
           </Link>
           <div className="flex items-center gap-4">
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-sky-500/10 border border-sky-500/20">
@@ -255,8 +298,68 @@ export default function PublisherAgentPage() {
           ))}
         </div>
 
-        {/* Tabs */}
-        <div>
+        {/* Capabilities */}
+        <Section title="What the Publisher does" subtitle="Read tools run free. Both writes — YouTube metadata and tweets — pause for your approval first.">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {capabilities.map((c) => (
+              <CapabilityCard key={c.title} {...c} />
+            ))}
+          </div>
+        </Section>
+
+        {/* Approval flow */}
+        <Section title="Approval flow" subtitle="Two independent gates — you can push metadata without sending the tweet, or vice versa.">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="rounded-lg border border-border bg-card p-5">
+              <div className="flex items-center gap-2 text-sm font-medium text-foreground mb-3">
+                <ShieldCheck className="h-4 w-4 text-sky-400" />
+                Push to YouTube
+              </div>
+              <ol className="space-y-2 text-sm text-muted-foreground">
+                <li className="flex gap-2.5"><span className="text-sky-400 font-mono">1.</span><span>Open a draft package and pick a title variant.</span></li>
+                <li className="flex gap-2.5"><span className="text-sky-400 font-mono">2.</span><span>Hit Push — agent shows the exact title / description / tags it&apos;ll write.</span></li>
+                <li className="flex gap-2.5"><span className="text-sky-400 font-mono">3.</span><span>Approve → <code className="font-mono text-foreground">videos.update</code> writes to your channel.</span></li>
+              </ol>
+            </div>
+            <div className="rounded-lg border border-border bg-card p-5">
+              <div className="flex items-center gap-2 text-sm font-medium text-foreground mb-3">
+                <ShieldCheck className="h-4 w-4 text-sky-400" />
+                Post to X
+              </div>
+              <ol className="space-y-2 text-sm text-muted-foreground">
+                <li className="flex gap-2.5"><span className="text-sky-400 font-mono">1.</span><span>From a package, hit Post on the social.twitter copy.</span></li>
+                <li className="flex gap-2.5"><span className="text-sky-400 font-mono">2.</span><span>Agent shows the exact tweet text it&apos;ll send.</span></li>
+                <li className="flex gap-2.5"><span className="text-sky-400 font-mono">3.</span><span>Approve → <code className="font-mono text-foreground">post_tweet</code> publishes to your X account.</span></li>
+              </ol>
+            </div>
+          </div>
+        </Section>
+
+        {/* Tools */}
+        <Section title="Tools available" subtitle="The functions the agent can call. The last two are the only writes.">
+          <div className="flex flex-wrap gap-1.5">
+            {tools.map((t) => {
+              const isWrite = t === "update_video_metadata" || t === "post_tweet";
+              return (
+                <span
+                  key={t}
+                  className={cn(
+                    "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-mono",
+                    isWrite
+                      ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                      : "border-border bg-muted/30 text-muted-foreground",
+                  )}
+                >
+                  <Wrench className={cn("h-3 w-3", isWrite ? "text-amber-400" : "text-sky-400")} />
+                  {t}
+                </span>
+              );
+            })}
+          </div>
+        </Section>
+
+        {/* Uploads / packages tabs */}
+        <Section title="Your videos & packages" subtitle="Click Package this on any upload to draft a kit. Existing packages link straight to their detail page.">
           <div className="flex border-b border-border mb-4">
             {(["uploads", "packages"] as Tab[]).map((tab) => (
               <button
@@ -297,27 +400,26 @@ export default function PublisherAgentPage() {
           {activeTab === "packages" && (
             <PackagesTab state={packages} onRefresh={fetchPackages} />
           )}
-        </div>
+        </Section>
       </div>
 
       {/* Right sidebar */}
       <div className="w-80 shrink-0 border-l border-border bg-card/50 overflow-y-auto p-5 space-y-6">
-        <YouTubeStatusPill />
+        <YouTubeStatusPill heading="Channel Connected" />
+
+        <TwitterStatusPill heading="X / Twitter" />
 
         <div className="rounded-lg border border-border bg-muted/20 p-4 text-xs text-muted-foreground space-y-2">
           <div className="flex items-center gap-2 text-foreground font-medium">
             <Sparkles className="h-3.5 w-3.5 text-sky-400" />
-            How Publisher works
+            How to use it
           </div>
           <p>
-            Click <span className="text-foreground font-medium">Package this</span> on any upload.
-            Publisher pulls the transcript + comments, writes a full metadata kit
-            (titles, description, tags, chapters, pinned comment) plus a Twitter and
-            newsletter draft, and saves it for your review.
+            Click <span className="text-foreground font-medium">Package this</span> on any upload, or ask in chat:{" "}
+            <span className="text-foreground font-medium">&quot;package my latest&quot;</span>.
           </p>
           <p>
-            Pushing metadata to YouTube always requires your explicit approval —
-            the kit is a draft until you hit push.
+            X must be connected for tweet pushes. YouTube metadata pushes only need your YouTube connection.
           </p>
         </div>
       </div>
@@ -331,6 +433,33 @@ export default function PublisherAgentPage() {
       )}
 
       <MiniChat agentSlug="publisher" agentName="Publisher" />
+    </div>
+  );
+}
+
+// ── Shared layout helpers ────────────────────────────────────────────────
+
+function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <h2 className="text-base font-semibold text-foreground">{title}</h2>
+      {subtitle && <p className="text-xs text-muted-foreground mt-0.5 mb-3">{subtitle}</p>}
+      {!subtitle && <div className="mb-3" />}
+      {children}
+    </div>
+  );
+}
+
+function CapabilityCard({ icon: Icon, title, body }: { icon: React.ElementType; title: string; body: string }) {
+  return (
+    <div className="rounded-lg border border-border bg-card p-4 flex gap-3">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-sky-500/10 border border-sky-500/20">
+        <Icon className="h-4 w-4 text-sky-400" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-medium text-foreground">{title}</div>
+        <div className="text-xs text-muted-foreground mt-1 leading-relaxed">{body}</div>
+      </div>
     </div>
   );
 }
