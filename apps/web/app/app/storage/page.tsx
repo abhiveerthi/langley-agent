@@ -26,7 +26,6 @@ import {
 import { cn } from "@/lib/utils";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-const BUCKET = "org-assets";
 
 type Asset = {
   id: string;
@@ -149,7 +148,6 @@ export default function StoragePage() {
   const [archived, setArchived] = useState(false);
   const [selected, setSelected] = useState<Asset | null>(null);
   const [uploadProgress, setUploadProgress] = useState<{ name: string; pct: number }[]>([]);
-  const [orgId, setOrgId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
   const fetchList = useCallback(async () => {
@@ -172,30 +170,10 @@ export default function StoragePage() {
       }
       const items = (await res.json()) as Asset[];
       setList({ status: "ok", items });
-      // Stash org_id for upload-path prefix construction.
-      if (items[0]) setOrgId(items[0].org_id);
     } catch (e) {
       setList({ status: "error", message: (e as Error).message });
     }
   }, [kind, tagFilter, search, archived]);
-
-  // Resolve org_id once even when list is empty, so first upload works.
-  useEffect(() => {
-    (async () => {
-      if (orgId) return;
-      const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-      // Pull org_id via the org_members table the user is in. Same path
-      // get_current_user uses on the API.
-      const { data } = await supabase
-        .from("org_members")
-        .select("org_id")
-        .eq("user_id", user.id)
-        .limit(1);
-      if (data?.[0]) setOrgId(data[0].org_id);
-    })();
-  }, [orgId]);
 
   useEffect(() => { fetchList(); }, [fetchList]);
 
@@ -215,58 +193,36 @@ export default function StoragePage() {
   }, [list]);
 
   // ── Upload handler ──────────────────────────────────────────────────────
+  // Multipart POST to the API. Server resolves org_id from the auth token
+  // and writes to <org_id>/<kind>/<file> with the service-role key, so the
+  // client never needs to know its own org_id or fight RLS to read it.
   async function uploadFiles(files: File[]) {
-    if (!orgId) {
-      setToast("Couldn't resolve org — refresh and try again");
-      return;
-    }
-    const supabase = createClient();
     const next = files.map((f) => ({ name: f.name, pct: 0 }));
     setUploadProgress((prev) => [...prev, ...next]);
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      const detectedKind = inferKind(file);
-      // Path: <org_id>/<kind>/<timestamp>-<filename>
-      const ts = Date.now();
-      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const storagePath = `${orgId}/${detectedKind}/${ts}-${safeName}`;
+    for (const file of files) {
       try {
-        // Upload to Supabase Storage directly using the user's JWT.
-        const { error } = await supabase.storage
-          .from(BUCKET)
-          .upload(storagePath, file, {
-            contentType: file.type || undefined,
-            cacheControl: "3600",
-            upsert: false,
-          });
-        if (error) throw error;
-        // Mark this file as fully uploaded
+        const auth = await authHeader();
+        const fd = new FormData();
+        fd.append("file", file);
+        fd.append("kind", inferKind(file));
+        fd.append("tags", JSON.stringify([]));
+        const res = await fetch(`${API}/api/storage/assets/upload`, {
+          method: "POST",
+          headers: auth, // do NOT set Content-Type; browser sets the multipart boundary
+          body: fd,
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          throw new Error(`HTTP ${res.status} ${text.slice(0, 120)}`);
+        }
         setUploadProgress((prev) =>
           prev.map((p) => (p.name === file.name ? { ...p, pct: 100 } : p)),
         );
-        // Register the asset row via the API
-        const auth = await authHeader();
-        const res = await fetch(`${API}/api/storage/assets`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...auth },
-          body: JSON.stringify({
-            storage_path: storagePath,
-            filename: file.name,
-            size_bytes: file.size,
-            mime_type: file.type || null,
-            kind: detectedKind,
-            source: "user",
-          }),
-        });
-        if (!res.ok) {
-          throw new Error(`Register HTTP ${res.status}`);
-        }
       } catch (e) {
         setToast(`Upload failed for ${file.name}: ${(e as Error).message}`);
       }
     }
-    // Clear progress entries we just finished + refresh list
     setTimeout(() => {
       setUploadProgress((prev) => prev.filter((p) => p.pct < 100));
     }, 1200);

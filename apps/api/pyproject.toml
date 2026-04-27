@@ -5,6 +5,7 @@ description = "AgentOS FastAPI backend"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115.0",
+    "python-multipart>=0.0.20",
     "uvicorn[standard]>=0.34.0",
     "supabase>=2.13.0",
     "httpx>=0.28.0",

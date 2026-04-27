@@ -2,14 +2,17 @@
 Storage Library endpoints.
 
 Asset metadata lives in `storage_assets` (one row per file in the
-`org-assets` bucket). Bytes live in Supabase Storage. The browser uploads
-directly to Storage using the user's JWT — RLS on `storage.objects`
-restricts paths to `<org_id>/...` — and then POSTs the resulting metadata
-here so we can list/filter/tag/search.
+`org-assets` bucket). Bytes live in Supabase Storage. Uploads route
+through this API so the server resolves the user's org_id from the auth
+token and writes to `<org_id>/<kind>/<filename>` using the service-role
+key. This sidesteps client-side org resolution (which depends on
+org_members RLS being readable from the browser) and means the storage
+RLS policies never need to fire for legitimate writes.
 
 Endpoints:
   GET    /api/storage/assets                    list (filters: kind, tag, search, archived)
-  POST   /api/storage/assets                    register a just-uploaded asset
+  POST   /api/storage/assets/upload             multipart upload (writes bytes + registers row)
+  POST   /api/storage/assets                    register an externally-uploaded asset
   GET    /api/storage/assets/{id}               single asset
   GET    /api/storage/assets/{id}/download-url  short-lived signed URL
   PATCH  /api/storage/assets/{id}               rename / retag / notes
@@ -22,11 +25,14 @@ isn't, and the user should make that decision deliberately.
 """
 from __future__ import annotations
 
+import json
+import re
+import time
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from supabase import Client
 
@@ -40,6 +46,23 @@ ALLOWED_KINDS = {
     "upload", "brief", "package", "script",
     "thumbnail", "image", "video", "audio", "other",
 }
+
+# Whitelist for the slugified filename portion of the storage path. Anything
+# else gets replaced with `_` so a user-supplied filename can't escape into a
+# different prefix or break the URL.
+_FILENAME_SAFE = re.compile(r"[^a-zA-Z0-9._-]")
+
+
+def _infer_kind_from_mime(mime: str | None) -> str:
+    if not mime:
+        return "upload"
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("video/"):
+        return "video"
+    if mime.startswith("audio/"):
+        return "audio"
+    return "upload"
 
 
 # ── Request bodies ─────────────────────────────────────────────────────────
@@ -136,12 +159,91 @@ async def list_assets(
     return resp.data or []
 
 
+@router.post("/storage/assets/upload")
+async def upload_asset(
+    file: UploadFile = File(...),
+    kind: str = Form("upload"),
+    tags: str = Form("[]", description="JSON-encoded array of tag strings"),
+    notes: Optional[str] = Form(None),
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    """Multipart upload: write bytes to Storage at <org_id>/<kind>/<file>,
+    then insert a tracking row. Uses the service-role Supabase client (so
+    bucket RLS is bypassed for the write — RLS still protects direct reads
+    from the browser). The user's org_id is taken from the auth token, never
+    from the client, so a client can't cross-write to another tenant.
+
+    `tags` is JSON-encoded because multipart form fields are strings; the
+    browser sends `JSON.stringify(tags)` and we decode here. Empty array is
+    fine.
+    """
+    if kind not in ALLOWED_KINDS:
+        # Anything we don't recognize falls back to 'upload' rather than 400'ing
+        # the upload — kinds expand over time and the user can change it after
+        # via PATCH if it really matters.
+        kind = "upload"
+
+    try:
+        tag_list = json.loads(tags) if tags else []
+        if not isinstance(tag_list, list):
+            tag_list = []
+    except (json.JSONDecodeError, TypeError):
+        tag_list = []
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "Empty file")
+
+    safe_name = _FILENAME_SAFE.sub("_", file.filename or "file")
+    ts = int(time.time() * 1000)
+    storage_path = f"{user.org_id}/{kind}/{ts}-{safe_name}"
+    content_type = file.content_type or "application/octet-stream"
+
+    # Service role bypasses storage.objects RLS — we've already authorized
+    # via get_current_user. Storage SDK's upload returns the path on success
+    # and raises on conflict / size / network errors.
+    try:
+        supabase.storage.from_(BUCKET).upload(
+            storage_path,
+            raw,
+            {"content-type": content_type, "cache-control": "3600"},
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Storage upload failed: {e}")
+
+    row = {
+        "org_id": user.org_id,
+        "storage_path": storage_path,
+        "filename": file.filename or safe_name,
+        "size_bytes": len(raw),
+        "mime_type": content_type,
+        "kind": kind,
+        "tags": _normalize_tags(tag_list),
+        "notes": notes,
+        "source": "user",
+        "uploaded_by": user.id,
+    }
+    resp = (
+        supabase.table("storage_assets")
+        .upsert(row, on_conflict="org_id,storage_path")
+        .execute()
+    )
+    if not resp.data:
+        raise HTTPException(500, "Insert returned no row")
+    return resp.data[0]
+
+
 @router.post("/storage/assets")
 async def register_asset(
     body: RegisterAssetBody,
     user: CurrentUser = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
 ):
+    """Register a row for an externally-uploaded asset (e.g. an agent that
+    wrote to Storage via the service role and now wants the metadata
+    visible). Browser uploads go through `/storage/assets/upload` instead.
+    """
     if body.kind not in ALLOWED_KINDS:
         raise HTTPException(400, f"Unknown kind: {body.kind}")
     _ensure_org_owns_path(user.org_id, body.storage_path)
