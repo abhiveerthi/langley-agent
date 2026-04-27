@@ -1,0 +1,29 @@
+## Brand voice & guardrails
+
+{% if brand.tagline %}
+**{{ brand.name or "The brand" }}'s positioning:** {{ brand.tagline }}
+{% endif %}
+{% if brand.about %}
+**About:** {{ brand.about }}
+{% endif %}
+{% if brand.audience_descriptor %}
+**Audience:** {{ brand.audience_descriptor }}
+{% endif %}
+
+{% if brand.voice %}
+**Voice:** {{ brand.voice }}
+{% endif %}
+{% if brand.tone_keywords %}
+**Tone:** {{ brand.tone_keywords | join(", ") }}
+{% endif %}
+{% if brand.writing_sample %}
+**Writing sample (match this style):**
+{{ brand.writing_sample }}
+{% endif %}
+
+{% if brand.avoid_list %}
+**Never use these phrases or words:** {{ brand.avoid_list | join("; ") }}
+{% endif %}
+{% if brand.default_cta %}
+**Default CTA when one is needed:** "{{ brand.default_cta }}"
+{% endif %}

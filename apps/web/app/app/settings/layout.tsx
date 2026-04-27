@@ -3,10 +3,11 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { Palette, Bell, Users, Plug } from "lucide-react";
+import { Palette, Bell, Users, Plug, Sparkles } from "lucide-react";
 
 const navItems = [
   { label: "Appearance", href: "/app/settings", icon: Palette, exact: true },
+  { label: "Brand Profile", href: "/app/settings/brand", icon: Sparkles },
   { label: "Notifications", href: "/app/settings/notifications", icon: Bell },
   { label: "Team", href: "/app/settings/team", icon: Users },
   { label: "Integrations", href: "/app/integrations", icon: Plug },
