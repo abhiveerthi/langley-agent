@@ -16,6 +16,7 @@ import {
   ListChecks,
   CheckSquare,
   Send,
+  FolderOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -111,6 +112,25 @@ function ApprovalsItem() {
   );
 }
 
+function StorageItem() {
+  const pathname = usePathname();
+  const isActive = pathname.startsWith("/app/storage");
+  return (
+    <Link
+      href="/app/storage"
+      className={cn(
+        "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
+        isActive
+          ? "bg-primary/15 text-primary font-medium"
+          : "text-muted-foreground hover:bg-accent hover:text-foreground"
+      )}
+    >
+      <FolderOpen className="h-4 w-4 shrink-0" />
+      Storage
+    </Link>
+  );
+}
+
 export function Sidebar() {
   const pathname = usePathname();
   const isChatActive = pathname.startsWith("/app/chat");
@@ -162,6 +182,7 @@ export function Sidebar() {
         <SectionLabel>Work</SectionLabel>
         <TasksItem />
         <ApprovalsItem />
+        <StorageItem />
 
         <SectionLabel>Business</SectionLabel>
         {businessItems.map((item) => (
