@@ -20,19 +20,29 @@ from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
+from jinja2 import ChoiceLoader, Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
 from packages.agents.core.profile import OrgProfile
 
 _AGENTS_ROOT = Path(__file__).resolve().parent.parent  # …/packages/agents
+_SHARED_DIR = _AGENTS_ROOT / "core" / "templates"
 
 
 @lru_cache(maxsize=None)
 def _env_for(agent_slug: str) -> Environment:
-    """Build (and cache) a Jinja env scoped to one agent's templates folder."""
+    """Build (and cache) a Jinja env scoped to one agent's templates folder.
+
+    A ChoiceLoader falls through to packages/agents/core/templates/ so any
+    agent can `{% include "_brand_voice.j2" %}` without each copying the
+    same partial. Per-agent files take precedence — an agent can shadow a
+    shared partial by putting a file with the same name in its own folder.
+    """
     template_dir = _AGENTS_ROOT / agent_slug / "templates"
     return Environment(
-        loader=FileSystemLoader(str(template_dir)),
+        loader=ChoiceLoader([
+            FileSystemLoader(str(template_dir)),
+            FileSystemLoader(str(_SHARED_DIR)),
+        ]),
         autoescape=select_autoescape(disabled_extensions=("j2",), default=False),
         # StrictUndefined: a missing variable raises immediately instead of
         # silently rendering an empty string. Catches profile/template drift.

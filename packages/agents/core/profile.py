@@ -53,10 +53,38 @@ class ProfileNotFound(Exception):
 class Brand(BaseModel):
     """Brand identity. Every field is Optional because a freshly-signed-up
     org has only the bits OAuth told us (e.g. channel title → brand name)
-    and the rest gets filled in via the settings UI."""
+    and the rest gets filled in via the settings UI.
+
+    Fields after `primary_email` are the "richer" inputs the Brand Profile
+    settings page exposes — they get threaded into every agent's system.j2
+    so naming, voice, tone, guardrails, and audience all shape prompts."""
     name: str | None = None
     voice: str | None = None
     primary_email: str | None = None
+
+    # Visual identity — rendered in the UI; not yet read by agents.
+    logo_url: str | None = None
+
+    # Positioning + about — short copy the agents can quote.
+    tagline: str | None = None
+    about: str | None = None
+
+    # Voice signal — 1–3 short paragraphs in the user's actual writing style.
+    # Strongest single input for matching tone in drafts.
+    writing_sample: str | None = None
+    tone_keywords: list[str] = Field(default_factory=list)
+
+    # Negative constraints — phrases/words the agents must never produce.
+    # Loaded into the system prompt as a "do not say" list.
+    avoid_list: list[str] = Field(default_factory=list)
+
+    # Default CTA the agents should prefer when a piece needs a call to action
+    # (e.g. "Subscribe", "Join the newsletter").
+    default_cta: str | None = None
+
+    # Free-text override on the niche preset's audience descriptor — the org's
+    # own framing of "who this is for".
+    audience_descriptor: str | None = None
 
 
 class Niche(BaseModel):
@@ -215,6 +243,14 @@ def _load_from_db(org_id: str) -> OrgProfile | None:
             name=row.get("brand_name"),
             voice=row.get("brand_voice"),
             primary_email=row.get("brand_primary_email"),
+            logo_url=row.get("brand_logo_url"),
+            tagline=row.get("brand_tagline"),
+            about=row.get("brand_about"),
+            writing_sample=row.get("brand_writing_sample"),
+            tone_keywords=list(row.get("brand_tone_keywords") or []),
+            avoid_list=list(row.get("brand_avoid_list") or []),
+            default_cta=row.get("brand_default_cta"),
+            audience_descriptor=row.get("brand_audience_descriptor"),
         ),
         niche=_resolve_niche(row.get("niche_slug")),
         youtube=YoutubeChannel(channel_id=row.get("youtube_channel_id")),
