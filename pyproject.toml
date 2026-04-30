@@ -1,0 +1,32 @@
+# Top-level config for the test harness.
+#
+# The actual FastAPI package lives at apps/api/pyproject.toml — this file is
+# intentionally minimal and exists ONLY to host the pytest config so we can
+# run tests against code in both `packages/` and `apps/api/app/` from the
+# repo root with a single `pytest` invocation.
+
+[tool.pytest.ini_options]
+# Where pytest looks for tests.
+testpaths = ["tests"]
+
+# Make repo packages importable without `pip install -e .` — agents live at
+# `packages.agents.*`, the FastAPI app at `app.*` (rooted in apps/api).
+pythonpath = [".", "apps/api"]
+
+# Auto-detect async tests so individual functions don't need
+# `@pytest.mark.asyncio` decorators. Cleaner than the per-test marker
+# pattern given how many of our tests touch async LangGraph code.
+asyncio_mode = "auto"
+
+# Default options:
+#   -q  quiet (no per-test PASSED noise; one dot per test)
+#   --strict-markers  catches typos in @pytest.mark.foo
+#   --tb=short  compact tracebacks
+addopts = "-q --strict-markers --tb=short"
+
+# Pretty patterns for test discovery — same defaults as pytest, listed
+# explicitly so a future `tests/scenario_*.py` won't accidentally get
+# picked up.
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
