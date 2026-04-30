@@ -13,6 +13,18 @@ from packages.agents.strategist.tools import get_strategist_tools
 from packages.integrations.context import current_supabase
 
 
+def _priority_from_confidence(confidence: str | None) -> str:
+    """Map the Strategist's idea confidence onto the workspace's task
+    priority axis. High-confidence ideas show up as high-priority To-Dos
+    (red border on the Kanban card) so they catch the user's eye first.
+    Anything we don't recognize falls to medium."""
+    if confidence == "high":
+        return "high"
+    if confidence == "low":
+        return "low"
+    return "medium"
+
+
 # ── Structured output schema ──────────────────────────────────────────────
 # Pydantic models here double as the JSON contract the frontend can render.
 # `compose_brief` fills this via ChatAnthropic.with_structured_output(WeeklyBrief).
@@ -216,7 +228,8 @@ class StrategistAgent(BaseAgent):
 
     # ── Node: persist the brief so peers can read it ──────────────────────
     async def _persist_brief_node(self, state: StrategistState):
-        """Write the just-composed brief to strategist_briefs.
+        """Write the just-composed brief to strategist_briefs AND drop one
+        task per ranked idea into the user's workspace.
 
         No-op when:
           - Supabase isn't configured (local dev)
@@ -226,6 +239,10 @@ class StrategistAgent(BaseAgent):
         Errors are swallowed: a failed persistence shouldn't break the user-
         facing reply. Logs are the trail; the orchestrator already streams
         the brief object directly to the frontend regardless.
+
+        The auto-created tasks are how the brief loops back into action —
+        each idea becomes a To-Do the user sees on /app/tasks. Without
+        this they'd have to re-type each idea by hand.
         """
         brief = state.get("brief")
         org_id = state.get("org_id") or ""
@@ -234,17 +251,63 @@ class StrategistAgent(BaseAgent):
         if not brief or supabase is None or not _is_real_uuid(org_id):
             return {}
 
-        payload = {
+        # ── Step 1: persist the brief itself ─────────────────────────────
+        brief_payload = {
             "org_id": org_id,
             "thread_id": thread_id if _is_real_uuid(thread_id) else None,
             "headline": brief.get("headline", ""),
             "ideas": brief.get("ideas", []),
         }
+        brief_id: str | None = None
         try:
-            supabase.table("strategist_briefs").insert(payload).execute()
+            result = supabase.table("strategist_briefs").insert(brief_payload).execute()
+            if result.data:
+                brief_id = result.data[0].get("id")
         except Exception:
             # Persistence is best-effort. Don't fail the run on it.
             pass
+
+        # ── Step 2: spawn one task per ranked idea ───────────────────────
+        # Each idea becomes a To-Do so the user can move it across the
+        # /app/tasks Kanban as they work through the week. Body of the
+        # task carries the hook + why_now so the user has context without
+        # opening the brief.
+        from packages.agents.core.tasks import create_tasks_from_agent
+
+        ideas = brief.get("ideas", []) or []
+        items = []
+        for i, idea in enumerate(ideas):
+            title = (idea.get("title") or "").strip()
+            if not title:
+                continue
+            hook = (idea.get("hook") or "").strip()
+            why_now = (idea.get("why_now") or "").strip()
+            description = "\n\n".join(
+                part for part in (
+                    f"Hook: {hook}" if hook else "",
+                    f"Why now: {why_now}" if why_now else "",
+                ) if part
+            ) or None
+            items.append({
+                "title": title,
+                "description": description,
+                "priority": _priority_from_confidence(idea.get("confidence")),
+                "status": "todo",
+                "metadata": {
+                    "source": "strategist_brief",
+                    "brief_id": brief_id,
+                    "idea_index": i,
+                    "confidence": idea.get("confidence"),
+                },
+            })
+
+        if items:
+            await create_tasks_from_agent(
+                org_id=org_id,
+                agent_slug=self.slug,
+                items=items,
+            )
+
         return {}
 
     # ── Node: terminal respond ────────────────────────────────────────────
