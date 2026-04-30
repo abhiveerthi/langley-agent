@@ -18,6 +18,7 @@ client's batched updates to keep the order consistent.
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -221,8 +222,8 @@ async def list_statuses(
 ):
     """Per-org Kanban column list. Returns the org's `task_statuses` jsonb
     array, falling back to the standard set when the column is missing
-    (pre-migration env) or empty. The custom-statuses settings UI is a
-    follow-up — for now this endpoint just exposes the schema default."""
+    (pre-migration env) or empty. Updates flow through `PUT /workspace/statuses`
+    from the settings page."""
     try:
         result = (
             supabase.table("orgs")
@@ -241,3 +242,64 @@ async def list_statuses(
     if not isinstance(statuses, list) or not statuses:
         return {"statuses": _DEFAULT_TASK_STATUSES}
     return {"statuses": statuses}
+
+
+# Hard cap so a runaway add-button click can't ship 500 columns to the FE.
+# 12 covers any realistic workflow (todo / in-progress / qa / review / blocked /
+# scheduled / done / archived…) and stays small enough to render on a wide
+# screen without horizontal-scrolling the Kanban.
+_MAX_STATUSES = 12
+
+# Status values are persisted on `tasks.status` and used as React keys, URL
+# segments (?status=…), and Postgrest filters. Constrain the alphabet so a
+# user can't slip a quote / slash / control char in via this UI.
+_STATUS_RE = re.compile(r"^[a-z0-9_]{1,32}$")
+
+
+class UpdateStatusesRequest(BaseModel):
+    """Whole-array replacement is intentional — the FE owns ordering and
+    composition (drag-drop in /app/settings/workspace), and a partial
+    PATCH would force three round-trips for a single reorder operation."""
+    statuses: list[str] = Field(min_length=1, max_length=_MAX_STATUSES)
+
+
+@router.put("/workspace/statuses")
+async def update_statuses(
+    body: UpdateStatusesRequest,
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    """Replace the org's Kanban column list. Validates each status value
+    against `^[a-z0-9_]{1,32}$` and rejects duplicates — the FE slugifies
+    user-typed labels before submit, so any value not matching the regex
+    is a contract violation worth surfacing rather than silently coercing.
+
+    Tasks holding a status that no longer appears in the list aren't
+    deleted — `/app/tasks` groups them under an "Other" column. That's
+    deliberate so removing a column can never lose work; if the user
+    wants to actually clean those up they go to the Kanban board.
+    """
+    cleaned = [s.strip() for s in body.statuses]
+    seen: set[str] = set()
+    for status in cleaned:
+        if not _STATUS_RE.match(status):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid status '{status}': must be lowercase alphanumeric or underscore, 1–32 chars",
+            )
+        if status in seen:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Duplicate status: '{status}'",
+            )
+        seen.add(status)
+
+    result = (
+        supabase.table("orgs")
+        .update({"task_statuses": cleaned})
+        .eq("id", user.org_id)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Org not found")
+    return {"statuses": cleaned}
