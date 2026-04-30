@@ -18,23 +18,16 @@ import {
   ShieldCheck,
   Mail,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
 import { MiniChat } from "@/components/chat/MiniChat";
 import { YouTubeStatusPill } from "@/components/integrations/YouTubeStatusPill";
+import { KanbanBoard, type KanbanColumnDef } from "@/components/workspace/KanbanBoard";
+import { DealCard, type DealRecord } from "@/components/workspace/DealCard";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-type Deal = {
-  id: string;
-  brand_name: string;
-  recipient: string | null;
-  subject: string | null;
-  stage: "pitched" | "replied" | "negotiating" | "signed" | "declined" | "paused";
-  external_message_id: string | null;
-  notes: string | null;
-  pitched_at: string | null;
-  last_updated_at: string;
-};
+// Re-export the DealCard's type as the local one — we used to define it
+// inline; keeping the alias makes the rest of the page diff smaller.
+type Deal = DealRecord;
 
 type DealsState =
   | { status: "loading" }
@@ -44,7 +37,7 @@ type DealsState =
 type Approval = {
   id: string;
   action_type: string;
-  action_payload: Record<string, any>;
+  action_payload: Record<string, unknown>;
   preview: string | null;
   status: string;
   created_at: string;
@@ -61,26 +54,17 @@ async function authHeader(): Promise<Record<string, string>> {
   return session ? { Authorization: `Bearer ${session.access_token}` } : {};
 }
 
-function relativeTime(iso: string): string {
-  const then = new Date(iso).getTime();
-  const diff = Date.now() - then;
-  const hours = diff / 3600_000;
-  if (hours < 1) return "Just now";
-  if (hours < 24) return `${Math.floor(hours)}h ago`;
-  const days = hours / 24;
-  if (days < 7) return `${Math.floor(days)}d ago`;
-  if (days < 30) return `${Math.floor(days / 7)}w ago`;
-  return new Date(iso).toLocaleDateString();
-}
-
-const stageStyles: Record<Deal["stage"], string> = {
-  pitched: "bg-sky-500/10 text-sky-400 border-sky-500/20",
-  replied: "bg-violet-500/10 text-violet-400 border-violet-500/20",
-  negotiating: "bg-amber-500/10 text-amber-400 border-amber-500/20",
-  signed: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
-  declined: "bg-zinc-500/10 text-zinc-400 border-zinc-500/20",
-  paused: "bg-zinc-500/10 text-zinc-400 border-zinc-500/20",
-};
+// Kanban column definitions — one column per `brand_deals.stage` value.
+// Order matches the canonical lifecycle: pitched → replied → negotiating
+// → signed, with declined/paused as terminal states on the right.
+const DEAL_COLUMNS: KanbanColumnDef[] = [
+  { key: "pitched", label: "Pitched", accent: "text-sky-400" },
+  { key: "replied", label: "Replied", accent: "text-violet-400" },
+  { key: "negotiating", label: "Negotiating", accent: "text-amber-400" },
+  { key: "signed", label: "Signed", accent: "text-emerald-400" },
+  { key: "declined", label: "Declined", accent: "text-zinc-400" },
+  { key: "paused", label: "Paused", accent: "text-zinc-400" },
+];
 
 const capabilities: { title: string; body: string; icon: React.ElementType }[] = [
   {
@@ -111,13 +95,6 @@ const tools = [
   "get_channel_stats",
   "send_pitch_email",
   "list_active_deals_tool",
-];
-
-const stageBuckets: { label: string; stages: Deal["stage"][] }[] = [
-  { label: "Pitched", stages: ["pitched"] },
-  { label: "In motion", stages: ["replied", "negotiating"] },
-  { label: "Signed", stages: ["signed"] },
-  { label: "Closed", stages: ["declined", "paused"] },
 ];
 
 export default function BrandManagerAgentPage() {
@@ -163,9 +140,56 @@ export default function BrandManagerAgentPage() {
   }, []);
 
   useEffect(() => {
-    fetchDeals();
-    fetchApprovals();
+    // queueMicrotask defers the initial setState calls past the synchronous
+    // effect body — same pattern as the approvals + tasks pages, satisfies
+    // React 19's `react-hooks/set-state-in-effect` rule.
+    queueMicrotask(() => {
+      void fetchDeals();
+      void fetchApprovals();
+    });
   }, [fetchDeals, fetchApprovals]);
+
+  /**
+   * Drag-drop handler. Optimistically flips the deal's stage in local
+   * state, then PATCHes the server. On failure, refetches authoritative
+   * state to roll back.
+   *
+   * Within-column reorder is a no-op — brand deals don't have a position
+   * column today; ordering within a column is by last_updated_at desc and
+   * the PATCH bumps that automatically. KanbanBoard's
+   * `sameRelativePosition` short-circuits no-op moves so we never see
+   * those events.
+   */
+  const handleMove = useCallback(
+    async (dealId: string, toStage: string) => {
+      // Optimistic update.
+      setDeals((prev) => {
+        if (prev.status !== "ok") return prev;
+        return {
+          status: "ok",
+          items: prev.items.map((d) =>
+            d.id === dealId
+              ? { ...d, stage: toStage as Deal["stage"], last_updated_at: new Date().toISOString() }
+              : d,
+          ),
+        };
+      });
+
+      try {
+        const auth = await authHeader();
+        const res = await fetch(`${API}/api/brand-manager/deals/${dealId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", ...auth },
+          body: JSON.stringify({ stage: toStage }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      } catch {
+        // Rollback to authoritative state.
+        await fetchDeals();
+      }
+    },
+    [fetchDeals],
+  );
 
   const dealCount = deals.status === "ok" ? deals.items.length : 0;
   const signedCount = deals.status === "ok" ? deals.items.filter((d) => d.stage === "signed").length : 0;
@@ -247,9 +271,12 @@ export default function BrandManagerAgentPage() {
           </div>
         </Section>
 
-        {/* Deal pipeline */}
-        <Section title="Deal pipeline" subtitle="Auto-populated when an approved pitch sends. Stage updates beyond 'pitched' come from a future inbox UI.">
-          <DealsList state={deals} onRefresh={fetchDeals} />
+        {/* Deal pipeline — Kanban */}
+        <Section
+          title="Deal pipeline"
+          subtitle="Drag a deal between columns to update its stage. Pitched rows are auto-logged when an approved pitch sends; everything past that is manual today (inbox-driven stage updates are a future feature)."
+        >
+          <DealsBoard state={deals} onRefresh={fetchDeals} onMove={handleMove} />
         </Section>
       </div>
 
@@ -319,7 +346,24 @@ function CapabilityCard({ icon: Icon, title, body }: { icon: React.ElementType; 
   );
 }
 
-function DealsList({ state, onRefresh }: { state: DealsState; onRefresh: () => void }) {
+/**
+ * Kanban-board variant of DealsList. Same loading/error/empty branches,
+ * but the success state hands off to the generic `<KanbanBoard>` for
+ * drag-drop column moves. The `position` field on each item is derived
+ * from `last_updated_at` — brand deals don't have an explicit position
+ * column (within-column ordering is by recency), but `KanbanBoard`
+ * needs a `position: number` to sort by, so we map the timestamp into
+ * a negative number (newer = smaller = top).
+ */
+function DealsBoard({
+  state,
+  onRefresh,
+  onMove,
+}: {
+  state: DealsState;
+  onRefresh: () => void;
+  onMove: (dealId: string, toStage: string) => void;
+}) {
   if (state.status === "loading") {
     return (
       <div className="rounded-lg border border-dashed border-border bg-muted/10 p-8 text-center">
@@ -356,45 +400,29 @@ function DealsList({ state, onRefresh }: { state: DealsState; onRefresh: () => v
       </div>
     );
   }
+
+  // Map each deal into a KanbanItem. `status` = stage, `position` = the
+  // negated timestamp so newer deals sort to the top of their column.
+  const items = state.items.map((d) => ({
+    ...d,
+    status: d.stage,
+    position: -new Date(d.last_updated_at).getTime(),
+  }));
+
   return (
-    <div className="space-y-5">
-      {stageBuckets.map((bucket) => {
-        const inBucket = state.items.filter((d) => bucket.stages.includes(d.stage));
-        if (inBucket.length === 0) return null;
-        return (
-          <div key={bucket.label}>
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/80 mb-2">
-              {bucket.label} <span className="text-muted-foreground/60 font-normal">· {inBucket.length}</span>
-            </div>
-            <div className="space-y-2">
-              {inBucket.map((d) => (
-                <div key={d.id} className="rounded-lg border border-border bg-card p-3.5">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-start gap-3 min-w-0 flex-1">
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-amber-500/10">
-                        <Building2 className="h-4 w-4 text-amber-400" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="text-sm font-medium text-foreground">{d.brand_name}</div>
-                        {d.subject && (
-                          <div className="text-xs text-muted-foreground mt-0.5 truncate">{d.subject}</div>
-                        )}
-                        <div className="flex items-center gap-3 mt-1.5 text-[11px] text-muted-foreground">
-                          {d.recipient && <span className="truncate">{d.recipient}</span>}
-                          <span>{relativeTime(d.last_updated_at)}</span>
-                        </div>
-                      </div>
-                    </div>
-                    <span className={cn("rounded-full border px-2.5 py-0.5 text-[11px] font-medium shrink-0", stageStyles[d.stage])}>
-                      {d.stage}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      })}
-    </div>
+    <KanbanBoard
+      columns={DEAL_COLUMNS}
+      items={items}
+      onMove={(itemId, toColumnKey) => onMove(itemId, toColumnKey)}
+      renderCard={(item, { isDragging }) => (
+        <DealCard
+          key={item.id}
+          // Strip the KanbanItem-only fields (status, position) — the
+          // card needs the original DealRecord shape.
+          deal={item as DealRecord}
+          isDragging={isDragging}
+        />
+      )}
+    />
   );
 }
