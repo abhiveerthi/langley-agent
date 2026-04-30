@@ -167,10 +167,12 @@ class TestStrategistPersistBrief:
         }
         await agent._persist_brief_node(state)
 
-        inserts = sb._canned.get("_inserts", [])
-        assert len(inserts) == 1
-        table, payload = inserts[0]
-        assert table == "strategist_briefs"
+        # Strategist now writes a brief row AND spawns one task per ranked
+        # idea — filter to the brief insert for this assertion. Task spawning
+        # has its own coverage in `test_strategist_auto_tasks.py`.
+        brief_inserts = [(t, r) for t, r in sb._canned.get("_inserts", []) if t == "strategist_briefs"]
+        assert len(brief_inserts) == 1
+        _, payload = brief_inserts[0]
         assert payload["org_id"] == real_uuid
         assert payload["thread_id"] == thread
         assert payload["headline"] == "Test headline"
