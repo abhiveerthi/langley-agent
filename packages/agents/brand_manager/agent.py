@@ -334,19 +334,86 @@ USER FEEDBACK:
         # up in `list_active_deals` and on peer agents' peer_context.
         # Failure does NOT fail the run — the email already shipped.
         from packages.agents.brand_manager.deals import log_deal_pitched
-        await log_deal_pitched(
+        # Use the user's pitch request as the brand name (e.g. "Magpul" from
+        # "draft a pitch to Magpul"). Future stage updates / settings UI
+        # can clean these up.
+        brand_name = self._last_user_text(state)
+        deal_id = await log_deal_pitched(
             org_id=state.get("org_id"),
             thread_id=state.get("thread_id"),
-            # Use the user's pitch request as the brand name (e.g. "Magpul" from
-            # "draft a pitch to Magpul"). Future stage updates / settings UI
-            # can clean these up.
-            brand_name=self._last_user_text(state),
+            brand_name=brand_name,
             recipient=state.get("recipient"),
             subject=state.get("subject"),
             send_result=result,
         )
 
+        # Drop a "follow up" task into the user's workspace, linked to the
+        # deal we just created. ~7 day cadence matches typical sponsor
+        # response windows. Same best-effort posture as the deal log:
+        # if this fails, the email is still out and the deal is still
+        # logged — the user just doesn't get the auto-reminder.
+        await self._spawn_followup_task(state, brand_name=brand_name, deal_id=deal_id)
+
         return {"send_result": result, "approval_status": "approved"}
+
+    async def _spawn_followup_task(
+        self,
+        state: BrandManagerState,
+        *,
+        brand_name: str,
+        deal_id: str | None,
+    ) -> None:
+        """Auto-spawn a 'follow up with X' task on the workspace.
+
+        Linked to the just-created `brand_deals` row via `deal_id`, so the
+        user can see the task on the deal-detail view as well as the
+        Tasks Kanban. Future BM polish will add escalating-priority
+        reminders if a pitched deal sits without a reply for too long;
+        for now it's a single follow-up scheduled ~7 days out.
+        """
+        from datetime import datetime, timedelta, timezone
+        from packages.agents.core.tasks import create_task_from_agent
+
+        clean_brand = (brand_name or "").strip()
+        if not clean_brand:
+            return  # Defensive — task title would be useless without a brand.
+
+        # Truncate the brand_name in the task title so the Kanban card
+        # doesn't get a giant title when the user pasted a long pitch
+        # request as the brand name.
+        display_name = clean_brand if len(clean_brand) <= 80 else f"{clean_brand[:77]}…"
+
+        subject = (state.get("subject") or "").strip()
+        recipient = (state.get("recipient") or "").strip()
+        description_parts: list[str] = []
+        if recipient:
+            description_parts.append(f"To: {recipient}")
+        if subject:
+            description_parts.append(f"Subject: {subject}")
+        description_parts.append(
+            "Check for response. If they replied, move the deal to "
+            "'replied' on the pipeline."
+        )
+        description = "\n".join(description_parts)
+
+        due_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+
+        await create_task_from_agent(
+            org_id=state.get("org_id"),
+            agent_slug=self.slug,
+            title=f"Follow up with {display_name}",
+            description=description,
+            priority="medium",
+            status="todo",
+            deal_id=deal_id,
+            due_at=due_at,
+            metadata={
+                "source": "brand_manager_pitch",
+                "deal_id": deal_id,
+                "subject": subject or None,
+                "recipient": recipient or None,
+            },
+        )
 
     # ── shared terminal ────────────────────────────────────────────────────
     async def _respond_node(self, state: BrandManagerState):

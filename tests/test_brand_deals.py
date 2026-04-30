@@ -377,10 +377,13 @@ class TestSendEmailAutoLogs:
         assert update["send_result"].startswith("Sent.")
         assert update["approval_status"] == "approved"
 
-        # And a deal row got inserted
+        # And a deal row got inserted. (As of feat/bm-followup-tasks the same
+        # node also spawns a follow-up task — that's tested separately in
+        # test_bm_followup_tasks.py, here we just assert the deal-side wiring.)
         inserts = sb._canned.get("_inserts", [])
-        assert len(inserts) == 1
-        table, row = inserts[0]
+        deal_inserts = [(t, r) for t, r in inserts if t == "brand_deals"]
+        assert len(deal_inserts) == 1
+        table, row = deal_inserts[0]
         assert table == "brand_deals"
         assert row["stage"] == "pitched"
         # brand_name comes from the user's request verbatim
