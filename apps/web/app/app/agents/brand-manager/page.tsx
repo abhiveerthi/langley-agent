@@ -21,6 +21,7 @@ import {
 import { cn } from "@/lib/utils";
 import { MiniChat } from "@/components/chat/MiniChat";
 import { YouTubeStatusPill } from "@/components/integrations/YouTubeStatusPill";
+import { DealDetailPanel } from "@/components/workspace/DealDetailPanel";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -123,6 +124,10 @@ const stageBuckets: { label: string; stages: Deal["stage"][] }[] = [
 export default function BrandManagerAgentPage() {
   const [deals, setDeals] = useState<DealsState>({ status: "loading" });
   const [approvals, setApprovals] = useState<ApprovalsState>({ status: "loading" });
+  // Deal-detail drawer state. `selectedDealId !== null` opens the panel,
+  // and the panel's onChange refetches the list so stage edits in the
+  // drawer reflect on the dashboard cards immediately.
+  const [selectedDealId, setSelectedDealId] = useState<string | null>(null);
 
   const fetchDeals = useCallback(async () => {
     try {
@@ -248,8 +253,12 @@ export default function BrandManagerAgentPage() {
         </Section>
 
         {/* Deal pipeline */}
-        <Section title="Deal pipeline" subtitle="Auto-populated when an approved pitch sends. Stage updates beyond 'pitched' come from a future inbox UI.">
-          <DealsList state={deals} onRefresh={fetchDeals} />
+        <Section title="Deal pipeline" subtitle="Click any deal to update its stage, leave notes, or see linked follow-up tasks.">
+          <DealsList
+            state={deals}
+            onRefresh={fetchDeals}
+            onSelect={(id) => setSelectedDealId(id)}
+          />
         </Section>
       </div>
 
@@ -279,6 +288,12 @@ export default function BrandManagerAgentPage() {
       </div>
 
       <MiniChat agentSlug="brand-manager" agentName="Brand Manager" />
+
+      <DealDetailPanel
+        dealId={selectedDealId}
+        onClose={() => setSelectedDealId(null)}
+        onChange={fetchDeals}
+      />
     </div>
   );
 }
@@ -319,7 +334,15 @@ function CapabilityCard({ icon: Icon, title, body }: { icon: React.ElementType; 
   );
 }
 
-function DealsList({ state, onRefresh }: { state: DealsState; onRefresh: () => void }) {
+function DealsList({
+  state,
+  onRefresh,
+  onSelect,
+}: {
+  state: DealsState;
+  onRefresh: () => void;
+  onSelect: (dealId: string) => void;
+}) {
   if (state.status === "loading") {
     return (
       <div className="rounded-lg border border-dashed border-border bg-muted/10 p-8 text-center">
@@ -368,7 +391,12 @@ function DealsList({ state, onRefresh }: { state: DealsState; onRefresh: () => v
             </div>
             <div className="space-y-2">
               {inBucket.map((d) => (
-                <div key={d.id} className="rounded-lg border border-border bg-card p-3.5">
+                <button
+                  key={d.id}
+                  type="button"
+                  onClick={() => onSelect(d.id)}
+                  className="w-full rounded-lg border border-border bg-card p-3.5 text-left transition-colors hover:bg-accent/40 hover:border-amber-500/30 focus:border-amber-500/40 focus:outline-none"
+                >
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-start gap-3 min-w-0 flex-1">
                       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-amber-500/10">
@@ -389,7 +417,7 @@ function DealsList({ state, onRefresh }: { state: DealsState; onRefresh: () => v
                       {d.stage}
                     </span>
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           </div>
