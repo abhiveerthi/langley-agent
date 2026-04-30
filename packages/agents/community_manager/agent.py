@@ -12,7 +12,9 @@ the same way):
         ↓                              ↓
    triage_agent ⇄ tools        fetch_recent_comments
         ↓                              ↓
-        respond                   pick_target
+   persist_triage              pick_target
+        ↓                              ↓
+        respond
                                        ↓
                                  (no match? → respond with clarification)
                                        ↓
@@ -33,6 +35,8 @@ which only runs after the gate is cleared with approval_status="approved".
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolNode
 from langchain_anthropic import ChatAnthropic
@@ -40,13 +44,55 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from pydantic import BaseModel, Field
 
 from packages.agents.core.base import BaseAgent, BaseAgentState
+from packages.agents.core.peer_context import _is_real_uuid
 from packages.agents.core.profile import OrgProfile, load_profile
+from packages.agents.core.tasks import create_tasks_from_agent
 from packages.agents.core.templates import render
 from packages.agents.community_manager.tools import (
     get_recent_comments,
     lookup_channel,
     reply_to_comment,
 )
+from packages.integrations.context import current_supabase
+
+
+def _priority_from_kind(kind: str | None) -> str:
+    """Map a triage bucket to task priority. VIPs are red-border high-priority
+    cards because a missed reply to a sponsor or fellow large creator is a
+    real cost. Real questions are mid-priority — worth answering this week
+    but not blocking. Superfans land low: nice-to-do, not urgent."""
+    if kind == "vip":
+        return "high"
+    if kind == "question":
+        return "medium"
+    return "low"
+
+
+# ── Structured output schemas ─────────────────────────────────────────────
+class TriageItem(BaseModel):
+    """A single actionable item the user should personally handle, extracted
+    from the triage agent's free-form markdown response so it can be
+    materialized as a task on /app/tasks."""
+    kind: Literal["vip", "question", "superfan"] = Field(
+        description="Which triage bucket the comment falls into."
+    )
+    commenter_name: str = Field(description="Display name of the commenter.")
+    comment_id: str = Field(default="", description="YouTube top-level comment id, if known.")
+    summary: str = Field(
+        description="One-line summary — for VIPs, why they matter; for questions, the question itself."
+    )
+    draft_reply: str = Field(
+        default="",
+        description="The draft reply the agent already wrote, if any. Empty string for VIPs without drafts.",
+    )
+    video_title: str = Field(default="", description="Title of the video the comment is on, if known.")
+
+
+class TriageOutput(BaseModel):
+    items: list[TriageItem] = Field(
+        default_factory=list,
+        description="Every actionable comment from the triage report — VIPs first, then questions, then superfans.",
+    )
 
 
 # ── Structured output schema for the pick-target step ────────────────────
@@ -140,6 +186,9 @@ class CommunityManagerAgent(BaseAgent):
         # triage / research branch — ReAct sub-loop
         graph.add_node("triage_agent", self._triage_agent_node)
         graph.add_node("triage_tools", self.tool_node)
+        # persist_triage spawns one /app/tasks To-Do per VIP / real question
+        # the triage agent surfaced. No-op for research intent and dev mode.
+        graph.add_node("persist_triage", self._persist_triage_node)
 
         # draft_reply branch — sequential
         graph.add_node("fetch_recent_comments", self._fetch_recent_comments_node)
@@ -166,13 +215,16 @@ class CommunityManagerAgent(BaseAgent):
             },
         )
 
-        # Triage / research ReAct loop
+        # Triage / research ReAct loop. When the loop exits (no more tool
+        # calls), drop into persist_triage which extracts actionable items
+        # and spawns tasks before the user-facing respond fires.
         graph.add_conditional_edges(
             "triage_agent",
             self._should_use_tools,
-            {"tools": "triage_tools", "end": "respond"},
+            {"tools": "triage_tools", "end": "persist_triage"},
         )
         graph.add_edge("triage_tools", "triage_agent")
+        graph.add_edge("persist_triage", "respond")
 
         # Draft-reply pipeline
         graph.add_edge("fetch_recent_comments", "pick_target")
@@ -272,6 +324,98 @@ class CommunityManagerAgent(BaseAgent):
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
         response = await self.llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
+
+    async def _persist_triage_node(self, state: CommunityManagerState):
+        """Spawn one workspace task per VIP / real question / superfan the
+        triage agent surfaced.
+
+        Triage produces free-form markdown for the chat — great for the
+        creator to skim, but useless once they close the tab. This node
+        runs a structured-extraction pass over the same markdown and drops
+        each actionable item onto /app/tasks so they can move it across
+        the Kanban as they work the inbox.
+
+        No-op when:
+          - intent != 'triage' (research is exploratory, draft_reply has its
+            own approval flow, neither produces a list of items to chase)
+          - org_id isn't a real UUID or Supabase isn't configured (dev mode)
+          - the triage agent didn't emit a final assistant message
+
+        Best-effort: extraction or task-insert failures are swallowed so a
+        flaky LLM call or DB blip can't break the user-facing reply.
+        """
+        if (state.get("intent") or "").lower() != "triage":
+            return {}
+
+        org_id = state.get("org_id") or ""
+        supabase = current_supabase.get()
+        if supabase is None or not _is_real_uuid(org_id):
+            return {}
+
+        last_ai = next(
+            (m for m in reversed(state["messages"]) if isinstance(m, AIMessage) and m.content),
+            None,
+        )
+        if not last_ai:
+            return {}
+
+        try:
+            structured = self.llm.with_structured_output(TriageOutput)
+            extraction: TriageOutput = await structured.ainvoke([
+                SystemMessage(content=(
+                    "Extract every actionable comment from the triage report below as structured items. "
+                    "VIPs go in 'vip', real questions in 'question', superfans in 'superfan'. "
+                    "Skip spam and ignore-bucket items. If a draft reply was written, include it verbatim. "
+                    "If no comment_id appears in [brackets], leave that field empty."
+                )),
+                HumanMessage(content=last_ai.content),
+            ])
+        except Exception as e:
+            print(f"[community_manager] triage extraction failed: {e!r}", flush=True)
+            return {}
+
+        if not extraction.items:
+            return {}
+
+        thread_id = state.get("thread_id") or ""
+        items = []
+        for item in extraction.items:
+            commenter = (item.commenter_name or "commenter").strip() or "commenter"
+            title = (
+                f"Reply to {commenter} (VIP)" if item.kind == "vip"
+                else f"Reply to {commenter}"
+            )
+            description_parts = []
+            if item.video_title:
+                description_parts.append(f"Video: {item.video_title}")
+            if item.summary:
+                description_parts.append(item.summary)
+            if item.draft_reply:
+                description_parts.append(f"Draft: {item.draft_reply}")
+            description = "\n\n".join(description_parts) or None
+            items.append({
+                "title": title,
+                "description": description,
+                "priority": _priority_from_kind(item.kind),
+                "status": "todo",
+                "metadata": {
+                    "source": "cm_triage",
+                    "thread_id": thread_id if _is_real_uuid(thread_id) else None,
+                    "kind": item.kind,
+                    "comment_id": item.comment_id or None,
+                },
+            })
+
+        try:
+            await create_tasks_from_agent(
+                org_id=org_id,
+                agent_slug=self.slug,
+                items=items,
+            )
+        except Exception as e:
+            print(f"[community_manager] task spawn failed: {e!r}", flush=True)
+
+        return {}
 
     async def _fetch_recent_comments_node(self, state: CommunityManagerState):
         """Pull a batch of recent comments to feed the pick_target step.
