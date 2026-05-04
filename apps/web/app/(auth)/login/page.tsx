@@ -34,7 +34,10 @@ function LoginForm() {
         return;
       }
 
-      router.push(next.startsWith("/") ? next : "/app/chat");
+      // Open-redirect guard: `next.startsWith("/")` alone allows
+      // protocol-relative URLs like `//attacker.com`. Require single
+      // slash + non-slash + non-backslash to keep the redirect on-site.
+      router.push(/^\/[^/\\]/.test(next) ? next : "/app/chat");
       router.refresh();
     } catch {
       setError("Unable to sign in right now. Please try again.");

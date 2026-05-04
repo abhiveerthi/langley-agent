@@ -262,6 +262,41 @@ async def create_private_channel(
     return {"channel_id": channel_id, "name": channel.get("name")}
 
 
+# ── Listing ────────────────────────────────────────────────────────────────
+
+async def list_conversations(
+    access_token: str,
+    *,
+    types: str = "public_channel,private_channel",
+    exclude_archived: bool = True,
+    limit: int = 200,
+) -> list[dict]:
+    """List channels the bot can see via conversations.list. Returns
+    `[{id, name, is_private}]` for the channel picker UI. Caller is
+    responsible for filtering to channels the bot is actually a member
+    of (`is_member=true`) if they only want post-targets."""
+    body = await _slack_get(
+        access_token,
+        "conversations.list",
+        {
+            "types": types,
+            "exclude_archived": "true" if exclude_archived else "false",
+            "limit": limit,
+        },
+    )
+    out: list[dict] = []
+    for ch in body.get("channels") or []:
+        out.append(
+            {
+                "id": ch.get("id"),
+                "name": ch.get("name"),
+                "is_private": bool(ch.get("is_private")),
+                "is_member": bool(ch.get("is_member")),
+            }
+        )
+    return out
+
+
 # ── Users ──────────────────────────────────────────────────────────────────
 
 async def lookup_user_email(access_token: str, user_id: str) -> str | None:

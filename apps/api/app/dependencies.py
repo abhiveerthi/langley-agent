@@ -12,8 +12,48 @@ class CurrentUser:
     role: str = "member"
 
 
+@dataclass
+class AuthenticatedUser:
+    """Just-the-JWT-decode user, no org membership context.
+
+    Used by endpoints like POST /api/invites/{id}/complete where the
+    invitee is authenticated via Supabase Auth but doesn't yet have an
+    org_members row (and the auto-provisioner gate would 409 them via
+    get_current_user). The /complete endpoint inserts that row itself."""
+    id: str
+    email: str
+
+
 def get_supabase(settings: Settings = Depends(get_settings)) -> Client:
     return create_client(settings.supabase_url, settings.supabase_service_key)
+
+
+async def get_authenticated_user(
+    request: Request,
+    supabase: Client = Depends(get_supabase),
+) -> AuthenticatedUser:
+    """Decode the Bearer token and return the auth.users identity.
+
+    Does NOT look up org_members or trigger the auto-provisioner gate.
+    Use this when the caller is authenticated but org context isn't
+    relevant yet (e.g. invite acceptance — the org_members row gets
+    inserted by the endpoint handler after this dependency runs)."""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+
+    token = auth_header.split(" ")[1]
+    try:
+        user_response = supabase.auth.get_user(token)
+        user = user_response.user
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    return AuthenticatedUser(id=user.id, email=user.email or "")
 
 
 async def get_current_user(request: Request, supabase: Client = Depends(get_supabase)) -> CurrentUser:
@@ -48,7 +88,29 @@ async def get_current_user(request: Request, supabase: Client = Depends(get_supa
             role=member["role"],
         )
 
-    # First sign-in: provision a personal workspace.
+    # No membership yet. Before auto-provisioning a personal workspace,
+    # check whether the user's email has a pending invite waiting. If so,
+    # block the auto-provision — the invitee must accept the invite to
+    # land in the inviting org, not be quietly handed a separate personal
+    # workspace they'd then be locked out of (single-org-per-user in v1).
+    email_norm = (user.email or "").strip().lower()
+    if email_norm:
+        pending = (
+            supabase.table("org_invites")
+            .select("id")
+            .eq("email", email_norm)
+            .is_("accepted_at", "null")
+            .is_("revoked_at", "null")
+            .limit(1)
+            .execute()
+        )
+        if pending.data:
+            raise HTTPException(
+                status_code=409,
+                detail="You have a pending invite. Click the link in your invite email to join the workspace.",
+            )
+
+    # First sign-in with no pending invite: provision a personal workspace.
     member = _provision_personal_workspace(supabase, user)
     return CurrentUser(
         id=user.id,
