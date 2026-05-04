@@ -1,7 +1,27 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { Bell } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
+
+const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+type MeResponse = {
+  user: {
+    id: string;
+    email: string;
+    full_name: string | null;
+    avatar_url: string | null;
+    initials: string;
+  };
+  org: {
+    id: string;
+    name: string;
+    slug: string;
+  };
+  role: string;
+};
 
 function getPageName(pathname: string): string {
   const segments = pathname.split("/").filter(Boolean);
@@ -30,6 +50,7 @@ function getPageName(pathname: string): string {
     projects: "Projects",
     runs: "Runs",
     approvals: "Approvals",
+    team: "Team",
   };
 
   return nameMap[last] ?? last.charAt(0).toUpperCase() + last.slice(1);
@@ -59,6 +80,34 @@ export function TopBar() {
   const pageName = getPageName(pathname);
   const breadcrumb = getBreadcrumb(pathname);
 
+  const [me, setMe] = useState<MeResponse | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const supabase = createClient();
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) return;
+        const resp = await fetch(`${API}/api/me`, {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        if (!resp.ok) return;
+        const data: MeResponse = await resp.json();
+        if (!cancelled) setMe(data);
+      } catch {
+        // Silent fail; the avatar shows fallback "??" until next mount.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const initials = me?.user.initials ?? "??";
+  const avatarUrl = me?.user.avatar_url ?? null;
+  const tooltipName = me?.user.full_name || me?.user.email || "Loading…";
+
   return (
     <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-6">
       {/* Breadcrumb */}
@@ -78,9 +127,22 @@ export function TopBar() {
           <Bell className="h-4 w-4" />
           <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-primary" />
         </button>
-        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/20 text-xs font-semibold text-primary">
-          SR
-        </div>
+        {avatarUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={avatarUrl}
+            alt={tooltipName}
+            title={tooltipName}
+            className="h-8 w-8 rounded-full object-cover"
+          />
+        ) : (
+          <div
+            title={tooltipName}
+            className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/20 text-xs font-semibold text-primary"
+          >
+            {initials}
+          </div>
+        )}
       </div>
     </header>
   );

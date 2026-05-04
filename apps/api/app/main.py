@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
-from app.routers import chat, stream, agents, tasks, projects, runs, approvals, notifications, dashboard, integrations, publisher, profile, strategist, brand_manager, storage, slack_events, slack_interactive
+from app.routers import chat, stream, agents, tasks, projects, runs, approvals, notifications, dashboard, integrations, publisher, profile, strategist, brand_manager, storage, slack_events, slack_interactive, invites, me, slack_meta
 from app.services.graph_orchestrator import close_checkpointer, init_checkpointer
 
 settings = get_settings()
@@ -61,3 +61,6 @@ app.include_router(brand_manager.router, prefix="/api")
 app.include_router(storage.router, prefix="/api")
 app.include_router(slack_events.router, prefix="/api")
 app.include_router(slack_interactive.router, prefix="/api")
+app.include_router(invites.router, prefix="/api")
+app.include_router(me.router, prefix="/api")
+app.include_router(slack_meta.router, prefix="/api")

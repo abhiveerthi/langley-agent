@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     monday_client_secret: str = ""
     monday_oauth_redirect_uri: str = "http://localhost:3000/auth/monday/callback"
 
+    # Resend transactional email — used for org-invite delivery. The
+    # email_from domain must have SPF + DKIM configured on the registrar
+    # before invitations land in inboxes instead of spam folders.
+    resend_api_key: str = ""
+    email_from: str = "Backroom <invites@backroom.app>"
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
