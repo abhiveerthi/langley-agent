@@ -19,7 +19,23 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException, Request
 
-from app.dependencies import get_current_user
+from app.dependencies import (
+    _authenticated_user_cache,
+    _current_user_cache,
+    get_current_user,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_auth_cache():
+    """Auth-token cache is module-level — wipe between tests so a hit
+    written by one test doesn't short-circuit `get_current_user` in the
+    next (every test in this file uses the same fake Bearer token)."""
+    _current_user_cache.clear()
+    _authenticated_user_cache.clear()
+    yield
+    _current_user_cache.clear()
+    _authenticated_user_cache.clear()
 
 
 # ── MockSupabase (subset of test_invites_router.py — kept inline here so
