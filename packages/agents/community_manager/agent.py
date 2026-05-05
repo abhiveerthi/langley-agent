@@ -54,6 +54,7 @@ from packages.agents.community_manager.tools import (
     reply_to_comment,
 )
 from packages.integrations.context import current_supabase
+from packages.integrations.youtube.client import get_channel_id as get_oauth_channel_id
 
 
 def _priority_from_kind(kind: str | None) -> str:
@@ -259,6 +260,22 @@ class CommunityManagerAgent(BaseAgent):
         load_peer_context node. Empty dict in dev mode."""
         return (state.get("metadata") or {}).get("peer_context") or {}
 
+    def _channel_id(self, state: CommunityManagerState) -> str:
+        """Resolve the creator's channel_id. Prefers the OAuth-connected
+        channel (source of truth — what the user actually authorized) and
+        falls back to the org_profiles row for installs that pre-date the
+        OAuth flow or are running off a static YAML profile."""
+        org_id = state.get("org_id") or ""
+        supabase = current_supabase.get()
+        if supabase is not None and org_id:
+            try:
+                ch = get_oauth_channel_id(supabase, org_id)
+                if ch:
+                    return ch
+            except Exception:
+                pass
+        return self._profile(state).youtube.channel_id or ""
+
     def _last_user_text(self, state: CommunityManagerState) -> str:
         last_human = next(
             (m for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
@@ -423,10 +440,9 @@ class CommunityManagerAgent(BaseAgent):
         Uses fewer videos / fewer-per-video than the triage default since
         we just need enough surface area to find the comment the user named.
         """
-        profile = self._profile(state)
         try:
             raw = await get_recent_comments.ainvoke({
-                "channel_id": profile.youtube.channel_id or "",
+                "channel_id": self._channel_id(state),
                 "max_videos": 5,
                 "per_video": 30,
             })
