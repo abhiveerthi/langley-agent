@@ -1,0 +1,27 @@
+-- Channel-message rich content via a single jsonb metadata column.
+--
+-- Replaces what would otherwise be a wall of optional foreign-key columns
+-- (approval_id, poll_id, brief_id, …) with one extensible bag.
+-- The body still carries the plain-text description used by message
+-- search and the realtime fallback path; metadata.kind tells the FE
+-- which (if any) rich card to render in addition to the body.
+--
+-- v2 introduces a single kind: "approval".
+--
+--   { "kind": "approval", "approval_id": "<uuid>" }
+--     The agent dispatch hit an interrupt (e.g. send_email gate). The FE
+--     renders an inline approval card with Approve/Reject buttons that
+--     drive the existing approval-flow endpoints.
+--
+--   { "kind": "approval", "approval_id": "<uuid>",
+--     "status": "approved" | "rejected", "reviewed_by": "<user_uuid>" }
+--     Same row after a decision lands. The FE renders a static "✓ approved
+--     by @sean" tag in place of the buttons. The decision is captured by
+--     UPDATEing the row in place rather than inserting a separate "decided"
+--     message — keeps the timeline tidy and the realtime UPDATE event
+--     from supabase_realtime drives the FE re-render.
+--
+-- Future kinds slot in here without another migration: "poll", "brief",
+-- "deal_pitched", etc.
+alter table channel_messages
+  add column if not exists metadata jsonb not null default '{}';

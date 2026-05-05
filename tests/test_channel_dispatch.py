@@ -207,18 +207,63 @@ class TestDispatchFallbacks:
         assert len(msgs) == 1
         assert "isn't registered for this workspace" in msgs[0]["body"]
 
-    async def test_paused_at_interrupt_posts_fallback(self, real_uuid, trigger_ctx):
+    async def test_paused_at_interrupt_posts_approval_card(self, real_uuid, trigger_ctx):
+        """Happy path for the agent-paused branch: orchestrator wrote an
+        approvals row with this thread_id, dispatch finds it, posts a
+        channel message with metadata pointing at the approval id so the
+        FE renders the inline approval card with Approve/Reject buttons."""
         agent_uuid = str(uuid.uuid4())
+        approval_uuid = str(uuid.uuid4())
+        # Approval row matches on (org_id, thread_id, status='pending').
+        # We don't know the dispatch's generated thread_id ahead of time;
+        # the lookup uses .eq("thread_id", ...) so we need our fixture to
+        # match whatever thread_id the dispatch generated. Easiest: stub
+        # the lookup function directly.
         sb = MockSupabase({
             "agents": [{"id": agent_uuid, "org_id": real_uuid, "slug": "strategist"}],
         })
-        # next is non-empty → graph paused at interrupt.
         paused_state = _make_state(next_=("approval_gate",), messages=[])
         fake_app = SimpleNamespace(aget_state=AsyncMock(return_value=paused_state))
 
         with (
             patch.object(cd, "stream_new_run", _empty_stream),
             patch.object(cd, "_compile_agent", AsyncMock(return_value=fake_app)),
+            patch.object(cd, "_resolve_pending_approval_id", return_value=approval_uuid),
+        ):
+            await cd.dispatch_agent_to_channel(
+                agent_slug="strategist", supabase=sb, **trigger_ctx,
+            )
+
+        msgs = _agent_inserts(sb)
+        assert len(msgs) == 1
+        body = msgs[0]["body"]
+        # Body is the search-friendly summary; the metadata is what the
+        # FE branches on to actually render the card.
+        assert "approval" in body.lower()
+        assert msgs[0]["sender_agent_id"] == agent_uuid
+        assert msgs[0]["metadata"] == {
+            "kind": "approval",
+            "approval_id": approval_uuid,
+        }
+
+    async def test_paused_at_interrupt_with_no_approval_row_falls_back(
+        self, real_uuid, trigger_ctx,
+    ):
+        """Defensive fallback: dispatch detected a pause but couldn't
+        locate the matching approvals row (race / DB hiccup). Channel
+        message degrades to a text fallback pointing at /app/approvals
+        rather than rendering a card with no actionable id."""
+        agent_uuid = str(uuid.uuid4())
+        sb = MockSupabase({
+            "agents": [{"id": agent_uuid, "org_id": real_uuid, "slug": "strategist"}],
+        })
+        paused_state = _make_state(next_=("approval_gate",), messages=[])
+        fake_app = SimpleNamespace(aget_state=AsyncMock(return_value=paused_state))
+
+        with (
+            patch.object(cd, "stream_new_run", _empty_stream),
+            patch.object(cd, "_compile_agent", AsyncMock(return_value=fake_app)),
+            patch.object(cd, "_resolve_pending_approval_id", return_value=None),
         ):
             await cd.dispatch_agent_to_channel(
                 agent_slug="strategist", supabase=sb, **trigger_ctx,
@@ -229,7 +274,8 @@ class TestDispatchFallbacks:
         body = msgs[0]["body"]
         assert "paused for your approval" in body
         assert "/app/approvals" in body
-        assert msgs[0]["sender_agent_id"] == agent_uuid
+        # No metadata payload — FE renders the body as plain text.
+        assert msgs[0].get("metadata") in (None, {})
 
     async def test_llm_failure_posts_fallback(self, real_uuid, trigger_ctx):
         agent_uuid = str(uuid.uuid4())
@@ -307,3 +353,140 @@ class TestNoReDispatchLoop:
         msg = _agent_inserts(sb)[0]
         assert msg["mentioned_user_ids"] == []
         assert msg["mentioned_agent_slugs"] == []
+
+
+# ── Resume-from-channel path ──────────────────────────────────────────────
+@pytest.mark.asyncio
+class TestDispatchResumeToChannel:
+    """Cover `dispatch_resume_to_channel` — the post-approve / post-reject
+    path that drains the resume stream and posts the agent's continuation
+    back into the channel.
+
+    The orchestrator's resume helpers (`stream_resume_approved` /
+    `stream_resume_rejected`) handle approval-row updates internally; we
+    mock them out here to focus on what the dispatcher does AFTER the
+    resume completes."""
+
+    async def _make_approval(
+        self, *, real_uuid: str, agent_slug: str = "strategist",
+    ) -> tuple[str, str, dict]:
+        """Build an approval row dict + the (approval_id, thread_id)
+        tuple used to drive the resume call."""
+        approval_id = str(uuid.uuid4())
+        thread_id = str(uuid.uuid4())
+        return approval_id, thread_id, {
+            "id": approval_id,
+            "org_id": real_uuid,
+            "thread_id": thread_id,
+            "requested_by_agent": agent_slug,
+            "status": "pending",
+        }
+
+    async def test_resume_approve_posts_agent_response(self, real_uuid, trigger_ctx):
+        """Approve resumes, agent runs to completion, final AIMessage is
+        posted to the channel as the continuation."""
+        approval_id, thread_id, approval_row = await self._make_approval(real_uuid=real_uuid)
+        agent_uuid = str(uuid.uuid4())
+        sb = MockSupabase({
+            "agents": [{"id": agent_uuid, "org_id": real_uuid, "slug": "strategist"}],
+        })
+
+        # Mock the approval store get to return the row by id.
+        fake_store = SimpleNamespace(get=AsyncMock(return_value=approval_row))
+        # Resume stream is drained; final state has a proper AIMessage.
+        final_state = _make_state(
+            next_=(), messages=[AIMessage(content="Email sent — Magpul received the pitch.")],
+        )
+        fake_app = SimpleNamespace(aget_state=AsyncMock(return_value=final_state))
+
+        with (
+            patch.object(cd, "get_approval_store", return_value=fake_store),
+            patch.object(cd, "stream_resume_approved", _empty_stream),
+            patch.object(cd, "_compile_agent", AsyncMock(return_value=fake_app)),
+        ):
+            await cd.dispatch_resume_to_channel(
+                approval_id=approval_id,
+                decision="approved",
+                feedback=None,
+                channel_id=trigger_ctx["channel_id"],
+                org_id=real_uuid,
+                user_id=trigger_ctx["user_id"],
+                triggering_message_id=trigger_ctx["triggering_message_id"],
+                supabase=sb,
+            )
+
+        msgs = _agent_inserts(sb)
+        assert len(msgs) == 1
+        assert "Email sent" in msgs[0]["body"]
+        assert msgs[0]["sender_agent_id"] == agent_uuid
+
+    async def test_resume_reject_routes_through_rejected_stream(
+        self, real_uuid, trigger_ctx,
+    ):
+        """Reject hits stream_resume_rejected (not approved). The
+        agent's revise branch runs and pauses again; we get a fresh
+        approval card posted to the channel."""
+        approval_id, thread_id, approval_row = await self._make_approval(real_uuid=real_uuid)
+        new_approval_id = str(uuid.uuid4())
+        agent_uuid = str(uuid.uuid4())
+        sb = MockSupabase({
+            "agents": [{"id": agent_uuid, "org_id": real_uuid, "slug": "strategist"}],
+        })
+
+        fake_store = SimpleNamespace(get=AsyncMock(return_value=approval_row))
+        # After a rejection-driven revise, the graph pauses again at the
+        # gate. The new pending approvals row would be a fresh id.
+        paused_state = _make_state(next_=("approval_gate",), messages=[])
+        fake_app = SimpleNamespace(aget_state=AsyncMock(return_value=paused_state))
+
+        approved_called = AsyncMock()
+        rejected_called = _empty_stream
+
+        with (
+            patch.object(cd, "get_approval_store", return_value=fake_store),
+            patch.object(cd, "stream_resume_approved", approved_called),
+            patch.object(cd, "stream_resume_rejected", rejected_called),
+            patch.object(cd, "_compile_agent", AsyncMock(return_value=fake_app)),
+            patch.object(cd, "_resolve_pending_approval_id", return_value=new_approval_id),
+        ):
+            await cd.dispatch_resume_to_channel(
+                approval_id=approval_id,
+                decision="rejected",
+                feedback="too long",
+                channel_id=trigger_ctx["channel_id"],
+                org_id=real_uuid,
+                user_id=trigger_ctx["user_id"],
+                triggering_message_id=trigger_ctx["triggering_message_id"],
+                supabase=sb,
+            )
+
+        # Approve stream MUST NOT have fired.
+        approved_called.assert_not_called()
+        # New approval card was posted referencing the new id.
+        msgs = _agent_inserts(sb)
+        assert len(msgs) == 1
+        assert msgs[0]["metadata"] == {"kind": "approval", "approval_id": new_approval_id}
+
+    async def test_resume_with_missing_approval_row_logs_and_returns(
+        self, real_uuid, trigger_ctx,
+    ):
+        """Resume called with an approval_id that no longer exists in
+        the store. Don't crash; don't post anything — the channel-side
+        UPDATE already marked the card resolved synchronously."""
+        sb = MockSupabase()
+        fake_store = SimpleNamespace(get=AsyncMock(return_value=None))
+
+        with patch.object(cd, "get_approval_store", return_value=fake_store):
+            await cd.dispatch_resume_to_channel(
+                approval_id=str(uuid.uuid4()),
+                decision="approved",
+                feedback=None,
+                channel_id=trigger_ctx["channel_id"],
+                org_id=real_uuid,
+                user_id=trigger_ctx["user_id"],
+                triggering_message_id=trigger_ctx["triggering_message_id"],
+                supabase=sb,
+            )
+
+        # Nothing inserted.
+        assert _agent_inserts(sb) == []

@@ -17,6 +17,25 @@ export type Channel = {
   member_count: number;
 };
 
+// Rich-card payload riding on the `metadata` jsonb column. Currently only
+// the "approval" variant exists; future kinds (poll, brief preview, deal
+// pitched) slot in here without a schema change. The variant lives in
+// metadata so message search keeps working off the plain-text body — the
+// body always carries a fallback description ("@brand-manager needs your
+// approval to continue.") for both search and the no-card render path.
+export type ChannelMessageMetadata =
+  | Record<string, never>
+  | {
+      kind: "approval";
+      approval_id: string;
+      // Only present after a decision lands. Set by the channel approve/
+      // reject endpoints which UPDATE the row in place; the realtime
+      // UPDATE event drives the FE to swap the buttons for a static
+      // "approved by @sean" tag.
+      status?: "approved" | "rejected";
+      reviewed_by?: string;
+    };
+
 export type ChannelMessage = {
   id: string;
   channel_id: string;
@@ -39,6 +58,7 @@ export type ChannelMessage = {
   mentioned_agent_slugs: string[];
   agent_run_id: string | null;
   in_reply_to_message_id: string | null;
+  metadata: ChannelMessageMetadata;
   created_at: string;
   edited_at: string | null;
 };

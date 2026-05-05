@@ -8,6 +8,7 @@ import {
   userDisplayName,
   userInitial,
 } from "./utils";
+import { ApprovalCardInChannel } from "./ApprovalCardInChannel";
 import type { ChannelMessage, MentionableMaps } from "./types";
 
 interface MessageRowProps {
@@ -25,13 +26,29 @@ interface MessageRowProps {
  * tokens (`@token`) inside the body get a primary-color treatment so the
  * "@strategist what should we make next?" line of work reads cleanly.
  */
-export function MessageRow({ message, replyTo }: MessageRowProps) {
+export function MessageRow({ message, mentionable, replyTo }: MessageRowProps) {
   const isAgent = !!message.sender_agent;
   const senderName = isAgent
     ? message.sender_agent!.name
     : message.sender_user
       ? userDisplayName(message.sender_user)
       : "Unknown";
+
+  // Resolve the reviewer label for resolved approval cards. The metadata
+  // carries a user id; if that user is in the org's mentionable list we
+  // can render their display name without a refetch.
+  const isApproval = message.metadata?.kind === "approval";
+  let reviewedByLabel: string | null = null;
+  if (
+    isApproval &&
+    "reviewed_by" in message.metadata &&
+    message.metadata.reviewed_by
+  ) {
+    const reviewer = mentionable.usersById[message.metadata.reviewed_by];
+    reviewedByLabel = reviewer
+      ? "@" + userDisplayName(reviewer)
+      : "@someone";
+  }
 
   return (
     <div className="group flex gap-3 px-4 py-2.5 hover:bg-muted/20 transition-colors">
@@ -75,6 +92,21 @@ export function MessageRow({ message, replyTo }: MessageRowProps) {
         <div className="mt-1 text-sm text-foreground whitespace-pre-wrap break-words">
           <RenderedBody body={message.body} />
         </div>
+
+        {/* Inline approval card — buttons when unresolved, status tag
+            after a decision lands (the realtime UPDATE handler patches
+            metadata.status in place when the channel approve/reject
+            endpoint UPDATEs the row). */}
+        {isApproval && message.metadata.kind === "approval" && (
+          <ApprovalCardInChannel
+            channelId={message.channel_id}
+            approvalId={message.metadata.approval_id}
+            status={message.metadata.status}
+            reviewedByLabel={reviewedByLabel}
+            agentName={message.sender_agent?.name ?? null}
+            body={message.body}
+          />
+        )}
       </div>
     </div>
   );

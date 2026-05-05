@@ -28,12 +28,15 @@ from app.dependencies import CurrentUser
 from app.routers.channels import (
     CreateChannelRequest,
     CreateMessageRequest,
+    RejectApprovalInChannelRequest,
+    approve_in_channel,
     create_channel,
     create_message,
     join_channel,
     list_channels,
     list_mentionable,
     list_messages,
+    reject_in_channel,
 )
 
 
@@ -67,6 +70,9 @@ class _MockQuery:
         self._null_filters: list[str] = []
         self._in_filters: dict[str, list] = {}
         self._lt_filters: dict[str, Any] = {}
+        # Postgrest jsonb-arrow filters: ("metadata", "approval_id") -> value
+        # Used by `_find_approval_card_message` to locate approval cards.
+        self._json_eq_filters: dict[tuple[str, str], Any] = {}
         self._mode = "select"
         self._insert_payload: dict | None = None
         self._upsert_payload: dict | None = None
@@ -114,6 +120,14 @@ class _MockQuery:
     def limit(self, *_a, **_k): return self
     def delete(self): return self
 
+    def filter(self, expr: str, op: str, value):
+        # Only `metadata->>key` eq is exercised in tests today. Anything
+        # else falls through as a no-op to keep the mock forgiving.
+        if op == "eq" and "->>" in expr:
+            col, _, json_key = expr.partition("->>")
+            self._json_eq_filters[(col, json_key)] = value
+        return self
+
     # ── execute ────────────────────────────────────────────────────────
     def _matches(self, row: dict) -> bool:
         for k, v in self._eq_filters.items():
@@ -128,6 +142,10 @@ class _MockQuery:
         for k, v in self._lt_filters.items():
             rv = row.get(k)
             if rv is None or not (rv < v):
+                return False
+        for (col, key), v in self._json_eq_filters.items():
+            blob = row.get(col)
+            if not isinstance(blob, dict) or blob.get(key) != v:
                 return False
         return True
 
@@ -760,3 +778,171 @@ class TestMentionable:
         # payloads (which carry `sender_agent_id`, no joined info).
         assert result["agents"][0]["id"] == strategist_id
         assert [u["id"] for u in result["users"]] == [u1]
+
+
+# ── POST /channels/{id}/approvals/{id}/approve|reject ────────────────────
+@pytest.mark.asyncio
+class TestApproveInChannel:
+    """The channel-context approve/reject endpoints. Two assertions per
+    happy path:
+      1. The approval-card row's metadata is UPDATEd in place to record
+         the decision (status + reviewed_by). The realtime UPDATE event
+         drives the FE to swap buttons for a "approved by @sean" tag.
+      2. A background task is queued to drain the resume stream and
+         post the agent's continuation back to the channel.
+    """
+
+    def _seed_channel_with_card(
+        self,
+        *,
+        org_id: str,
+        channel_id: str | None = None,
+        approval_id: str | None = None,
+    ) -> tuple[MockSupabase, str, str, str]:
+        """Build a store with one channel + one approval-card message."""
+        channel_id = channel_id or str(uuid.uuid4())
+        approval_id = approval_id or str(uuid.uuid4())
+        card_id = str(uuid.uuid4())
+        sb = MockSupabase({
+            "channels": [
+                {"id": channel_id, "org_id": org_id, "name": "general",
+                 "archived_at": None},
+            ],
+            "channel_messages": [
+                {
+                    "id": card_id,
+                    "channel_id": channel_id,
+                    "org_id": org_id,
+                    "sender_user_id": None,
+                    "sender_agent_id": str(uuid.uuid4()),
+                    "body": "@strategist needs your approval to continue.",
+                    "metadata": {"kind": "approval", "approval_id": approval_id},
+                    "mentioned_user_ids": [],
+                    "mentioned_agent_slugs": [],
+                    "agent_run_id": None,
+                    "in_reply_to_message_id": None,
+                    "edited_at": None,
+                    "created_at": "2026-05-05T20:00:00Z",
+                },
+            ],
+        })
+        return sb, channel_id, approval_id, card_id
+
+    async def test_approve_marks_card_resolved_and_queues_resume(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        sb, channel_id, approval_id, card_id = self._seed_channel_with_card(
+            org_id=real_uuid,
+        )
+        bg = BackgroundTasks()
+
+        result = await approve_in_channel(
+            channel_id=channel_id,
+            approval_id=approval_id,
+            background_tasks=bg,
+            user=user,
+            supabase=sb,
+        )
+
+        # Synchronous response.
+        assert result == {"status": "approved", "approval_id": approval_id}
+        # Card metadata patched in place — the realtime UPDATE event off
+        # this would carry the new state to every subscribed FE.
+        card = next(r for r in sb._store["channel_messages"] if r["id"] == card_id)
+        assert card["metadata"] == {
+            "kind": "approval",
+            "approval_id": approval_id,
+            "status": "approved",
+            "reviewed_by": user.id,
+        }
+        # Resume task queued for the BG runner. We don't drain it here —
+        # the dispatch behaviour is covered in test_channel_dispatch.py.
+        assert len(bg.tasks) == 1
+
+    async def test_reject_marks_card_resolved_and_passes_feedback(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        sb, channel_id, approval_id, card_id = self._seed_channel_with_card(
+            org_id=real_uuid,
+        )
+        bg = BackgroundTasks()
+
+        result = await reject_in_channel(
+            channel_id=channel_id,
+            approval_id=approval_id,
+            background_tasks=bg,
+            body=RejectApprovalInChannelRequest(feedback="too long"),
+            user=user,
+            supabase=sb,
+        )
+
+        assert result == {"status": "rejected", "approval_id": approval_id}
+        card = next(r for r in sb._store["channel_messages"] if r["id"] == card_id)
+        assert card["metadata"]["status"] == "rejected"
+        assert card["metadata"]["reviewed_by"] == user.id
+        # Feedback rides on the queued background task. Inspect the task
+        # kwargs the router scheduled so we know the dispatcher will see it.
+        assert len(bg.tasks) == 1
+        task = bg.tasks[0]
+        assert task.kwargs["decision"] == "rejected"
+        assert task.kwargs["feedback"] == "too long"
+
+    async def test_approve_404_when_card_not_in_channel(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        """The card lookup is org+channel-scoped, so an approval id that
+        belongs to a different channel (or is bogus) must 404 — never
+        UPDATE someone else's channel_messages row."""
+        sb, channel_id, _approval_id, _card_id = self._seed_channel_with_card(
+            org_id=real_uuid,
+        )
+        bg = BackgroundTasks()
+
+        with pytest.raises(HTTPException) as exc:
+            await approve_in_channel(
+                channel_id=channel_id,
+                approval_id=str(uuid.uuid4()),  # not the seeded one
+                background_tasks=bg,
+                user=user,
+                supabase=sb,
+            )
+        assert exc.value.status_code == 404
+        # No background task scheduled either.
+        assert len(bg.tasks) == 0
+
+    async def test_approve_404_when_channel_not_in_org(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        """Cross-tenant attack: caller passes a channel id that exists
+        in a different org. _assert_channel_in_org must 404 BEFORE we
+        touch the card."""
+        other_org = str(uuid.uuid4())
+        # Channel + card both belong to a DIFFERENT org.
+        sb, channel_id, approval_id, _ = self._seed_channel_with_card(
+            org_id=other_org,
+        )
+        bg = BackgroundTasks()
+
+        with pytest.raises(HTTPException) as exc:
+            await approve_in_channel(
+                channel_id=channel_id,
+                approval_id=approval_id,
+                background_tasks=bg,
+                user=user,  # caller is in real_uuid, not other_org
+                supabase=sb,
+            )
+        assert exc.value.status_code == 404
+        # Other-org card MUST be untouched.
+        card = sb._store["channel_messages"][0]
+        assert "status" not in card["metadata"]
+
+
+# ── Schema validation ─────────────────────────────────────────────────────
+class TestRejectApprovalInChannelSchema:
+    def test_feedback_optional(self):
+        body = RejectApprovalInChannelRequest()
+        assert body.feedback is None
+
+    def test_feedback_round_trips(self):
+        body = RejectApprovalInChannelRequest(feedback="rephrase the subject")
+        assert body.feedback == "rephrase the subject"
