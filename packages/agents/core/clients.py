@@ -96,7 +96,7 @@ async def resend_send(
 
 
 async def youtube_api_get(endpoint: str, params: dict) -> dict:
-    """Call YouTube Data API v3.
+    """Call YouTube Data API v3 with the static API key.
 
     Returns the parsed JSON response.
     Raises ValueError if API key is not configured.
@@ -110,6 +110,20 @@ async def youtube_api_get(endpoint: str, params: dict) -> dict:
         response = await client.get(
             f"https://www.googleapis.com/youtube/v3/{endpoint}",
             params=params,
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+async def youtube_api_get_oauth(
+    endpoint: str, params: dict, access_token: str
+) -> dict:
+    """Call YouTube Data API v3 as the connected creator (OAuth Bearer token)."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(
+            f"https://www.googleapis.com/youtube/v3/{endpoint}",
+            params=params,
+            headers={"Authorization": f"Bearer {access_token}"},
         )
         response.raise_for_status()
         return response.json()

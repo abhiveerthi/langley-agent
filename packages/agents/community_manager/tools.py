@@ -2,10 +2,10 @@
 Community Manager tools.
 
 Two read-only Data-API tools (`get_recent_comments`, `lookup_channel`) plus
-one OAuth-backed write tool (`reply_to_comment`) — the write tool calls
-YouTube on behalf of the connected creator using their per-org refresh
-token, gated by the agent's approval_gate at the graph level so a draft
-must be approved before this tool ever fires.
+one OAuth-backed write tool (`reply_to_comment`) — every YouTube call is
+made on behalf of the connected creator using their per-org refresh token.
+The write tool is additionally gated by the agent's approval_gate at the
+graph level so a draft must be approved before it fires.
 """
 from __future__ import annotations
 
@@ -14,12 +14,31 @@ import os
 import httpx
 from langchain_core.tools import tool
 
-from packages.agents.core.clients import youtube_api_get
+from packages.agents.core.clients import youtube_api_get_oauth
 from packages.integrations.context import current_org_id, current_supabase
 from packages.integrations.youtube.client import get_fresh_access_token
 
 
-# ── Read-only tools (Data API + API key) ──────────────────────────────────
+async def _oauth_access_token() -> str:
+    """Resolve a fresh YouTube OAuth access token for the current org.
+
+    Raises RuntimeError on misconfiguration / missing connection so callers
+    can surface a friendly error message back to the LLM.
+    """
+    org_id = current_org_id.get()
+    supabase = current_supabase.get()
+    if not org_id or supabase is None:
+        raise RuntimeError("no org context (running without auth)")
+
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise RuntimeError("GOOGLE_CLIENT_ID/SECRET not configured")
+
+    return await get_fresh_access_token(supabase, org_id, client_id, client_secret)
+
+
+# ── Read-only tools (Data API via OAuth) ──────────────────────────────────
 
 @tool
 async def get_recent_comments(
@@ -41,13 +60,18 @@ async def get_recent_comments(
     per_video = min(max(per_video, 1), 50)
 
     try:
-        search_data = await youtube_api_get("search", {
+        access_token = await _oauth_access_token()
+    except Exception as e:
+        return f"Error: YouTube OAuth not available ({e}). Connect YouTube in Settings."
+
+    try:
+        search_data = await youtube_api_get_oauth("search", {
             "part": "id,snippet",
             "channelId": channel_id,
             "order": "date",
             "type": "video",
             "maxResults": max_videos,
-        })
+        }, access_token)
 
         output = "# Recent Comments\n\n"
         for item in search_data.get("items", []):
@@ -56,12 +80,12 @@ async def get_recent_comments(
             output += f"## {title} (video_id: {video_id})\n"
 
             try:
-                comments_data = await youtube_api_get("commentThreads", {
+                comments_data = await youtube_api_get_oauth("commentThreads", {
                     "part": "snippet",
                     "videoId": video_id,
                     "order": "time",
                     "maxResults": per_video,
-                })
+                }, access_token)
                 comments = comments_data.get("items", [])
                 if not comments:
                     output += "(no comments)\n\n"
@@ -104,7 +128,12 @@ async def lookup_channel(handle_or_id: str) -> str:
         params["forHandle"] = handle_or_id.lstrip("@")
 
     try:
-        data = await youtube_api_get("channels", params)
+        access_token = await _oauth_access_token()
+    except Exception as e:
+        return f"Error: YouTube OAuth not available ({e}). Connect YouTube in Settings."
+
+    try:
+        data = await youtube_api_get_oauth("channels", params, access_token)
         items = data.get("items", [])
         if not items:
             return f"No channel found for '{handle_or_id}'."
@@ -150,20 +179,8 @@ async def reply_to_comment(parent_comment_id: str, text: str) -> str:
     Returns a short confirmation string suitable for the chat reply, or an
     error message if the call failed (token issues, missing scope, etc.).
     """
-    org_id = current_org_id.get()
-    supabase = current_supabase.get()
-    if not org_id or supabase is None:
-        return "Cannot post reply: no org context (running without auth)."
-
-    client_id = os.environ.get("GOOGLE_CLIENT_ID")
-    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
-    if not client_id or not client_secret:
-        return "Cannot post reply: GOOGLE_CLIENT_ID/SECRET not configured."
-
     try:
-        access_token = await get_fresh_access_token(
-            supabase, org_id, client_id, client_secret
-        )
+        access_token = await _oauth_access_token()
     except Exception as e:
         return f"Cannot post reply: YouTube OAuth not available ({e})."
 
