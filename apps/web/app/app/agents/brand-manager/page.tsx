@@ -37,24 +37,13 @@ type Deal = {
   last_updated_at: string;
 };
 
-type DealsState =
+// One state object instead of two — `deals` and `pending_pitches` come from
+// the same endpoint now (`GET /brand-manager/dashboard`), so they load and
+// fail together. Single round trip = single loading skeleton.
+type DashboardState =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "ok"; items: Deal[] };
-
-type Approval = {
-  id: string;
-  action_type: string;
-  action_payload: Record<string, any>;
-  preview: string | null;
-  status: string;
-  created_at: string;
-};
-
-type ApprovalsState =
-  | { status: "loading" }
-  | { status: "error"; message: string }
-  | { status: "ok"; items: Approval[] };
+  | { status: "ok"; deals: Deal[]; pendingPitches: number };
 
 async function authHeader(): Promise<Record<string, string>> {
   const supabase = createClient();
@@ -122,59 +111,46 @@ const stageBuckets: { label: string; stages: Deal["stage"][] }[] = [
 ];
 
 export default function BrandManagerAgentPage() {
-  const [deals, setDeals] = useState<DealsState>({ status: "loading" });
-  const [approvals, setApprovals] = useState<ApprovalsState>({ status: "loading" });
+  const [dashboard, setDashboard] = useState<DashboardState>({ status: "loading" });
   // Deal-detail drawer state. `selectedDealId !== null` opens the panel,
-  // and the panel's onChange refetches the list so stage edits in the
-  // drawer reflect on the dashboard cards immediately.
+  // and the panel's onChange refetches the dashboard so stage edits in the
+  // drawer reflect on the cards immediately.
   const [selectedDealId, setSelectedDealId] = useState<string | null>(null);
 
-  const fetchDeals = useCallback(async () => {
+  const fetchDashboard = useCallback(async () => {
     try {
       const auth = await authHeader();
       if (!auth.Authorization) {
-        setDeals({ status: "error", message: "Not signed in" });
+        setDashboard({ status: "error", message: "Not signed in" });
         return;
       }
-      const res = await fetch(`${API}/api/brand-manager/deals`, { headers: auth });
+      const res = await fetch(`${API}/api/brand-manager/dashboard`, { headers: auth });
       if (!res.ok) {
-        setDeals({ status: "error", message: `HTTP ${res.status}` });
+        setDashboard({ status: "error", message: `HTTP ${res.status}` });
         return;
       }
-      const items = (await res.json()) as Deal[];
-      setDeals({ status: "ok", items });
+      const body = (await res.json()) as { deals: Deal[]; pending_pitches: number };
+      setDashboard({
+        status: "ok",
+        deals: body.deals,
+        pendingPitches: body.pending_pitches,
+      });
     } catch (e) {
-      setDeals({ status: "error", message: (e as Error).message });
-    }
-  }, []);
-
-  const fetchApprovals = useCallback(async () => {
-    try {
-      const auth = await authHeader();
-      if (!auth.Authorization) {
-        setApprovals({ status: "error", message: "Not signed in" });
-        return;
-      }
-      const res = await fetch(`${API}/api/approvals`, { headers: auth });
-      if (!res.ok) {
-        setApprovals({ status: "error", message: `HTTP ${res.status}` });
-        return;
-      }
-      const all = (await res.json()) as Approval[];
-      setApprovals({ status: "ok", items: all.filter((a) => a.action_type === "send_email") });
-    } catch (e) {
-      setApprovals({ status: "error", message: (e as Error).message });
+      setDashboard({ status: "error", message: (e as Error).message });
     }
   }, []);
 
   useEffect(() => {
-    fetchDeals();
-    fetchApprovals();
-  }, [fetchDeals, fetchApprovals]);
+    queueMicrotask(() => {
+      void fetchDashboard();
+    });
+  }, [fetchDashboard]);
 
-  const dealCount = deals.status === "ok" ? deals.items.length : 0;
-  const signedCount = deals.status === "ok" ? deals.items.filter((d) => d.stage === "signed").length : 0;
-  const pendingPitches = approvals.status === "ok" ? approvals.items.length : 0;
+  const dealCount = dashboard.status === "ok" ? dashboard.deals.length : 0;
+  const signedCount = dashboard.status === "ok"
+    ? dashboard.deals.filter((d) => d.stage === "signed").length
+    : 0;
+  const pendingPitches = dashboard.status === "ok" ? dashboard.pendingPitches : 0;
 
   return (
     <div className="flex h-full min-h-0">
@@ -255,8 +231,8 @@ export default function BrandManagerAgentPage() {
         {/* Deal pipeline */}
         <Section title="Deal pipeline" subtitle="Click any deal to update its stage, leave notes, or see linked follow-up tasks.">
           <DealsList
-            state={deals}
-            onRefresh={fetchDeals}
+            state={dashboard}
+            onRefresh={fetchDashboard}
             onSelect={(id) => setSelectedDealId(id)}
           />
         </Section>
@@ -292,7 +268,7 @@ export default function BrandManagerAgentPage() {
       <DealDetailPanel
         dealId={selectedDealId}
         onClose={() => setSelectedDealId(null)}
-        onChange={fetchDeals}
+        onChange={fetchDashboard}
       />
     </div>
   );
@@ -339,7 +315,7 @@ function DealsList({
   onRefresh,
   onSelect,
 }: {
-  state: DealsState;
+  state: DashboardState;
   onRefresh: () => void;
   onSelect: (dealId: string) => void;
 }) {
@@ -369,7 +345,7 @@ function DealsList({
       </div>
     );
   }
-  if (state.items.length === 0) {
+  if (state.deals.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-border bg-muted/10 p-8 text-center">
         <div className="text-sm text-foreground font-medium">No deals yet</div>
@@ -382,7 +358,7 @@ function DealsList({
   return (
     <div className="space-y-5">
       {stageBuckets.map((bucket) => {
-        const inBucket = state.items.filter((d) => bucket.stages.includes(d.stage));
+        const inBucket = state.deals.filter((d) => bucket.stages.includes(d.stage));
         if (inBucket.length === 0) return null;
         return (
           <div key={bucket.label}>

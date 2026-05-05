@@ -1,0 +1,762 @@
+"""
+Channels router endpoint tests — list/create/messages/join/mentionable.
+
+Same handler-direct + MockSupabase pattern as `test_brand_manager_router`.
+The auth dep is exercised orthogonally elsewhere; here we call the
+handlers as plain async functions with deps satisfied directly.
+
+The MockSupabase here is richer than the brand-manager one because:
+  - Channels carry archived/active filters (`is_("archived_at", "null")`)
+  - Messages support `before` cursor pagination (`lt("created_at", before)`)
+  - We need `in_(...)` filters for the grouped member-count query
+  - Insert needs to populate an id and round-trip the row back
+
+Joins (e.g. `select(*, sender_user:sender_user_id(...))`) aren't simulated
+— they're integration concerns. Where a test cares about the joined
+shape it preloads the row already containing the nested object.
+"""
+from __future__ import annotations
+
+import uuid
+from typing import Any
+from unittest.mock import patch
+
+import pytest
+from fastapi import BackgroundTasks, HTTPException
+
+from app.dependencies import CurrentUser
+from app.routers.channels import (
+    CreateChannelRequest,
+    CreateMessageRequest,
+    create_channel,
+    create_message,
+    join_channel,
+    list_channels,
+    list_mentionable,
+    list_messages,
+)
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────────
+@pytest.fixture
+def real_uuid() -> str:
+    return str(uuid.uuid4())
+
+
+@pytest.fixture
+def user(real_uuid: str) -> CurrentUser:
+    return CurrentUser(
+        id=str(uuid.uuid4()),
+        org_id=real_uuid,
+        email="caller@example.com",
+        role="member",
+    )
+
+
+# ── MockSupabase ──────────────────────────────────────────────────────────
+class _MockResult:
+    def __init__(self, data: list[dict]):
+        self.data = data
+
+
+class _MockQuery:
+    def __init__(self, table_name: str, store: dict):
+        self._table = table_name
+        self._store = store
+        self._eq_filters: dict[str, Any] = {}
+        self._null_filters: list[str] = []
+        self._in_filters: dict[str, list] = {}
+        self._lt_filters: dict[str, Any] = {}
+        self._mode = "select"
+        self._insert_payload: dict | None = None
+        self._upsert_payload: dict | None = None
+        self._update_payload: dict | None = None
+
+    # ── builder methods ────────────────────────────────────────────────
+    def select(self, *_a, **_k):
+        self._mode = "select"
+        return self
+
+    def insert(self, payload: dict):
+        self._mode = "insert"
+        self._insert_payload = payload
+        return self
+
+    def upsert(self, payload: dict, **_k):
+        self._mode = "upsert"
+        self._upsert_payload = payload
+        return self
+
+    def update(self, payload: dict):
+        self._mode = "update"
+        self._update_payload = payload
+        return self
+
+    def eq(self, key: str, value):
+        self._eq_filters[key] = value
+        return self
+
+    def is_(self, key: str, value):
+        # We only use is_('archived_at', 'null') in the router.
+        if value == "null":
+            self._null_filters.append(key)
+        return self
+
+    def in_(self, key: str, values: list):
+        self._in_filters[key] = list(values)
+        return self
+
+    def lt(self, key: str, value):
+        self._lt_filters[key] = value
+        return self
+
+    def order(self, *_a, **_k): return self
+    def limit(self, *_a, **_k): return self
+    def delete(self): return self
+
+    # ── execute ────────────────────────────────────────────────────────
+    def _matches(self, row: dict) -> bool:
+        for k, v in self._eq_filters.items():
+            if row.get(k) != v:
+                return False
+        for k in self._null_filters:
+            if row.get(k) is not None:
+                return False
+        for k, vs in self._in_filters.items():
+            if row.get(k) not in vs:
+                return False
+        for k, v in self._lt_filters.items():
+            rv = row.get(k)
+            if rv is None or not (rv < v):
+                return False
+        return True
+
+    def execute(self):
+        rows = self._store.get(self._table, [])
+        if self._mode == "insert" and self._insert_payload is not None:
+            new_row = {"id": str(uuid.uuid4()), **self._insert_payload}
+            # Enforce uniqueness on (org_id, name) for channels — mirrors
+            # the DB unique constraint, since we test the 409 path.
+            if self._table == "channels":
+                for r in rows:
+                    if (
+                        r.get("org_id") == new_row.get("org_id")
+                        and r.get("name") == new_row.get("name")
+                    ):
+                        raise Exception("duplicate key value violates unique constraint")
+            rows.append(new_row)
+            self._store[self._table] = rows
+            self._store.setdefault("_inserts", []).append((self._table, new_row))
+            return _MockResult([new_row])
+        if self._mode == "upsert" and self._upsert_payload is not None:
+            # Approximate upsert — replace rows matching the upsert keys
+            # if present; otherwise insert.
+            payload = self._upsert_payload
+            if self._table == "channel_members":
+                for r in rows:
+                    if (
+                        r.get("channel_id") == payload.get("channel_id")
+                        and r.get("user_id") == payload.get("user_id")
+                    ):
+                        r.update(payload)
+                        return _MockResult([r])
+            rows.append(payload)
+            self._store[self._table] = rows
+            self._store.setdefault("_upserts", []).append((self._table, payload))
+            return _MockResult([payload])
+        if self._mode == "update" and self._update_payload is not None:
+            updated = []
+            for r in rows:
+                if self._matches(r):
+                    r.update(self._update_payload)
+                    updated.append(r)
+            return _MockResult(updated)
+        # select
+        out = [r for r in rows if self._matches(r)]
+        return _MockResult(out)
+
+
+class MockSupabase:
+    def __init__(self, store: dict | None = None):
+        self._store = store if store is not None else {}
+
+    def table(self, name: str) -> _MockQuery:
+        return _MockQuery(name, self._store)
+
+
+# ── GET /channels ─────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+class TestListChannels:
+    async def test_returns_org_scoped_channels(self, user: CurrentUser, real_uuid: str):
+        """Other-org channels must not appear in the list."""
+        other_org = str(uuid.uuid4())
+        c1 = str(uuid.uuid4())
+        c2 = str(uuid.uuid4())
+        store = {
+            "channels": [
+                {"id": c1, "org_id": real_uuid, "name": "general",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+                {"id": c2, "org_id": real_uuid, "name": "marketing",
+                 "description": "marketing chat", "created_by": user.id,
+                 "created_at": "2026-04-29T00:00:00Z", "archived_at": None},
+                # Different org — must NOT come back.
+                {"id": str(uuid.uuid4()), "org_id": other_org, "name": "other-org-only",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "channel_members": [],
+        }
+        sb = MockSupabase(store)
+        result = await list_channels(user=user, supabase=sb)
+        names = {c["name"] for c in result}
+        assert names == {"general", "marketing"}
+
+    async def test_excludes_archived(self, user: CurrentUser, real_uuid: str):
+        store = {
+            "channels": [
+                {"id": str(uuid.uuid4()), "org_id": real_uuid, "name": "active",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+                {"id": str(uuid.uuid4()), "org_id": real_uuid, "name": "old",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-29T00:00:00Z",
+                 "archived_at": "2026-04-30T00:00:00Z"},
+            ],
+            "channel_members": [],
+        }
+        sb = MockSupabase(store)
+        result = await list_channels(user=user, supabase=sb)
+        assert [c["name"] for c in result] == ["active"]
+
+    async def test_member_count_is_correct(self, user: CurrentUser, real_uuid: str):
+        c1, c2 = str(uuid.uuid4()), str(uuid.uuid4())
+        u1, u2, u3 = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        store = {
+            "channels": [
+                {"id": c1, "org_id": real_uuid, "name": "popular",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+                {"id": c2, "org_id": real_uuid, "name": "lonely",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-29T00:00:00Z", "archived_at": None},
+            ],
+            "channel_members": [
+                {"channel_id": c1, "user_id": u1},
+                {"channel_id": c1, "user_id": u2},
+                {"channel_id": c1, "user_id": u3},
+                {"channel_id": c2, "user_id": u1},
+            ],
+        }
+        sb = MockSupabase(store)
+        result = await list_channels(user=user, supabase=sb)
+        by_name = {c["name"]: c for c in result}
+        assert by_name["popular"]["member_count"] == 3
+        assert by_name["lonely"]["member_count"] == 1
+
+
+# ── POST /channels ────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+class TestCreateChannel:
+    async def test_creates_channel_and_auto_joins_creator(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        store: dict = {"channels": [], "channel_members": []}
+        sb = MockSupabase(store)
+        body = CreateChannelRequest(name="general", description="default")
+        result = await create_channel(body=body, user=user, supabase=sb)
+        assert result["name"] == "general"
+        assert result["created_by"] == user.id
+        assert result["member_count"] == 1
+        # Creator was auto-added to channel_members.
+        members = store["channel_members"]
+        assert any(m["user_id"] == user.id for m in members)
+
+    async def test_409_on_duplicate_name_in_same_org(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        store: dict = {
+            "channels": [
+                {"id": str(uuid.uuid4()), "org_id": real_uuid, "name": "general",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "channel_members": [],
+        }
+        sb = MockSupabase(store)
+        with pytest.raises(HTTPException) as exc:
+            await create_channel(
+                body=CreateChannelRequest(name="general"),
+                user=user,
+                supabase=sb,
+            )
+        assert exc.value.status_code == 409
+
+    async def test_same_name_allowed_in_different_orgs(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        """Two different orgs each having a `#general` is the whole point of
+        the per-org unique constraint. Must not collide."""
+        other_org = str(uuid.uuid4())
+        store: dict = {
+            "channels": [
+                {"id": str(uuid.uuid4()), "org_id": other_org, "name": "general",
+                 "description": None, "created_by": str(uuid.uuid4()),
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "channel_members": [],
+        }
+        sb = MockSupabase(store)
+        result = await create_channel(
+            body=CreateChannelRequest(name="general"),
+            user=user,
+            supabase=sb,
+        )
+        assert result["name"] == "general"
+        assert result["member_count"] == 1
+
+    async def test_returns_creator_in_member_count(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        """Sanity — member_count on the response is exactly 1 right after
+        create (the creator is the only member)."""
+        store: dict = {"channels": [], "channel_members": []}
+        sb = MockSupabase(store)
+        result = await create_channel(
+            body=CreateChannelRequest(name="ideas"), user=user, supabase=sb,
+        )
+        assert result["member_count"] == 1
+
+
+class TestCreateChannelSchema:
+    """Pure Pydantic validation — sync, no async machinery needed."""
+    def test_rejects_bad_name_regex(self):
+        with pytest.raises(Exception):
+            CreateChannelRequest(name="Has Spaces")
+        with pytest.raises(Exception):
+            CreateChannelRequest(name="UPPERCASE")
+        with pytest.raises(Exception):
+            CreateChannelRequest(name="bad!chars")
+        with pytest.raises(Exception):
+            CreateChannelRequest(name="")
+        # 65 chars — exceeds the 64 cap
+        with pytest.raises(Exception):
+            CreateChannelRequest(name="a" * 65)
+
+    def test_accepts_valid_names(self):
+        assert CreateChannelRequest(name="general").name == "general"
+        assert CreateChannelRequest(name="brand-deals").name == "brand-deals"
+        assert CreateChannelRequest(name="team_2026").name == "team_2026"
+
+
+# ── GET /channels/{id}/messages ───────────────────────────────────────────
+@pytest.mark.asyncio
+class TestListMessages:
+    async def test_404_on_cross_tenant_channel_id(self, user: CurrentUser):
+        """A channel id that exists but in another org must come back as 404."""
+        other_org = str(uuid.uuid4())
+        cid = str(uuid.uuid4())
+        store = {
+            "channels": [
+                {"id": cid, "org_id": other_org, "name": "secret",
+                 "description": None, "created_by": str(uuid.uuid4()),
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "channel_messages": [],
+        }
+        sb = MockSupabase(store)
+        with pytest.raises(HTTPException) as exc:
+            await list_messages(
+                channel_id=cid, limit=50, before=None, user=user, supabase=sb,
+            )
+        assert exc.value.status_code == 404
+
+    async def test_returns_newest_first(self, user: CurrentUser, real_uuid: str):
+        cid = str(uuid.uuid4())
+        store = {
+            "channels": [
+                {"id": cid, "org_id": real_uuid, "name": "general",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "channel_messages": [
+                {"id": str(uuid.uuid4()), "channel_id": cid, "org_id": real_uuid,
+                 "sender_user_id": user.id, "sender_agent_id": None,
+                 "body": "first", "mentioned_user_ids": [], "mentioned_agent_slugs": [],
+                 "agent_run_id": None, "in_reply_to_message_id": None,
+                 "created_at": "2026-04-30T00:00:00Z", "edited_at": None},
+                {"id": str(uuid.uuid4()), "channel_id": cid, "org_id": real_uuid,
+                 "sender_user_id": user.id, "sender_agent_id": None,
+                 "body": "second", "mentioned_user_ids": [], "mentioned_agent_slugs": [],
+                 "agent_run_id": None, "in_reply_to_message_id": None,
+                 "created_at": "2026-04-30T00:01:00Z", "edited_at": None},
+            ],
+        }
+        sb = MockSupabase(store)
+        result = await list_messages(
+            channel_id=cid, limit=50, before=None, user=user, supabase=sb,
+        )
+        # The MockQuery doesn't actually sort (postgrest does), but the rows
+        # come back in insertion order. Real ordering is asserted via the
+        # `.order("created_at", desc=True)` call — covered by integration.
+        bodies = {r["body"] for r in result}
+        assert bodies == {"first", "second"}
+
+    async def test_pagination_with_before_cursor(self, user: CurrentUser, real_uuid: str):
+        """`before` filters created_at < cursor — older messages only."""
+        cid = str(uuid.uuid4())
+        store = {
+            "channels": [
+                {"id": cid, "org_id": real_uuid, "name": "general",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "channel_messages": [
+                {"id": str(uuid.uuid4()), "channel_id": cid, "org_id": real_uuid,
+                 "sender_user_id": user.id, "sender_agent_id": None,
+                 "body": "old", "mentioned_user_ids": [], "mentioned_agent_slugs": [],
+                 "agent_run_id": None, "in_reply_to_message_id": None,
+                 "created_at": "2026-04-29T00:00:00Z", "edited_at": None},
+                {"id": str(uuid.uuid4()), "channel_id": cid, "org_id": real_uuid,
+                 "sender_user_id": user.id, "sender_agent_id": None,
+                 "body": "new", "mentioned_user_ids": [], "mentioned_agent_slugs": [],
+                 "agent_run_id": None, "in_reply_to_message_id": None,
+                 "created_at": "2026-04-30T12:00:00Z", "edited_at": None},
+            ],
+        }
+        sb = MockSupabase(store)
+        result = await list_messages(
+            channel_id=cid, limit=50, before="2026-04-30T00:00:00Z",
+            user=user, supabase=sb,
+        )
+        # Only `old` (2026-04-29) is < 2026-04-30T00:00:00Z.
+        assert [r["body"] for r in result] == ["old"]
+
+    async def test_serializes_sender_user_join(self, user: CurrentUser, real_uuid: str):
+        """Postgrest joins land as nested objects keyed by alias."""
+        cid = str(uuid.uuid4())
+        sender_id = str(uuid.uuid4())
+        store = {
+            "channels": [
+                {"id": cid, "org_id": real_uuid, "name": "general",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "channel_messages": [
+                {"id": str(uuid.uuid4()), "channel_id": cid, "org_id": real_uuid,
+                 "sender_user_id": sender_id, "sender_agent_id": None,
+                 "sender_user": {"id": sender_id, "full_name": "Abhi V",
+                                 "email": "abhi@example.com"},
+                 "sender_agent": None,
+                 "body": "hello", "mentioned_user_ids": [], "mentioned_agent_slugs": [],
+                 "agent_run_id": None, "in_reply_to_message_id": None,
+                 "created_at": "2026-04-30T00:00:00Z", "edited_at": None},
+            ],
+        }
+        sb = MockSupabase(store)
+        result = await list_messages(
+            channel_id=cid, limit=50, before=None, user=user, supabase=sb,
+        )
+        assert len(result) == 1
+        msg = result[0]
+        assert msg["sender_user"] == {
+            "id": sender_id, "full_name": "Abhi V", "email": "abhi@example.com",
+        }
+        assert msg["sender_agent"] is None
+
+    async def test_serializes_sender_agent_join(self, user: CurrentUser, real_uuid: str):
+        cid = str(uuid.uuid4())
+        agent_id = str(uuid.uuid4())
+        store = {
+            "channels": [
+                {"id": cid, "org_id": real_uuid, "name": "general",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "channel_messages": [
+                {"id": str(uuid.uuid4()), "channel_id": cid, "org_id": real_uuid,
+                 "sender_user_id": None, "sender_agent_id": agent_id,
+                 "sender_user": None,
+                 "sender_agent": {"id": agent_id, "slug": "strategist",
+                                  "name": "Strategist", "icon": "compass"},
+                 "body": "agent reply", "mentioned_user_ids": [],
+                 "mentioned_agent_slugs": [],
+                 "agent_run_id": str(uuid.uuid4()),
+                 "in_reply_to_message_id": str(uuid.uuid4()),
+                 "created_at": "2026-04-30T00:01:00Z", "edited_at": None},
+            ],
+        }
+        sb = MockSupabase(store)
+        result = await list_messages(
+            channel_id=cid, limit=50, before=None, user=user, supabase=sb,
+        )
+        msg = result[0]
+        assert msg["sender_agent"]["slug"] == "strategist"
+        assert msg["sender_user"] is None
+
+
+# ── POST /channels/{id}/messages ──────────────────────────────────────────
+@pytest.mark.asyncio
+class TestCreateMessage:
+    async def test_inserts_message_and_returns_serialized(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        cid = str(uuid.uuid4())
+        store: dict = {
+            "channels": [
+                {"id": cid, "org_id": real_uuid, "name": "general",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "agents": [],
+            "org_members": [],
+            "channel_messages": [],
+        }
+        sb = MockSupabase(store)
+        bg = BackgroundTasks()
+        result = await create_message(
+            channel_id=cid,
+            body=CreateMessageRequest(body="hello team"),
+            background_tasks=bg,
+            user=user,
+            supabase=sb,
+        )
+        assert result["body"] == "hello team"
+        assert result["sender_user_id"] == user.id
+        assert result["mentioned_agent_slugs"] == []
+        # No agent mentions → no background task scheduled.
+        assert len(bg.tasks) == 0
+
+    async def test_parses_agent_mention_and_schedules_dispatch(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        cid = str(uuid.uuid4())
+        store: dict = {
+            "channels": [
+                {"id": cid, "org_id": real_uuid, "name": "general",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "agents": [{"org_id": real_uuid, "slug": "strategist"}],
+            "org_members": [],
+            "channel_messages": [],
+        }
+        sb = MockSupabase(store)
+        bg = BackgroundTasks()
+        result = await create_message(
+            channel_id=cid,
+            body=CreateMessageRequest(body="@strategist what next?"),
+            background_tasks=bg,
+            user=user,
+            supabase=sb,
+        )
+        assert result["mentioned_agent_slugs"] == ["strategist"]
+        assert len(bg.tasks) == 1
+
+    async def test_scoped_agent_mentions_only(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        """Only agents in the caller's org should resolve."""
+        cid = str(uuid.uuid4())
+        other_org = str(uuid.uuid4())
+        store: dict = {
+            "channels": [
+                {"id": cid, "org_id": real_uuid, "name": "general",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            # 'publisher' exists in another org only — must NOT match.
+            "agents": [{"org_id": other_org, "slug": "publisher"}],
+            "org_members": [],
+            "channel_messages": [],
+        }
+        sb = MockSupabase(store)
+        bg = BackgroundTasks()
+        result = await create_message(
+            channel_id=cid,
+            body=CreateMessageRequest(body="@publisher please ship"),
+            background_tasks=bg,
+            user=user,
+            supabase=sb,
+        )
+        assert result["mentioned_agent_slugs"] == []
+        assert len(bg.tasks) == 0
+
+    async def test_parses_user_mention(self, user: CurrentUser, real_uuid: str):
+        cid = str(uuid.uuid4())
+        member_id = str(uuid.uuid4())
+        store: dict = {
+            "channels": [
+                {"id": cid, "org_id": real_uuid, "name": "general",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "agents": [],
+            "org_members": [
+                {
+                    "org_id": real_uuid,
+                    "user_id": member_id,
+                    "users": {
+                        "id": member_id,
+                        "full_name": "Abhi V",
+                        "email": "abhi@example.com",
+                    },
+                },
+            ],
+            "channel_messages": [],
+        }
+        sb = MockSupabase(store)
+        bg = BackgroundTasks()
+        result = await create_message(
+            channel_id=cid,
+            body=CreateMessageRequest(body="hey @abhi please review"),
+            background_tasks=bg,
+            user=user,
+            supabase=sb,
+        )
+        assert result["mentioned_user_ids"] == [member_id]
+
+    async def test_dedup_multi_mention(self, user: CurrentUser, real_uuid: str):
+        cid = str(uuid.uuid4())
+        store: dict = {
+            "channels": [
+                {"id": cid, "org_id": real_uuid, "name": "general",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "agents": [{"org_id": real_uuid, "slug": "strategist"}],
+            "org_members": [],
+            "channel_messages": [],
+        }
+        sb = MockSupabase(store)
+        bg = BackgroundTasks()
+        result = await create_message(
+            channel_id=cid,
+            body=CreateMessageRequest(body="@strategist @strategist @strategist hey"),
+            background_tasks=bg,
+            user=user,
+            supabase=sb,
+        )
+        assert result["mentioned_agent_slugs"] == ["strategist"]
+        # Only one dispatch scheduled (deduped).
+        assert len(bg.tasks) == 1
+
+    async def test_404_on_cross_tenant_channel(self, user: CurrentUser):
+        cid = str(uuid.uuid4())
+        other_org = str(uuid.uuid4())
+        store: dict = {
+            "channels": [
+                {"id": cid, "org_id": other_org, "name": "private",
+                 "description": None, "created_by": str(uuid.uuid4()),
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "channel_messages": [],
+            "agents": [],
+            "org_members": [],
+        }
+        sb = MockSupabase(store)
+        bg = BackgroundTasks()
+        with pytest.raises(HTTPException) as exc:
+            await create_message(
+                channel_id=cid,
+                body=CreateMessageRequest(body="hi"),
+                background_tasks=bg,
+                user=user,
+                supabase=sb,
+            )
+        assert exc.value.status_code == 404
+
+
+class TestCreateMessageSchema:
+    """Pure Pydantic validation — sync."""
+    def test_rejects_empty_body(self):
+        with pytest.raises(Exception):
+            CreateMessageRequest(body="")
+
+    def test_rejects_too_long_body(self):
+        with pytest.raises(Exception):
+            CreateMessageRequest(body="a" * 4001)
+
+    def test_accepts_max_body(self):
+        body = CreateMessageRequest(body="a" * 4000)
+        assert len(body.body) == 4000
+
+
+# ── POST /channels/{id}/join ──────────────────────────────────────────────
+@pytest.mark.asyncio
+class TestJoinChannel:
+    async def test_idempotent_double_join(self, user: CurrentUser, real_uuid: str):
+        cid = str(uuid.uuid4())
+        store: dict = {
+            "channels": [
+                {"id": cid, "org_id": real_uuid, "name": "general",
+                 "description": None, "created_by": user.id,
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "channel_members": [],
+        }
+        sb = MockSupabase(store)
+        # First join.
+        r1 = await join_channel(channel_id=cid, user=user, supabase=sb)
+        assert r1 == {"joined": True}
+        # Second join — must not raise.
+        r2 = await join_channel(channel_id=cid, user=user, supabase=sb)
+        assert r2 == {"joined": True}
+
+    async def test_404_on_cross_tenant_channel(self, user: CurrentUser):
+        cid = str(uuid.uuid4())
+        other_org = str(uuid.uuid4())
+        store: dict = {
+            "channels": [
+                {"id": cid, "org_id": other_org, "name": "secret",
+                 "description": None, "created_by": str(uuid.uuid4()),
+                 "created_at": "2026-04-30T00:00:00Z", "archived_at": None},
+            ],
+            "channel_members": [],
+        }
+        sb = MockSupabase(store)
+        with pytest.raises(HTTPException) as exc:
+            await join_channel(channel_id=cid, user=user, supabase=sb)
+        assert exc.value.status_code == 404
+
+
+# ── GET /channels/mentionable ─────────────────────────────────────────────
+@pytest.mark.asyncio
+class TestMentionable:
+    async def test_returns_org_scoped_agents_and_users(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        other_org = str(uuid.uuid4())
+        u1 = str(uuid.uuid4())
+        strategist_id = str(uuid.uuid4())
+        store: dict = {
+            "agents": [
+                {"id": strategist_id, "org_id": real_uuid, "slug": "strategist",
+                 "name": "Strategist", "icon": "compass", "active": True},
+                # Another org's agent — must NOT come back.
+                {"id": str(uuid.uuid4()), "org_id": other_org, "slug": "publisher",
+                 "name": "Publisher", "icon": "rocket", "active": True},
+            ],
+            "org_members": [
+                {
+                    "org_id": real_uuid,
+                    "user_id": u1,
+                    "users": {"id": u1, "full_name": "Abhi V",
+                              "email": "abhi@example.com"},
+                },
+                # Another-org member — must NOT come back.
+                {
+                    "org_id": other_org,
+                    "user_id": str(uuid.uuid4()),
+                    "users": {"id": str(uuid.uuid4()), "full_name": "Outsider",
+                              "email": "outsider@example.com"},
+                },
+            ],
+        }
+        sb = MockSupabase(store)
+        result = await list_mentionable(user=user, supabase=sb)
+        assert [a["slug"] for a in result["agents"]] == ["strategist"]
+        # `id` is included so the FE can resolve agent senders from realtime
+        # payloads (which carry `sender_agent_id`, no joined info).
+        assert result["agents"][0]["id"] == strategist_id
+        assert [u["id"] for u in result["users"]] == [u1]

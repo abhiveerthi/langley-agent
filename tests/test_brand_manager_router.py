@@ -1,5 +1,6 @@
 """
-Brand Manager router endpoints — `GET /deals/{id}` and `PATCH /deals/{id}`.
+Brand Manager router endpoints — `GET /dashboard`, `GET /deals/{id}`,
+`PATCH /deals/{id}`.
 
 The handlers are async functions wrapped by `Depends(get_current_user, get_supabase)`,
 but they're plain callables when invoked directly with the deps satisfied.
@@ -19,6 +20,7 @@ from fastapi import HTTPException
 from app.dependencies import CurrentUser
 from app.routers.brand_manager import (
     UpdateDealRequest,
+    get_dashboard,
     get_deal,
     list_deals,
     update_deal,
@@ -228,6 +230,66 @@ class TestUpdateDeal:
                 supabase=sb,
             )
         assert exc.value.status_code == 404
+
+
+# ── Dashboard endpoint (deals + pending_pitches in one round trip) ────────
+@pytest.mark.asyncio
+class TestGetDashboard:
+    async def test_returns_deals_and_pitch_count(self, user: CurrentUser, real_uuid: str):
+        store = {
+            "brand_deals": [
+                {"id": str(uuid.uuid4()), "org_id": real_uuid, "brand_name": "Magpul",
+                 "stage": "pitched", "last_updated_at": "2026-04-30T00:00:00Z"},
+                {"id": str(uuid.uuid4()), "org_id": real_uuid, "brand_name": "Holosun",
+                 "stage": "signed", "last_updated_at": "2026-04-29T00:00:00Z"},
+            ],
+            "approvals": [
+                # Two send_email pitches pending — counted.
+                {"id": str(uuid.uuid4()), "org_id": real_uuid,
+                 "status": "pending", "action_type": "send_email"},
+                {"id": str(uuid.uuid4()), "org_id": real_uuid,
+                 "status": "pending", "action_type": "send_email"},
+                # Approved one — not counted (status != pending).
+                {"id": str(uuid.uuid4()), "org_id": real_uuid,
+                 "status": "approved", "action_type": "send_email"},
+                # Different action_type — not counted (CM/Publisher etc).
+                {"id": str(uuid.uuid4()), "org_id": real_uuid,
+                 "status": "pending", "action_type": "reply_comment"},
+            ],
+        }
+        sb = MockSupabase(store)
+        result = await get_dashboard(deal_limit=50, user=user, supabase=sb)
+        assert len(result["deals"]) == 2
+        assert {d["brand_name"] for d in result["deals"]} == {"Magpul", "Holosun"}
+        assert result["pending_pitches"] == 2
+
+    async def test_empty_state_returns_zero_count(self, user: CurrentUser):
+        sb = MockSupabase({"brand_deals": [], "approvals": []})
+        result = await get_dashboard(deal_limit=50, user=user, supabase=sb)
+        assert result["deals"] == []
+        assert result["pending_pitches"] == 0
+
+    async def test_org_scoped_deals_and_pitches(self, user: CurrentUser, real_uuid: str):
+        """Both halves of the response must filter on org_id — a leaked
+        token from another tenant would otherwise see their pipeline AND
+        their pending-pitches count."""
+        other_org = str(uuid.uuid4())
+        store = {
+            "brand_deals": [
+                {"id": str(uuid.uuid4()), "org_id": real_uuid, "brand_name": "Mine"},
+                {"id": str(uuid.uuid4()), "org_id": other_org, "brand_name": "Theirs"},
+            ],
+            "approvals": [
+                {"id": str(uuid.uuid4()), "org_id": real_uuid,
+                 "status": "pending", "action_type": "send_email"},
+                {"id": str(uuid.uuid4()), "org_id": other_org,
+                 "status": "pending", "action_type": "send_email"},
+            ],
+        }
+        sb = MockSupabase(store)
+        result = await get_dashboard(deal_limit=50, user=user, supabase=sb)
+        assert [d["brand_name"] for d in result["deals"]] == ["Mine"]
+        assert result["pending_pitches"] == 1
 
 
 # ── Pydantic schema validation ────────────────────────────────────────────

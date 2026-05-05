@@ -1,6 +1,7 @@
 from fastapi import Depends, HTTPException, Request
 from supabase import create_client, Client
 from app.config import get_settings, Settings
+from app.auth_cache import TtlCache
 from dataclasses import dataclass
 
 
@@ -38,6 +39,16 @@ class AuthenticatedUser:
 #      cohort etc.), the cache shape already supports it.
 _supabase_clients: dict[tuple[str, str], Client] = {}
 
+# Auth-token cache singletons (from the auth-cache PR). One per kind of
+# resolver because a `CurrentUser` and an `AuthenticatedUser` aren't
+# interchangeable — `get_authenticated_user` must NOT silently return the
+# org-bound shape even if a same-token entry exists in the org-bound cache.
+#
+# Tests reset these via clear() between cases; production code never
+# touches them directly.
+_current_user_cache: TtlCache[CurrentUser] = TtlCache()
+_authenticated_user_cache: TtlCache[AuthenticatedUser] = TtlCache()
+
 
 def get_supabase(settings: Settings = Depends(get_settings)) -> Client:
     """Return a cached service-role Supabase client.
@@ -73,6 +84,11 @@ async def get_authenticated_user(
         raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
 
     token = auth_header.split(" ")[1]
+
+    cached = _authenticated_user_cache.get(token)
+    if cached is not None:
+        return cached
+
     try:
         user_response = supabase.auth.get_user(token)
         user = user_response.user
@@ -83,7 +99,9 @@ async def get_authenticated_user(
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    return AuthenticatedUser(id=user.id, email=user.email or "")
+    resolved = AuthenticatedUser(id=user.id, email=user.email or "")
+    _authenticated_user_cache.set(token, resolved)
+    return resolved
 
 
 async def get_current_user(request: Request, supabase: Client = Depends(get_supabase)) -> CurrentUser:
@@ -92,6 +110,13 @@ async def get_current_user(request: Request, supabase: Client = Depends(get_supa
         raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
 
     token = auth_header.split(" ")[1]
+
+    # Cache hit short-circuits both the JWT verify and the org_members
+    # SELECT. This is the hot path during normal page loads — every
+    # other call from a user within ~60s lands here.
+    cached = _current_user_cache.get(token)
+    if cached is not None:
+        return cached
 
     try:
         user_response = supabase.auth.get_user(token)
@@ -111,18 +136,24 @@ async def get_current_user(request: Request, supabase: Client = Depends(get_supa
 
     if membership.data:
         member = membership.data[0]
-        return CurrentUser(
+        resolved = CurrentUser(
             id=user.id,
             org_id=member["org_id"],
             email=user.email,
             role=member["role"],
         )
+        _current_user_cache.set(token, resolved)
+        return resolved
 
     # No membership yet. Before auto-provisioning a personal workspace,
     # check whether the user's email has a pending invite waiting. If so,
     # block the auto-provision — the invitee must accept the invite to
     # land in the inviting org, not be quietly handed a separate personal
     # workspace they'd then be locked out of (single-org-per-user in v1).
+    #
+    # Note: the 409 below is deliberately NOT cached. The user might be
+    # about to click their invite link, after which the next request
+    # should resolve fresh — not be told 409 again until the TTL expires.
     email_norm = (user.email or "").strip().lower()
     if email_norm:
         pending = (
@@ -142,12 +173,14 @@ async def get_current_user(request: Request, supabase: Client = Depends(get_supa
 
     # First sign-in with no pending invite: provision a personal workspace.
     member = _provision_personal_workspace(supabase, user)
-    return CurrentUser(
+    resolved = CurrentUser(
         id=user.id,
         org_id=member["org_id"],
         email=user.email,
         role=member["role"],
     )
+    _current_user_cache.set(token, resolved)
+    return resolved
 
 
 def _provision_personal_workspace(supabase: Client, user) -> dict:

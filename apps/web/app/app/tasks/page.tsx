@@ -8,8 +8,11 @@ import { KanbanBoard, type KanbanColumnDef } from "@/components/workspace/Kanban
 import { TaskCard, type TaskRecord } from "@/components/workspace/TaskCard";
 import { NewTaskModal } from "@/components/workspace/NewTaskModal";
 import { cn } from "@/lib/utils";
+import { useStaleWhileRevalidate } from "@/lib/swr";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const DEFAULT_STATUSES = ["todo", "in_progress", "blocked", "done"];
+const STATUSES_CACHE_KEY = "workspace.statuses";
 
 const STATUS_LABELS: Record<string, string> = {
   todo: "To Do",
@@ -43,21 +46,28 @@ export default function TasksPage() {
   const params = useSearchParams();
   const dealFilter = params.get("deal_id"); // optional ?deal_id=... from BM dashboard
 
-  const [statuses, setStatuses] = useState<string[]>([]);
+  // Statuses change rarely (settings UI edit); SWR-cache them in localStorage
+  // so the Kanban columns paint instantly on subsequent visits — even before
+  // /api/tasks responds. The cached value is revalidated in the background.
+  const fetchStatuses = useCallback(async (): Promise<string[]> => {
+    const headers = { ...(await authHeader()) };
+    const res = await fetch(`${API}/api/workspace/statuses`, { headers });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json()) as { statuses: string[] };
+    if (!Array.isArray(data.statuses) || data.statuses.length === 0) {
+      return DEFAULT_STATUSES;
+    }
+    return data.statuses;
+  }, []);
+  const { data: statuses } = useStaleWhileRevalidate<string[]>(
+    STATUSES_CACHE_KEY,
+    fetchStatuses,
+  );
+
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [load, setLoad] = useState<LoadState>({ state: "loading" });
   const [modalOpen, setModalOpen] = useState(false);
   const [modalDefaultStatus, setModalDefaultStatus] = useState("todo");
-
-  const fetchStatuses = useCallback(async () => {
-    const headers = { ...(await authHeader()) };
-    const res = await fetch(`${API}/api/workspace/statuses`, { headers });
-    if (!res.ok) return;
-    const data = (await res.json()) as { statuses: string[] };
-    if (Array.isArray(data.statuses) && data.statuses.length > 0) {
-      setStatuses(data.statuses);
-    }
-  }, []);
 
   const fetchTasks = useCallback(async () => {
     const params = new URLSearchParams();
@@ -77,16 +87,16 @@ export default function TasksPage() {
   useEffect(() => {
     // Defer to a microtask so we don't trip the React 19
     // `react-hooks/set-state-in-effect` lint — same pattern as the
-    // approvals page.
+    // approvals page. Statuses are handled by useStaleWhileRevalidate
+    // above, so only tasks need to fire here.
     queueMicrotask(() => {
-      void fetchStatuses();
       void fetchTasks();
     });
-  }, [fetchStatuses, fetchTasks]);
+  }, [fetchTasks]);
 
   // Build the column defs from the org's status list. Falls back to the
-  // standard set when statuses haven't loaded yet (first paint).
-  const columns: KanbanColumnDef[] = (statuses.length ? statuses : ["todo", "in_progress", "blocked", "done"]).map(
+  // standard set when statuses haven't loaded yet (first ever visit).
+  const columns: KanbanColumnDef[] = ((statuses && statuses.length) ? statuses : DEFAULT_STATUSES).map(
     (key) => ({
       key,
       label: STATUS_LABELS[key] ?? prettify(key),

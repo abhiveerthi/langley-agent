@@ -17,6 +17,7 @@ import {
   CheckSquare,
   Send,
   FolderOpen,
+  Hash,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -70,6 +71,25 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
     <p className="px-3 pb-1 pt-4 text-xs font-semibold uppercase tracking-widest text-muted-foreground/60">
       {children}
     </p>
+  );
+}
+
+function ChannelsItem() {
+  const pathname = usePathname();
+  const isActive = pathname.startsWith("/app/channels");
+  return (
+    <Link
+      href="/app/channels"
+      className={cn(
+        "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
+        isActive
+          ? "bg-primary/15 text-primary font-medium"
+          : "text-muted-foreground hover:bg-accent hover:text-foreground"
+      )}
+    >
+      <Hash className="h-4 w-4 shrink-0" />
+      Channels
+    </Link>
   );
 }
 
@@ -180,6 +200,7 @@ export function Sidebar() {
         ))}
 
         <SectionLabel>Work</SectionLabel>
+        <ChannelsItem />
         <TasksItem />
         <ApprovalsItem />
         <StorageItem />
