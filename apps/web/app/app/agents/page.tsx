@@ -135,6 +135,14 @@ type ApprovalsState =
   | { status: "error"; message: string }
   | { status: "ok"; items: Approval[] };
 
+// Single combined response from `GET /api/dashboard/overview`. The split
+// into RunsState / ApprovalsState is preserved below so the existing
+// `RecentRuns` / `PendingApprovals` subcomponents don't need rewrites.
+type OverviewResponse = {
+  runs: Run[];
+  pending_approvals: Approval[];
+};
+
 async function authHeader(): Promise<Record<string, string>> {
   const supabase = createClient();
   const { data: { session } } = await supabase.auth.getSession();
@@ -156,48 +164,40 @@ export default function AgentsPage() {
   const [runs, setRuns] = useState<RunsState>({ status: "loading" });
   const [approvals, setApprovals] = useState<ApprovalsState>({ status: "loading" });
 
-  const fetchRuns = useCallback(async () => {
+  // Single round trip — see `GET /api/dashboard/overview`. Both halves
+  // load and fail together, so a single network failure surfaces in
+  // both subcomponents (their existing error-state UI handles it).
+  const fetchOverview = useCallback(async () => {
     try {
       const auth = await authHeader();
       if (!auth.Authorization) {
-        setRuns({ status: "error", message: "Not signed in" });
+        const msg = "Not signed in";
+        setRuns({ status: "error", message: msg });
+        setApprovals({ status: "error", message: msg });
         return;
       }
-      const res = await fetch(`${API}/api/runs`, { headers: auth });
+      const res = await fetch(`${API}/api/dashboard/overview`, { headers: auth });
       if (!res.ok) {
-        setRuns({ status: "error", message: `HTTP ${res.status}` });
+        const msg = `HTTP ${res.status}`;
+        setRuns({ status: "error", message: msg });
+        setApprovals({ status: "error", message: msg });
         return;
       }
-      const items = (await res.json()) as Run[];
-      setRuns({ status: "ok", items: items.slice(0, 8) });
+      const body = (await res.json()) as OverviewResponse;
+      setRuns({ status: "ok", items: body.runs });
+      setApprovals({ status: "ok", items: body.pending_approvals });
     } catch (e) {
-      setRuns({ status: "error", message: (e as Error).message });
-    }
-  }, []);
-
-  const fetchApprovals = useCallback(async () => {
-    try {
-      const auth = await authHeader();
-      if (!auth.Authorization) {
-        setApprovals({ status: "error", message: "Not signed in" });
-        return;
-      }
-      const res = await fetch(`${API}/api/approvals`, { headers: auth });
-      if (!res.ok) {
-        setApprovals({ status: "error", message: `HTTP ${res.status}` });
-        return;
-      }
-      const items = (await res.json()) as Approval[];
-      setApprovals({ status: "ok", items });
-    } catch (e) {
-      setApprovals({ status: "error", message: (e as Error).message });
+      const msg = (e as Error).message;
+      setRuns({ status: "error", message: msg });
+      setApprovals({ status: "error", message: msg });
     }
   }, []);
 
   useEffect(() => {
-    fetchRuns();
-    fetchApprovals();
-  }, [fetchRuns, fetchApprovals]);
+    queueMicrotask(() => {
+      void fetchOverview();
+    });
+  }, [fetchOverview]);
 
   return (
     <div className="p-6 space-y-8">
@@ -222,7 +222,7 @@ export default function AgentsPage() {
       </div>
 
       {/* Recent activity */}
-      <RecentRuns state={runs} onRefresh={fetchRuns} />
+      <RecentRuns state={runs} onRefresh={fetchOverview} />
     </div>
   );
 }
