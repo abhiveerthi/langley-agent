@@ -25,10 +25,24 @@ class AuthenticatedUser:
     email: str
 
 
-# Module-level cache singletons. One per kind of resolver because a
-# `CurrentUser` and an `AuthenticatedUser` aren't interchangeable —
-# `get_authenticated_user` must NOT silently return the org-bound shape
-# even if a same-token entry exists in the org-bound cache.
+# Cached service-role client(s), keyed on the (url, key) tuple.
+# Constructing a Supabase Client builds GoTrueClient + PostgrestClient +
+# RealtimeClient + StorageClient under the hood, each with their own
+# httpx Client. Doing that per request burns measurable CPU + GC pressure
+# for no value — the configuration never changes within a process. The
+# Client is thread-safe (the underlying httpx Clients are designed for
+# sharing), so a process-wide singleton is safe to share across requests.
+#
+# Keying on (url, key) instead of a bare global so:
+#   1. Tests that swap settings get a fresh client.
+#   2. If we ever need a multi-tenant Supabase config (different region per
+#      cohort etc.), the cache shape already supports it.
+_supabase_clients: dict[tuple[str, str], Client] = {}
+
+# Auth-token cache singletons (from the auth-cache PR). One per kind of
+# resolver because a `CurrentUser` and an `AuthenticatedUser` aren't
+# interchangeable — `get_authenticated_user` must NOT silently return the
+# org-bound shape even if a same-token entry exists in the org-bound cache.
 #
 # Tests reset these via clear() between cases; production code never
 # touches them directly.
@@ -37,7 +51,22 @@ _authenticated_user_cache: TtlCache[AuthenticatedUser] = TtlCache()
 
 
 def get_supabase(settings: Settings = Depends(get_settings)) -> Client:
-    return create_client(settings.supabase_url, settings.supabase_service_key)
+    """Return a cached service-role Supabase client.
+
+    First call for a given (url, key) tuple builds the Client; every
+    subsequent call returns the same instance. The Client is intended
+    to be shared across requests — it pools its own HTTP connections
+    via httpx, and the auth/db sub-clients are stateless wrt the
+    caller's identity (we always pass the user JWT explicitly via the
+    `auth.get_user(token)` API, never via Client state).
+    """
+    cache_key = (settings.supabase_url, settings.supabase_service_key)
+    cached = _supabase_clients.get(cache_key)
+    if cached is not None:
+        return cached
+    client = create_client(*cache_key)
+    _supabase_clients[cache_key] = client
+    return client
 
 
 async def get_authenticated_user(

@@ -26,9 +26,9 @@ from __future__ import annotations
 from typing import Any, AsyncIterator
 
 from fastapi import Request
-from supabase import create_client
 
 from app.config import get_settings
+from app.dependencies import get_supabase
 from packages.integrations.context import (
     current_org_id,
     current_supabase,
@@ -43,13 +43,11 @@ def resolve_user(request: Request) -> tuple[str, str, Any]:
     development without Supabase configured or without a signed-in user.
     """
     settings = get_settings()
-    supabase = (
-        create_client(settings.supabase_url, settings.supabase_service_key)
-        if settings.supabase_url and settings.supabase_service_key
-        else None
-    )
-    if supabase is None:
+    if not (settings.supabase_url and settings.supabase_service_key):
         return "dev", "dev", None
+    # Share the cached service-role client with `Depends(get_supabase)`
+    # — same singleton, no extra construction.
+    supabase = get_supabase(settings)
 
     auth = request.headers.get("Authorization")
     if not auth or not auth.startswith("Bearer "):
