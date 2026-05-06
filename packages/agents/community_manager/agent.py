@@ -54,7 +54,6 @@ from packages.agents.community_manager.tools import (
     reply_to_comment,
 )
 from packages.integrations.context import current_supabase
-from packages.integrations.youtube.client import get_channel_id as get_oauth_channel_id
 
 
 def _priority_from_kind(kind: str | None) -> str:
@@ -295,24 +294,10 @@ class CommunityManagerAgent(BaseAgent):
 
     # ── Nodes ──────────────────────────────────────────────────────────────
     async def _load_profile_node(self, state: CommunityManagerState):
+        # `load_profile` overlays the OAuth-connected channel_id onto the
+        # profile when the brand row's `youtube_channel_id` is empty — see
+        # `_overlay_oauth_channel_id` in core/profile.py.
         profile = load_profile(state.get("org_id"))
-
-        # Overlay the OAuth-connected channel_id onto the profile when the
-        # profile field is empty. Every triage/research/system template renders
-        # `profile.youtube.channel_id`, so this is what makes the LLM see a
-        # real channel when the org has connected YouTube but never filled in
-        # the brand settings.
-        if not profile.youtube.channel_id:
-            org_id = state.get("org_id") or ""
-            supabase = current_supabase.get()
-            if supabase is not None and org_id:
-                try:
-                    oauth_ch = get_oauth_channel_id(supabase, org_id)
-                    if oauth_ch:
-                        profile.youtube.channel_id = oauth_ch
-                except Exception:
-                    pass
-
         existing_meta = state.get("metadata") or {}
         return {
             "metadata": {
