@@ -294,6 +294,41 @@ def _load_from_yaml(slug: str) -> OrgProfile | None:
     )
 
 
+def _overlay_oauth_channel_id(profile: OrgProfile, org_id: str) -> None:
+    """If the profile has no channel_id but the org has connected YouTube via
+    OAuth, graft the connected channel onto the profile in place.
+
+    This is the source of truth for "which channel are we acting on": the user
+    explicitly authorized it during the YouTube OAuth handshake, so it beats
+    anything in the brand-settings UI (which is often blank for orgs that
+    connected their channel before filling in onboarding). Every agent's
+    system.j2 renders `profile.youtube.channel_id`, so this overlay is what
+    keeps strategist / community-manager / brand-manager / publisher from
+    asking the user for a channel ID after the OAuth was already done.
+    """
+    if profile.youtube.channel_id:
+        return
+    supabase = current_supabase.get()
+    if supabase is None or not org_id:
+        return
+    try:
+        # Late import to avoid a load-time circular: integrations.youtube.client
+        # imports from packages.integrations.youtube.oauth, which is fine; the
+        # concern is the agent core importing from a sibling integration package
+        # at module init.
+        from packages.integrations.youtube.client import (
+            get_channel_id as get_oauth_channel_id,
+        )
+        ch = get_oauth_channel_id(supabase, org_id)
+        if ch:
+            profile.youtube.channel_id = ch
+    except Exception:
+        # Best-effort overlay — never fail profile load just because the YT
+        # integration row is missing/malformed. Agents will surface "no
+        # channel configured" via their own templates.
+        pass
+
+
 # ── Public entry point ────────────────────────────────────────────────────
 def load_profile(org_id_or_slug: str | None) -> OrgProfile:
     """Load a profile by UUID (DB) or slug (YAML).
@@ -313,7 +348,8 @@ def load_profile(org_id_or_slug: str | None) -> OrgProfile:
             # filling in brand settings. Return a blank-but-real profile so
             # agents (especially CM, which can pull channel_id from OAuth) can
             # still run; the user gets stub voice/niche until they save.
-            return _blank_profile(identifier)
+            profile = _blank_profile(identifier)
+        _overlay_oauth_channel_id(profile, identifier)
         return profile
 
     profile = _load_from_yaml(identifier)

@@ -43,7 +43,26 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             {isUser ? (
               <p className="whitespace-pre-wrap">{message.content}</p>
             ) : (
-              <div className="prose prose-invert prose-sm max-w-none">
+              <div
+                className={cn(
+                  "prose prose-invert prose-sm max-w-none",
+                  // Open the layout up — default `prose-sm` packs paragraphs
+                  // tightly, which makes long agent responses feel like a
+                  // wall of text in a small chat bubble.
+                  "leading-relaxed",
+                  "prose-p:my-3 prose-p:leading-relaxed",
+                  "prose-headings:mt-5 prose-headings:mb-2 prose-headings:font-semibold",
+                  "prose-h1:text-base prose-h2:text-sm prose-h3:text-sm",
+                  "prose-ul:my-3 prose-ol:my-3 prose-li:my-1",
+                  "prose-hr:my-4 prose-hr:border-border",
+                  "prose-table:my-3 prose-table:text-xs",
+                  "prose-blockquote:my-3 prose-blockquote:border-l-2 prose-blockquote:pl-3",
+                  "prose-pre:my-3",
+                  // Trim leading/trailing whitespace from the bubble itself
+                  // so the first/last block doesn't add an extra gap.
+                  "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+                )}
+              >
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
                   {message.content}
                 </ReactMarkdown>
