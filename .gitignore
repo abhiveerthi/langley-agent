@@ -13,11 +13,9 @@ dist/
 *.egg-info/
 
 # env
-.env
-.env.local
-.env.*.local
-.env.prod
-.env.*.prod
+.env*
+!.env.example
+
 
 # IDE
 .vscode/
