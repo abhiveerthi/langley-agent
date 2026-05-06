@@ -107,10 +107,16 @@ class TestYamlLoader:
 
 # ── DB path (UUID-based) ──────────────────────────────────────────────────
 class TestDbLoader:
-    def test_uuid_with_no_supabase_raises(self, real_uuid):
-        # current_supabase is None per autouse fixture.
-        with pytest.raises(ProfileNotFound, match="No org_profiles row"):
-            load_profile(real_uuid)
+    def test_uuid_with_no_db_row_returns_blank_profile(self, real_uuid):
+        # current_supabase is None per autouse fixture, so the DB lookup
+        # returns nothing. Loader returns a blank-but-real profile so agents
+        # can still run for orgs that haven't filled in brand settings yet.
+        p = load_profile(real_uuid)
+        assert p.org_id == real_uuid
+        assert p.is_fixture is False
+        assert p.brand.name is None
+        assert p.niche.slug == "generic"
+        assert p.youtube.channel_id is None
 
     def test_uuid_with_db_row_loads(self, real_uuid):
         sb = MockSupabase({
@@ -165,17 +171,19 @@ class TestDbLoader:
         p = load_profile(real_uuid)
         assert p.niche.slug == "generic"
 
-    def test_uuid_with_db_error_raises_profile_not_found(self, real_uuid):
-        """If the DB query throws, treat it as miss (raise ProfileNotFound)
-        rather than letting the underlying exception bubble — agent code
-        should always see a clean ProfileNotFound or a real profile."""
+    def test_uuid_with_db_error_returns_blank_profile(self, real_uuid):
+        """If the DB query throws, treat it as a miss and return the blank
+        profile rather than letting the underlying exception bubble — agent
+        code should always see a usable profile or our blank fallback."""
         class _FaultyDB(MockSupabase):
             def table(self, name):
                 raise Exception("network blip")
 
         current_supabase.set(_FaultyDB())
-        with pytest.raises(ProfileNotFound):
-            load_profile(real_uuid)
+        p = load_profile(real_uuid)
+        assert p.org_id == real_uuid
+        assert p.is_fixture is False
+        assert p.brand.name is None
 
 
 # ── Niche resolution ──────────────────────────────────────────────────────

@@ -65,6 +65,19 @@ def delete_connection(supabase: Client, org_id: str) -> None:
     )
 
 
+def get_channel_id(supabase: Client, org_id: str) -> str | None:
+    """Return the connected creator's YouTube channel_id, if OAuth is connected.
+
+    Sourced from the row written by the OAuth callback (`save_connection`),
+    so it tracks the account the user actually authorized — no separate
+    profile config required.
+    """
+    conn = get_connection(supabase, org_id)
+    if not conn:
+        return None
+    return (conn.get("metadata") or {}).get("channel_id")
+
+
 async def get_fresh_access_token(
     supabase: Client,
     org_id: str,

@@ -151,14 +151,26 @@ def _ai_message_text(msg: AIMessage) -> str:
     return content or ""
 
 
-def _emit_message_events(messages: list) -> list[str]:
-    """Translate LangGraph message deltas into SSE events."""
+def _emit_message_events(messages: list, seen_texts: set[str]) -> list[str]:
+    """Translate LangGraph message deltas into SSE events.
+
+    Several agents have a terminal `_respond_node` that re-emits the previous
+    ReAct loop's final AIMessage so the graph terminates with a clean user-
+    facing reply. From the orchestrator's perspective that's the same text
+    appearing in two consecutive `updates` chunks — and the frontend
+    accumulates both, so the user sees the message twice. `seen_texts` lets
+    us suppress the redundant re-emission while still letting fresh deltas
+    (tokens, partial drafts) flow through.
+    """
     events: list[str] = []
     for msg in messages:
         if isinstance(msg, AIMessage):
             text = _ai_message_text(msg)
-            if text:
+            if text and text not in seen_texts:
+                if seen_texts:
+                    events.append(_sse("token", {"content": "\n\n"}))
                 events.append(_sse("token", {"content": text}))
+                seen_texts.add(text)
             if getattr(msg, "tool_calls", None):
                 for tc in msg.tool_calls:
                     events.append(_sse("tool_call_start", {
@@ -227,12 +239,13 @@ async def _stream_until_done_or_pause(
     end if the graph completed without pausing.
     """
     visited_nodes: list[str] = []
+    seen_texts: set[str] = set()
     async for chunk in app.astream(input_data, config=config, stream_mode="updates"):
         for _node, node_data in chunk.items():
             visited_nodes.append(_node)
             if not node_data:
                 continue
-            for event in _emit_message_events(node_data.get("messages", [])):
+            for event in _emit_message_events(node_data.get("messages", []), seen_texts):
                 yield event
 
     # After astream returns, inspect the graph state to see if we paused at

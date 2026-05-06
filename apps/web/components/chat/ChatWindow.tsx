@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useCallback, useEffect } from "react";
 import { MessageList } from "./MessageList";
 import { ChatInput } from "./ChatInput";
 import { AgentThinking } from "./AgentThinking";
@@ -12,6 +12,19 @@ interface ChatWindowProps {
   agentSlug?: string;
 }
 
+// Lightweight intent detection for natural-language approve/reject when an
+// inline approval card is showing. Users who don't notice the card and just
+// type "approved" / "send it" / "no rewrite that" otherwise get stuck — the
+// chat reply spawns a fresh graph run that has no idea about the pending HITL.
+const APPROVE_PATTERN =
+  /^\s*(approve(d)?|approved!?|yes(,?\s*(send|post|go|ship|do it))?|send( it)?( now)?|post( it)?|ship it|go( ahead)?|do it|looks good|lgtm|👍|✅|sure( send)?)\s*[.!?]?\s*$/i;
+// Reject = ask the agent to revise. The user supplies feedback in chat.
+const REJECT_PATTERN =
+  /^\s*(reject(ed)?|reject it|redo( it)?|rewrite|try again|revise)\s*[.!?]?\s*$/i;
+// Cancel = throw the draft away entirely. Different from reject — no revise.
+const CANCEL_PATTERN =
+  /^\s*(cancel|discard( it)?|throw (it )?away|delete( it)?|nevermind|never mind|forget it|drop it|abort|nope|no)\s*[.!?]?\s*$/i;
+
 export function ChatWindow({ threadId, agentSlug }: ChatWindowProps) {
   const {
     messages,
@@ -21,9 +34,35 @@ export function ChatWindow({ threadId, agentSlug }: ChatWindowProps) {
     pendingApproval,
     sendMessage,
     resumeApproval,
+    cancelApproval,
     stopStreaming,
     loadThread,
   } = useChat({ threadId, agentSlug });
+
+  // If a draft is awaiting approval and the user types an approve/reject
+  // intent in chat, resolve the approval directly instead of starting a new
+  // run. Anything that doesn't pattern-match (e.g. "make it shorter") still
+  // falls through to sendMessage, which is fine — the agent can rewrite.
+  const handleSend = useCallback(
+    (text: string) => {
+      if (pendingApproval) {
+        if (APPROVE_PATTERN.test(text)) {
+          resumeApproval(pendingApproval.approval_id, "approved");
+          return;
+        }
+        if (CANCEL_PATTERN.test(text)) {
+          cancelApproval(pendingApproval.approval_id);
+          return;
+        }
+        if (REJECT_PATTERN.test(text)) {
+          resumeApproval(pendingApproval.approval_id, "rejected");
+          return;
+        }
+      }
+      sendMessage(text);
+    },
+    [pendingApproval, resumeApproval, cancelApproval, sendMessage]
+  );
 
   useEffect(() => {
     if (threadId) {
@@ -60,6 +99,7 @@ export function ChatWindow({ threadId, agentSlug }: ChatWindowProps) {
               busy={isStreaming}
               onApprove={(id) => resumeApproval(id, "approved")}
               onReject={(id, fb) => resumeApproval(id, "rejected", fb)}
+              onCancel={(id) => cancelApproval(id)}
             />
           </div>
         )}
@@ -74,7 +114,7 @@ export function ChatWindow({ threadId, agentSlug }: ChatWindowProps) {
         )}
       </div>
       <ChatInput
-        onSend={sendMessage}
+        onSend={handleSend}
         onStop={stopStreaming}
         isStreaming={isStreaming}
       />
