@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Loader2, MessageCircle, Send, X } from "lucide-react";
+import { Check, Loader2, MessageCircle, Send, Trash2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /**
@@ -32,6 +32,11 @@ interface ApprovalCardProps {
   onApprove: (approvalId: string) => Promise<void> | void;
   /** Called when user clicks Reject (with optional feedback string). */
   onReject: (approvalId: string, feedback: string) => Promise<void> | void;
+  /**
+   * Called when the user discards the draft entirely. Different from reject:
+   * reject loops the agent back to revise, cancel throws the draft away.
+   */
+  onCancel?: (approvalId: string) => Promise<void> | void;
   /** Streaming state — disables buttons while a previous resume is mid-flight. */
   busy?: boolean;
   /** Compact = inline-in-chat; expanded = standalone approvals list. */
@@ -80,6 +85,7 @@ export function ApprovalCard({
   approval,
   onApprove,
   onReject,
+  onCancel,
   busy = false,
   variant = "list",
 }: ApprovalCardProps) {
@@ -107,6 +113,16 @@ export function ApprovalCard({
       await onReject(norm.id, feedback.trim());
       setShowRejectForm(false);
       setFeedback("");
+    } finally {
+      setLocalBusy(false);
+    }
+  }
+
+  async function handleCancel() {
+    if (!onCancel) return;
+    setLocalBusy(true);
+    try {
+      await onCancel(norm.id);
     } finally {
       setLocalBusy(false);
     }
@@ -204,6 +220,17 @@ export function ApprovalCard({
             <X className="h-3.5 w-3.5" />
             Reject &amp; revise
           </button>
+          {onCancel && (
+            <button
+              onClick={handleCancel}
+              disabled={disabled}
+              title="Discard draft (won't post or revise)"
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Discard
+            </button>
+          )}
         </div>
       )}
     </div>

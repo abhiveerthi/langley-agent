@@ -171,6 +171,23 @@ def _demo_profile() -> OrgProfile:
     )
 
 
+def _blank_profile(org_id: str) -> OrgProfile:
+    """Real-org profile with no brand customization yet.
+
+    Returned when an authenticated org has no `org_profiles` row — agents
+    can still run (channel_id resolves from OAuth, voice/niche fall back to
+    generic) and will pick up the user's edits as soon as they save in
+    Settings → Brand."""
+    return OrgProfile(
+        org_id=org_id,
+        brand=Brand(),
+        niche=_generic_niche(),
+        youtube=YoutubeChannel(channel_id=None),
+        owners=[],
+        is_fixture=False,
+    )
+
+
 # ── YAML helpers ──────────────────────────────────────────────────────────
 def _read_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
@@ -292,10 +309,11 @@ def load_profile(org_id_or_slug: str | None) -> OrgProfile:
     if _is_uuid(identifier):
         profile = _load_from_db(identifier)
         if profile is None:
-            raise ProfileNotFound(
-                f"No org_profiles row for UUID {identifier!r}. "
-                "Has signup completed and the row been inserted?"
-            )
+            # No row yet — common for orgs that connected an integration before
+            # filling in brand settings. Return a blank-but-real profile so
+            # agents (especially CM, which can pull channel_id from OAuth) can
+            # still run; the user gets stub voice/niche until they save.
+            return _blank_profile(identifier)
         return profile
 
     profile = _load_from_yaml(identifier)

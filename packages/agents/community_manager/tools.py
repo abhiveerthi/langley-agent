@@ -19,6 +19,24 @@ from packages.integrations.context import current_org_id, current_supabase
 from packages.integrations.youtube.client import get_fresh_access_token
 
 
+def _owner_already_replied(thread: dict, owner_channel_id: str) -> bool:
+    """True if any reply in this commentThread was authored by the channel
+    owner. Uses up to 5 most recent replies returned by `part=replies` —
+    enough for typical creator threads (a single owner reply is the norm).
+    Threads with replies but no `replies` block (very deep threads) fall
+    back to a conservative `totalReplyCount` heuristic: if the count is >0
+    we don't filter, since we can't be sure the owner is among them.
+    """
+    replies = (thread.get("replies") or {}).get("comments") or []
+    for r in replies:
+        author_ch = (
+            (r.get("snippet") or {}).get("authorChannelId") or {}
+        ).get("value")
+        if author_ch and author_ch == owner_channel_id:
+            return True
+    return False
+
+
 async def _oauth_access_token() -> str:
     """Resolve a fresh YouTube OAuth access token for the current org.
 
@@ -74,24 +92,36 @@ async def get_recent_comments(
         }, access_token)
 
         output = "# Recent Comments\n\n"
+        total_skipped_replied = 0
         for item in search_data.get("items", []):
             video_id = item["id"]["videoId"]
             title = item["snippet"]["title"]
             output += f"## {title} (video_id: {video_id})\n"
 
             try:
+                # `part=snippet,replies` returns the top-level comment plus up
+                # to 5 most recent replies in one call — we use the replies
+                # block to detect whether the channel owner already responded
+                # so the agent never proposes a duplicate reply.
                 comments_data = await youtube_api_get_oauth("commentThreads", {
-                    "part": "snippet",
+                    "part": "snippet,replies",
                     "videoId": video_id,
                     "order": "time",
                     "maxResults": per_video,
                 }, access_token)
-                comments = comments_data.get("items", [])
-                if not comments:
+                threads = comments_data.get("items", [])
+                if not threads:
                     output += "(no comments)\n\n"
                     continue
-                for c in comments:
-                    top = c["snippet"]["topLevelComment"]
+
+                rendered_any = False
+                skipped_replied = 0
+                for c in threads:
+                    snippet = c["snippet"]
+                    if _owner_already_replied(c, channel_id):
+                        skipped_replied += 1
+                        continue
+                    top = snippet["topLevelComment"]
                     s = top["snippet"]
                     comment_id = top["id"]
                     author = s.get("authorDisplayName", "unknown")
@@ -102,10 +132,28 @@ async def get_recent_comments(
                         f"- [{comment_id}] **{author}** ({author_channel}) "
                         f"[{likes}👍]: {text}\n"
                     )
+                    rendered_any = True
+
+                if skipped_replied:
+                    total_skipped_replied += skipped_replied
+                    output += (
+                        f"_(skipped {skipped_replied} comment"
+                        f"{'s' if skipped_replied != 1 else ''} the channel "
+                        f"already replied to)_\n"
+                    )
+                if not rendered_any and not skipped_replied:
+                    output += "(no comments)\n"
                 output += "\n"
             except Exception as e:
                 output += f"(error fetching comments: {e})\n\n"
 
+        if total_skipped_replied:
+            output += (
+                f"\n> Note: {total_skipped_replied} comment"
+                f"{'s' if total_skipped_replied != 1 else ''} that the channel "
+                f"already replied to were filtered out — never propose a reply "
+                f"to those.\n"
+            )
         return output
     except ValueError as e:
         return f"Error: {e}"

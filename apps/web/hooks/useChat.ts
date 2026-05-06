@@ -371,6 +371,43 @@ export function useChat(options: UseChatOptions = {}) {
     [consumeSseStream]
   );
 
+  /**
+   * Discard a pending approval entirely. Unlike reject (which loops back to
+   * a revise step and re-pauses), cancel throws the draft away — the row
+   * flips to 'cancelled', the LangGraph thread is left orphaned. We post a
+   * short note into the chat so the user sees that the action happened,
+   * since there's no SSE stream coming back.
+   */
+  const cancelApproval = useCallback(
+    async (approvalId: string) => {
+      setError(null);
+      const auth = await authHeader();
+      try {
+        const res = await fetch(`${API_URL}/api/approvals/${approvalId}/cancel`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...auth },
+        });
+        if (!res.ok && res.status !== 204) {
+          throw new Error(`Cancel failed: ${res.statusText}`);
+        }
+        setPendingApproval(null);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: "Draft discarded.",
+            toolCalls: [],
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+      } catch (err) {
+        if (err instanceof Error) setError(err.message);
+      }
+    },
+    []
+  );
+
   const stopStreaming = useCallback(() => {
     abortRef.current?.abort();
   }, []);
@@ -405,6 +442,7 @@ export function useChat(options: UseChatOptions = {}) {
     pendingApproval,
     sendMessage,
     resumeApproval,
+    cancelApproval,
     stopStreaming,
     loadThread,
   };

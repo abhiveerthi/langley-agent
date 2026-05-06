@@ -99,6 +99,32 @@ export default function ApprovalsPage() {
     return { rePaused, err };
   }
 
+  async function cancel(approvalId: string) {
+    setBusyApprovalId(approvalId);
+    try {
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        ...(session ? { Authorization: `Bearer ${session.access_token}` } : {}),
+      };
+      const res = await fetch(`${API}/api/approvals/${approvalId}/cancel`, {
+        method: "POST",
+        headers,
+      });
+      if (!res.ok && res.status !== 204) {
+        setToast(`Discard failed (HTTP ${res.status})`);
+        return;
+      }
+      await fetchApprovals(false);
+      setToast("Discarded");
+    } catch (e) {
+      setToast(`Error: ${(e as Error).message}`);
+    } finally {
+      setBusyApprovalId(null);
+    }
+  }
+
   async function resume(
     approvalId: string,
     decision: "approved" | "rejected",
@@ -203,6 +229,7 @@ export default function ApprovalsPage() {
               busy={busyApprovalId !== null && busyApprovalId !== a.id}
               onApprove={(id) => resume(id, "approved")}
               onReject={(id, fb) => resume(id, "rejected", fb)}
+              onCancel={(id) => cancel(id)}
             />
           ))}
         </div>
