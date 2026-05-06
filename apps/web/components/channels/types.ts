@@ -15,6 +15,10 @@ export type Channel = {
   created_at: string;
   archived_at: string | null;
   member_count: number;
+  /** Messages newer than `last_read_at` and not authored by the caller. */
+  unread_count: number;
+  /** ISO timestamp of the caller's last read receipt; null = never opened. */
+  last_read_at: string | null;
 };
 
 // Rich-card payload riding on the `metadata` jsonb column. Currently only

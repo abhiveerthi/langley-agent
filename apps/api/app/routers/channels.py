@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -162,8 +163,20 @@ def parse_mentions(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
-def _serialize_channel(row: dict, member_count: int) -> dict:
-    """Shape a channels row + member count into the FE Channel contract."""
+def _serialize_channel(
+    row: dict,
+    member_count: int,
+    *,
+    unread_count: int = 0,
+    last_read_at: str | None = None,
+) -> dict:
+    """Shape a channels row into the FE Channel contract.
+
+    `unread_count` is computed against the caller's `channel_reads`
+    row (see `_unread_counts_for`). New channels have NULL last_read_at
+    → unread_count = total messages, which is what the sidebar should
+    surface so a freshly-created channel doesn't look stale on first
+    visit by a teammate."""
     return {
         "id": row.get("id"),
         "name": row.get("name"),
@@ -172,6 +185,8 @@ def _serialize_channel(row: dict, member_count: int) -> dict:
         "created_at": row.get("created_at"),
         "archived_at": row.get("archived_at"),
         "member_count": member_count,
+        "unread_count": unread_count,
+        "last_read_at": last_read_at,
     }
 
 
@@ -271,6 +286,149 @@ def _member_counts_for(
     return {cid: counter.get(cid, 0) for cid in channel_ids}
 
 
+def _create_mention_notifications(
+    supabase: Client,
+    *,
+    recipients: list[str],
+    sender_name: str,
+    org_id: str,
+    channel_id: str,
+    message_id: str,
+    message_preview: str,
+) -> None:
+    """Insert a `notifications` row per mentioned user.
+
+    Reuses the existing notifications schema (migration 001) so the
+    TopBar bell, the notifications listing endpoint, and the
+    notifications settings page all keep working without coupling to
+    channel-specific code. The `metadata` column carries enough back-
+    references (channel_id + message_id) to deep-link the bell entry
+    to the channel and scroll to the mentioning message.
+
+    Best-effort — if the bulk insert fails the user message is already
+    in the channel and that's the contract that matters."""
+    if not recipients:
+        return
+    # Truncate the preview so a wall-of-text message doesn't bloat
+    # every recipient's notifications row. 200 chars is enough for the
+    # bell card; the full body is one click away in the channel.
+    preview = (message_preview or "").strip()
+    if len(preview) > 200:
+        preview = preview[:197] + "…"
+
+    rows = [
+        {
+            "org_id": org_id,
+            "user_id": recipient_id,
+            "type": "channel_mention",
+            "title": f"{sender_name} mentioned you",
+            "body": preview,
+            "action_url": f"/app/channels?channel={channel_id}",
+            "metadata": {
+                "channel_id": channel_id,
+                "message_id": message_id,
+            },
+        }
+        for recipient_id in recipients
+    ]
+    try:
+        supabase.table("notifications").insert(rows).execute()
+    except Exception as e:
+        print(f"[channels] mention-notifications insert failed: {e!r}", flush=True)
+
+
+def _read_receipts_for(
+    supabase: Client, *, user_id: str, channel_ids: list[str],
+) -> dict[str, str | None]:
+    """Map of channel_id -> last_read_at for the caller. Channels never
+    visited get an explicit None so the unread-count callsite knows to
+    treat the entire history as unread."""
+    if not channel_ids:
+        return {}
+    try:
+        resp = (
+            supabase.table("channel_reads")
+            .select("channel_id, last_read_at")
+            .eq("user_id", user_id)
+            .in_("channel_id", channel_ids)
+            .execute()
+        )
+    except Exception:
+        return {cid: None for cid in channel_ids}
+    by_channel: dict[str, str | None] = {cid: None for cid in channel_ids}
+    for row in resp.data or []:
+        cid = row.get("channel_id")
+        if cid:
+            by_channel[cid] = row.get("last_read_at")
+    return by_channel
+
+
+def _unread_counts_for(
+    supabase: Client,
+    *,
+    user_id: str,
+    channel_ids: list[str],
+    receipts: dict[str, str | None],
+) -> dict[str, int]:
+    """Per-channel unread message counts for the caller.
+
+    Counts messages with `created_at > last_read_at` AND `sender_user_id
+    != user_id` (your own posts don't count as unread to yourself). For
+    channels with no read receipt, treat last_read_at as -infinity so
+    the entire history is "unread" — matches Slack's "discover this
+    new-to-you channel" behaviour.
+
+    Implementation: pull the relevant message rows in one query keyed
+    only on (channel_id, created_at) and bucket in Python. We don't
+    need a server-side GROUP BY because the working set per page load
+    is bounded by total messages newer than the OLDEST receipt in this
+    list — small for any normal org.
+    """
+    if not channel_ids:
+        return {}
+    # Compute the global lower bound — the oldest "watch from" point
+    # across all channels in this list. Channels without a receipt
+    # count from epoch.
+    oldest = None
+    has_unread_anchor = False
+    for cid in channel_ids:
+        ts = receipts.get(cid)
+        if ts is None:
+            # At least one channel needs the full history; no global lower bound.
+            has_unread_anchor = False
+            oldest = None
+            break
+        has_unread_anchor = True
+        if oldest is None or ts < oldest:
+            oldest = ts
+
+    query = (
+        supabase.table("channel_messages")
+        .select("channel_id, sender_user_id, created_at")
+        .in_("channel_id", channel_ids)
+    )
+    if has_unread_anchor and oldest is not None:
+        query = query.gt("created_at", oldest)
+    try:
+        resp = query.execute()
+    except Exception:
+        return {cid: 0 for cid in channel_ids}
+
+    counts: dict[str, int] = {cid: 0 for cid in channel_ids}
+    for row in resp.data or []:
+        cid = row.get("channel_id")
+        if not cid or cid not in counts:
+            continue
+        if row.get("sender_user_id") == user_id:
+            # Don't count the caller's own messages as unread to themselves.
+            continue
+        cutoff = receipts.get(cid)
+        created_at = row.get("created_at")
+        if cutoff is None or (created_at is not None and created_at > cutoff):
+            counts[cid] += 1
+    return counts
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────
 @router.get("/channels")
 async def list_channels(
@@ -293,7 +451,24 @@ async def list_channels(
     rows = resp.data or []
     channel_ids = [r["id"] for r in rows if r.get("id")]
     counts = _member_counts_for(supabase, channel_ids=channel_ids)
-    return [_serialize_channel(r, counts.get(r["id"], 0)) for r in rows]
+    receipts = _read_receipts_for(
+        supabase, user_id=user.id, channel_ids=channel_ids,
+    )
+    unreads = _unread_counts_for(
+        supabase,
+        user_id=user.id,
+        channel_ids=channel_ids,
+        receipts=receipts,
+    )
+    return [
+        _serialize_channel(
+            r,
+            counts.get(r["id"], 0),
+            unread_count=unreads.get(r["id"], 0),
+            last_read_at=receipts.get(r["id"]),
+        )
+        for r in rows
+    ]
 
 
 @router.post("/channels")
@@ -442,6 +617,22 @@ async def create_message(
             supabase=supabase,
         )
 
+    # Mention notifications — every @-mentioned human gets a row in the
+    # `notifications` table so the TopBar bell can surface "you were
+    # mentioned in #general." The author is excluded so self-mentions
+    # (`@me`-style typos, or the author including their own name) don't
+    # ping themselves. Failures are logged but never raise — the user
+    # message is already in the channel by the time we get here.
+    _create_mention_notifications(
+        supabase,
+        recipients=[uid for uid in mentioned_user_ids if uid != user.id],
+        sender_name=(user.email.split("@")[0] if user.email else "Someone"),
+        org_id=user.org_id,
+        channel_id=channel_id,
+        message_id=inserted["id"],
+        message_preview=body.body,
+    )
+
     # Hydrate the response with the sender_user shape since the FE renders
     # the optimistic message using whatever we return here.
     inserted.setdefault(
@@ -478,6 +669,53 @@ async def join_channel(
                 print(f"[channels] join failed: {e!r} / {e2!r}", flush=True)
                 raise HTTPException(status_code=500, detail="Join failed")
     return {"joined": True}
+
+
+@router.post("/channels/{channel_id}/read")
+async def mark_channel_read(
+    channel_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    """Mark this channel read up to now.
+
+    The FE calls this when the user opens the channel and again when
+    new realtime messages arrive while the tab is focused. We always
+    write `last_read_at = now()`; clients don't get to set the
+    timestamp client-side because clock skew would otherwise let one
+    user's "future" mark a teammate's catch-up read as already-old.
+    """
+    _assert_channel_in_org(supabase, channel_id=channel_id, org_id=user.org_id)
+
+    # Server-side timestamp prevents client clock skew from racing other
+    # users' read receipts. The column defaults to now() but defaults
+    # only fire on insert, not upsert-as-update — so set explicitly.
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    try:
+        supabase.table("channel_reads").upsert(
+            {
+                "user_id": user.id,
+                "channel_id": channel_id,
+                "last_read_at": now_iso,
+            },
+            on_conflict="user_id,channel_id",
+        ).execute()
+    except Exception as e:
+        # Fall back to insert; a unique-violation here is the
+        # already-read case, treat it as a no-op rather than 500ing
+        # the FE's silent housekeeping call.
+        try:
+            supabase.table("channel_reads").insert({
+                "user_id": user.id,
+                "channel_id": channel_id,
+                "last_read_at": now_iso,
+            }).execute()
+        except Exception as e2:
+            msg = str(e2).lower()
+            if "duplicate" not in msg and "unique" not in msg and "23505" not in msg:
+                print(f"[channels] mark-read failed: {e!r} / {e2!r}", flush=True)
+    return {"ok": True, "last_read_at": now_iso}
 
 
 @router.get("/channels/mentionable")

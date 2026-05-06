@@ -113,6 +113,69 @@ export default function ChannelsPage() {
     });
   }, [selectedId, fetchMentionable]);
 
+  // Mark the selected channel read locally — the server sync is fired by
+  // ChannelView after it actually shows the user the messages. Locally
+  // resetting the count keeps the sidebar honest the moment the user
+  // clicks the channel rather than after the realtime "read" propagates.
+  useEffect(() => {
+    if (!selectedId) return;
+    queueMicrotask(() => {
+      setChannels((prev) =>
+        prev.state === "ready"
+          ? {
+              state: "ready",
+              items: prev.items.map((c) =>
+                c.id === selectedId ? { ...c, unread_count: 0 } : c,
+              ),
+            }
+          : prev,
+      );
+    });
+  }, [selectedId]);
+
+  // Org-wide subscription on `channel_messages` INSERTs — bumps the
+  // sidebar badge for any channel that's not currently open. The
+  // ChannelView component runs its own per-channel subscription on top
+  // of this for the open channel; the two coexist fine.
+  //
+  // We only have an INSERT filter at the channel level; here we rely
+  // on RLS to scope across the org. Noisy on huge orgs but bounded by
+  // total messages-per-second across one workspace's channels — fine
+  // for v1.
+  useEffect(() => {
+    const supabase = createClient();
+    const ch = supabase
+      .channel("channels-page-inbox")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "channel_messages" },
+        (payload) => {
+          const row = payload.new as {
+            channel_id: string;
+            sender_user_id: string | null;
+          };
+          // The currently-selected channel doesn't get a badge bump —
+          // ChannelView is rendering it and will mark-read shortly.
+          if (row.channel_id === selectedId) return;
+          setChannels((prev) => {
+            if (prev.state !== "ready") return prev;
+            const idx = prev.items.findIndex((c) => c.id === row.channel_id);
+            if (idx < 0) return prev;
+            const next = [...prev.items];
+            next[idx] = {
+              ...next[idx],
+              unread_count: next[idx].unread_count + 1,
+            };
+            return { state: "ready", items: next };
+          });
+        },
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(ch);
+    };
+  }, [selectedId]);
+
   // Stabilize the channel array reference so downstream useMemo deps don't
   // re-run on every render — without this the `[]` literal in the falsy
   // branch would be a fresh array each pass.
@@ -184,25 +247,41 @@ export default function ChannelsPage() {
             </div>
           )}
           {channels.state === "ready" &&
-            items.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                onClick={() => setSelectedId(c.id)}
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition-colors",
-                  c.id === selectedId
-                    ? "bg-primary/15 text-primary font-medium"
-                    : "text-muted-foreground hover:bg-accent hover:text-foreground",
-                )}
-              >
-                <Hash className="h-3.5 w-3.5 shrink-0" />
-                <span className="truncate">{c.name}</span>
-                <span className="ml-auto text-[10px] text-muted-foreground/60">
-                  {c.member_count}
-                </span>
-              </button>
-            ))}
+            items.map((c) => {
+              const isSelected = c.id === selectedId;
+              const hasUnread = !isSelected && c.unread_count > 0;
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => setSelectedId(c.id)}
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition-colors",
+                    isSelected
+                      ? "bg-primary/15 text-primary font-medium"
+                      : hasUnread
+                        ? "text-foreground hover:bg-accent"
+                        : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                  )}
+                >
+                  <Hash className="h-3.5 w-3.5 shrink-0" />
+                  <span
+                    className={cn("truncate", hasUnread && "font-semibold")}
+                  >
+                    {c.name}
+                  </span>
+                  {hasUnread ? (
+                    <span className="ml-auto rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-bold leading-none text-primary-foreground">
+                      {c.unread_count > 99 ? "99+" : c.unread_count}
+                    </span>
+                  ) : (
+                    <span className="ml-auto text-[10px] text-muted-foreground/60">
+                      {c.member_count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
         </div>
 
         <div className="border-t border-border p-2">

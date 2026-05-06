@@ -36,6 +36,7 @@ from app.routers.channels import (
     list_channels,
     list_mentionable,
     list_messages,
+    mark_channel_read,
     reject_in_channel,
 )
 
@@ -70,6 +71,7 @@ class _MockQuery:
         self._null_filters: list[str] = []
         self._in_filters: dict[str, list] = {}
         self._lt_filters: dict[str, Any] = {}
+        self._gt_filters: dict[str, Any] = {}
         # Postgrest jsonb-arrow filters: ("metadata", "approval_id") -> value
         # Used by `_find_approval_card_message` to locate approval cards.
         self._json_eq_filters: dict[tuple[str, str], Any] = {}
@@ -83,7 +85,10 @@ class _MockQuery:
         self._mode = "select"
         return self
 
-    def insert(self, payload: dict):
+    def insert(self, payload):
+        # supabase-py accepts a dict (single row) or a list of dicts
+        # (batched insert). Tests for `_create_mention_notifications`
+        # exercise the list path.
         self._mode = "insert"
         self._insert_payload = payload
         return self
@@ -116,6 +121,10 @@ class _MockQuery:
         self._lt_filters[key] = value
         return self
 
+    def gt(self, key: str, value):
+        self._gt_filters[key] = value
+        return self
+
     def order(self, *_a, **_k): return self
     def limit(self, *_a, **_k): return self
     def delete(self): return self
@@ -143,6 +152,10 @@ class _MockQuery:
             rv = row.get(k)
             if rv is None or not (rv < v):
                 return False
+        for k, v in self._gt_filters.items():
+            rv = row.get(k)
+            if rv is None or not (rv > v):
+                return False
         for (col, key), v in self._json_eq_filters.items():
             blob = row.get(col)
             if not isinstance(blob, dict) or blob.get(key) != v:
@@ -152,25 +165,36 @@ class _MockQuery:
     def execute(self):
         rows = self._store.get(self._table, [])
         if self._mode == "insert" and self._insert_payload is not None:
-            new_row = {"id": str(uuid.uuid4()), **self._insert_payload}
-            # Enforce uniqueness on (org_id, name) for channels — mirrors
-            # the DB unique constraint, since we test the 409 path.
-            if self._table == "channels":
-                for r in rows:
-                    if (
-                        r.get("org_id") == new_row.get("org_id")
-                        and r.get("name") == new_row.get("name")
-                    ):
-                        raise Exception("duplicate key value violates unique constraint")
-            rows.append(new_row)
+            payloads = (
+                self._insert_payload
+                if isinstance(self._insert_payload, list)
+                else [self._insert_payload]
+            )
+            new_rows: list[dict] = []
+            for p in payloads:
+                new_row = {"id": str(uuid.uuid4()), **p}
+                # Enforce uniqueness on (org_id, name) for channels —
+                # mirrors the DB unique constraint, since we test the
+                # 409 path.
+                if self._table == "channels":
+                    for r in rows:
+                        if (
+                            r.get("org_id") == new_row.get("org_id")
+                            and r.get("name") == new_row.get("name")
+                        ):
+                            raise Exception("duplicate key value violates unique constraint")
+                rows.append(new_row)
+                new_rows.append(new_row)
+                self._store.setdefault("_inserts", []).append((self._table, new_row))
             self._store[self._table] = rows
-            self._store.setdefault("_inserts", []).append((self._table, new_row))
-            return _MockResult([new_row])
+            return _MockResult(new_rows)
         if self._mode == "upsert" and self._upsert_payload is not None:
             # Approximate upsert — replace rows matching the upsert keys
-            # if present; otherwise insert.
+            # if present; otherwise insert. Both `channel_members` and
+            # `channel_reads` use the (channel_id, user_id) composite
+            # key shape, so the same matcher applies.
             payload = self._upsert_payload
-            if self._table == "channel_members":
+            if self._table in ("channel_members", "channel_reads"):
                 for r in rows:
                     if (
                         r.get("channel_id") == payload.get("channel_id")
@@ -946,3 +970,254 @@ class TestRejectApprovalInChannelSchema:
     def test_feedback_round_trips(self):
         body = RejectApprovalInChannelRequest(feedback="rephrase the subject")
         assert body.feedback == "rephrase the subject"
+
+
+# ── POST /channels/{id}/read ─────────────────────────────────────────────
+@pytest.mark.asyncio
+class TestMarkChannelRead:
+    """The mark-read endpoint upserts a `channel_reads` row keyed on
+    (user_id, channel_id) with `last_read_at = now()`."""
+
+    async def test_first_read_inserts_row(self, user: CurrentUser, real_uuid: str):
+        channel_id = str(uuid.uuid4())
+        sb = MockSupabase({
+            "channels": [
+                {"id": channel_id, "org_id": real_uuid, "name": "general",
+                 "archived_at": None},
+            ],
+        })
+
+        result = await mark_channel_read(
+            channel_id=channel_id, user=user, supabase=sb,
+        )
+        assert result["ok"] is True
+        assert "last_read_at" in result
+        # Row landed in `channel_reads`.
+        rows = sb._store.get("channel_reads", [])
+        assert len(rows) == 1
+        assert rows[0]["user_id"] == user.id
+        assert rows[0]["channel_id"] == channel_id
+
+    async def test_repeat_read_updates_existing_row(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        """Calling mark-read twice should leave a single row, not two —
+        the upsert path matches on (user_id, channel_id)."""
+        channel_id = str(uuid.uuid4())
+        sb = MockSupabase({
+            "channels": [
+                {"id": channel_id, "org_id": real_uuid, "name": "general",
+                 "archived_at": None},
+            ],
+        })
+
+        await mark_channel_read(channel_id=channel_id, user=user, supabase=sb)
+        await mark_channel_read(channel_id=channel_id, user=user, supabase=sb)
+
+        rows = sb._store.get("channel_reads", [])
+        assert len(rows) == 1
+
+    async def test_404_on_cross_tenant_channel(self, user: CurrentUser):
+        """Caller in org A tries to mark a channel in org B as read.
+        _assert_channel_in_org should 404 BEFORE any channel_reads row
+        is touched — otherwise the user could pollute someone else's
+        channel with a read receipt for a row they shouldn't see."""
+        other_org = str(uuid.uuid4())
+        channel_id = str(uuid.uuid4())
+        sb = MockSupabase({
+            "channels": [
+                {"id": channel_id, "org_id": other_org, "name": "secret",
+                 "archived_at": None},
+            ],
+        })
+
+        with pytest.raises(HTTPException) as exc:
+            await mark_channel_read(
+                channel_id=channel_id, user=user, supabase=sb,
+            )
+        assert exc.value.status_code == 404
+        # No row created.
+        assert "channel_reads" not in sb._store or not sb._store["channel_reads"]
+
+
+# ── GET /channels with unread_count ──────────────────────────────────────
+@pytest.mark.asyncio
+class TestListChannelsUnreadCounts:
+    """`list_channels` returns each channel with an `unread_count` driven
+    by `(user_id, channel_id) → last_read_at` joined against
+    `channel_messages.created_at`."""
+
+    async def test_unread_count_counts_messages_after_last_read(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        channel_id = str(uuid.uuid4())
+        teammate_id = str(uuid.uuid4())
+        sb = MockSupabase({
+            "channels": [
+                {"id": channel_id, "org_id": real_uuid, "name": "general",
+                 "archived_at": None,
+                 "created_at": "2026-05-01T00:00:00Z"},
+            ],
+            "channel_reads": [
+                {"user_id": user.id, "channel_id": channel_id,
+                 "last_read_at": "2026-05-05T00:00:00Z"},
+            ],
+            "channel_messages": [
+                # Old, before last_read → not counted.
+                {"channel_id": channel_id, "sender_user_id": teammate_id,
+                 "created_at": "2026-05-04T12:00:00Z"},
+                # New, from a teammate → counted.
+                {"channel_id": channel_id, "sender_user_id": teammate_id,
+                 "created_at": "2026-05-06T10:00:00Z"},
+                {"channel_id": channel_id, "sender_user_id": teammate_id,
+                 "created_at": "2026-05-06T11:00:00Z"},
+                # New, but from the caller → NOT counted (own posts).
+                {"channel_id": channel_id, "sender_user_id": user.id,
+                 "created_at": "2026-05-06T12:00:00Z"},
+            ],
+        })
+
+        result = await list_channels(user=user, supabase=sb)
+        assert len(result) == 1
+        assert result[0]["unread_count"] == 2
+
+    async def test_unread_count_is_full_history_when_never_opened(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        """A teammate's brand-new channel that this user has never seen
+        should count its full history as unread — Slack-style."""
+        channel_id = str(uuid.uuid4())
+        teammate_id = str(uuid.uuid4())
+        sb = MockSupabase({
+            "channels": [
+                {"id": channel_id, "org_id": real_uuid, "name": "fresh",
+                 "archived_at": None,
+                 "created_at": "2026-05-01T00:00:00Z"},
+            ],
+            "channel_messages": [
+                {"channel_id": channel_id, "sender_user_id": teammate_id,
+                 "created_at": "2026-05-04T12:00:00Z"},
+                {"channel_id": channel_id, "sender_user_id": teammate_id,
+                 "created_at": "2026-05-05T10:00:00Z"},
+            ],
+        })
+
+        result = await list_channels(user=user, supabase=sb)
+        assert result[0]["unread_count"] == 2
+        assert result[0]["last_read_at"] is None
+
+
+# ── Mention notifications ─────────────────────────────────────────────────
+@pytest.mark.asyncio
+class TestMentionNotifications:
+    """create_message must insert a `notifications` row for every @user
+    it parsed — minus the author themselves."""
+
+    async def test_mention_creates_notification_for_each_user(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        channel_id = str(uuid.uuid4())
+        teammate_id = str(uuid.uuid4())
+        teammate_2 = str(uuid.uuid4())
+        sb = MockSupabase({
+            "channels": [
+                {"id": channel_id, "org_id": real_uuid, "name": "general",
+                 "archived_at": None},
+            ],
+            # The mention parser does a Postgrest nested-join select on
+            # `org_members` → `users`. Our mock doesn't simulate joins, so
+            # the user blob has to be pre-attached on the org_members row
+            # for the parser to find it.
+            "org_members": [
+                {"user_id": user.id, "org_id": real_uuid,
+                 "users": {"id": user.id, "full_name": "Author Person",
+                           "email": "author@example.com"}},
+                {"user_id": teammate_id, "org_id": real_uuid,
+                 "users": {"id": teammate_id, "full_name": "Sean Smith",
+                           "email": "sean@example.com"}},
+                {"user_id": teammate_2, "org_id": real_uuid,
+                 "users": {"id": teammate_2, "full_name": "Pat Patel",
+                           "email": "pat@example.com"}},
+            ],
+            "agents": [],
+        })
+
+        bg = BackgroundTasks()
+        await create_message(
+            channel_id=channel_id,
+            body=CreateMessageRequest(body="hey @sean and @pat — what do you think?"),
+            background_tasks=bg,
+            user=user,
+            supabase=sb,
+        )
+
+        notifs = sb._store.get("notifications", [])
+        assert len(notifs) == 2
+        # Each notification points to a recipient and carries metadata
+        # back to the channel + message id for deep-linking.
+        assert {n["user_id"] for n in notifs} == {teammate_id, teammate_2}
+        for n in notifs:
+            assert n["type"] == "channel_mention"
+            assert n["org_id"] == real_uuid
+            assert n["metadata"]["channel_id"] == channel_id
+            assert "message_id" in n["metadata"]
+            assert n["action_url"] == f"/app/channels?channel={channel_id}"
+
+    async def test_self_mention_does_not_notify(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        """If the author types their own `@username` (typo or referring
+        to themselves), we don't ping them. They sent the message; they
+        know about it."""
+        channel_id = str(uuid.uuid4())
+        sb = MockSupabase({
+            "channels": [
+                {"id": channel_id, "org_id": real_uuid, "name": "general",
+                 "archived_at": None},
+            ],
+            "org_members": [
+                {"user_id": user.id, "org_id": real_uuid,
+                 "users": {"id": user.id, "full_name": "Author Person",
+                           "email": "author@example.com"}},
+            ],
+            "agents": [],
+        })
+
+        bg = BackgroundTasks()
+        await create_message(
+            channel_id=channel_id,
+            body=CreateMessageRequest(body="reminder to @author"),
+            background_tasks=bg,
+            user=user,
+            supabase=sb,
+        )
+
+        # Mention parsed but the author was filtered out before insert.
+        assert sb._store.get("notifications", []) == []
+
+    async def test_no_mentions_no_notifications(
+        self, user: CurrentUser, real_uuid: str,
+    ):
+        """A regular message with no @-mentions should not write any
+        notifications rows."""
+        channel_id = str(uuid.uuid4())
+        sb = MockSupabase({
+            "channels": [
+                {"id": channel_id, "org_id": real_uuid, "name": "general",
+                 "archived_at": None},
+            ],
+            "users": [],
+            "org_members": [{"user_id": user.id, "org_id": real_uuid}],
+            "agents": [],
+        })
+
+        bg = BackgroundTasks()
+        await create_message(
+            channel_id=channel_id,
+            body=CreateMessageRequest(body="hello world, no mentions here"),
+            background_tasks=bg,
+            user=user,
+            supabase=sb,
+        )
+
+        assert "notifications" not in sb._store or not sb._store["notifications"]
