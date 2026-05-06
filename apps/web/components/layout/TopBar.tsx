@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { usePathname } from "next/navigation";
-import { Bell } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { Bell, LogOut } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -77,10 +77,13 @@ function getBreadcrumb(pathname: string): string[] {
 
 export function TopBar() {
   const pathname = usePathname();
+  const router = useRouter();
   const pageName = getPageName(pathname);
   const breadcrumb = getBreadcrumb(pathname);
 
   const [me, setMe] = useState<MeResponse | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -103,6 +106,31 @@ export function TopBar() {
       cancelled = true;
     };
   }, []);
+
+  // Close the user menu on outside click / Escape.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
+
+  async function handleSignOut() {
+    setMenuOpen(false);
+    const supabase = createClient();
+    await supabase.auth.signOut();
+    router.replace("/login");
+    router.refresh();
+  }
 
   const initials = me?.user.initials ?? "??";
   const avatarUrl = me?.user.avatar_url ?? null;
@@ -127,22 +155,53 @@ export function TopBar() {
           <Bell className="h-4 w-4" />
           <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-primary" />
         </button>
-        {avatarUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={avatarUrl}
-            alt={tooltipName}
+        <div ref={menuRef} className="relative">
+          <button
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((v) => !v)}
             title={tooltipName}
-            className="h-8 w-8 rounded-full object-cover"
-          />
-        ) : (
-          <div
-            title={tooltipName}
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/20 text-xs font-semibold text-primary"
+            className="flex items-center rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            {initials}
-          </div>
-        )}
+            {avatarUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={avatarUrl}
+                alt={tooltipName}
+                className="h-8 w-8 rounded-full object-cover"
+              />
+            ) : (
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/20 text-xs font-semibold text-primary">
+                {initials}
+              </div>
+            )}
+          </button>
+          {menuOpen && (
+            <div
+              role="menu"
+              className="absolute right-0 top-full z-50 mt-2 w-56 overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-md"
+            >
+              <div className="border-b border-border px-3 py-2 text-xs">
+                <div className="truncate font-medium text-foreground">
+                  {me?.user.full_name || me?.user.email || "Loading…"}
+                </div>
+                {me?.org.name && (
+                  <div className="truncate text-muted-foreground">{me.org.name}</div>
+                )}
+              </div>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={handleSignOut}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-foreground hover:bg-accent hover:text-accent-foreground"
+              >
+                <LogOut className="h-4 w-4" />
+                Sign out
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </header>
   );

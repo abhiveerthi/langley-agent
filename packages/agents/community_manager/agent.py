@@ -261,19 +261,8 @@ class CommunityManagerAgent(BaseAgent):
         return (state.get("metadata") or {}).get("peer_context") or {}
 
     def _channel_id(self, state: CommunityManagerState) -> str:
-        """Resolve the creator's channel_id. Prefers the OAuth-connected
-        channel (source of truth — what the user actually authorized) and
-        falls back to the org_profiles row for installs that pre-date the
-        OAuth flow or are running off a static YAML profile."""
-        org_id = state.get("org_id") or ""
-        supabase = current_supabase.get()
-        if supabase is not None and org_id:
-            try:
-                ch = get_oauth_channel_id(supabase, org_id)
-                if ch:
-                    return ch
-            except Exception:
-                pass
+        """Channel ID for tool arguments. Already overlaid from OAuth onto
+        the profile in `_load_profile_node`, so just read it back."""
         return self._profile(state).youtube.channel_id or ""
 
     def _last_user_text(self, state: CommunityManagerState) -> str:
@@ -307,6 +296,23 @@ class CommunityManagerAgent(BaseAgent):
     # ── Nodes ──────────────────────────────────────────────────────────────
     async def _load_profile_node(self, state: CommunityManagerState):
         profile = load_profile(state.get("org_id"))
+
+        # Overlay the OAuth-connected channel_id onto the profile when the
+        # profile field is empty. Every triage/research/system template renders
+        # `profile.youtube.channel_id`, so this is what makes the LLM see a
+        # real channel when the org has connected YouTube but never filled in
+        # the brand settings.
+        if not profile.youtube.channel_id:
+            org_id = state.get("org_id") or ""
+            supabase = current_supabase.get()
+            if supabase is not None and org_id:
+                try:
+                    oauth_ch = get_oauth_channel_id(supabase, org_id)
+                    if oauth_ch:
+                        profile.youtube.channel_id = oauth_ch
+                except Exception:
+                    pass
+
         existing_meta = state.get("metadata") or {}
         return {
             "metadata": {
@@ -364,11 +370,6 @@ class CommunityManagerAgent(BaseAgent):
         if (state.get("intent") or "").lower() != "triage":
             return {}
 
-        org_id = state.get("org_id") or ""
-        supabase = current_supabase.get()
-        if supabase is None or not _is_real_uuid(org_id):
-            return {}
-
         last_ai = next(
             (m for m in reversed(state["messages"]) if isinstance(m, AIMessage) and m.content),
             None,
@@ -393,6 +394,29 @@ class CommunityManagerAgent(BaseAgent):
 
         if not extraction.items:
             return {}
+
+        # Cache the drafts the triage agent already wrote, keyed by comment_id.
+        # Saves a second LLM call when the user later says "send the reply to
+        # X" — we reuse the exact text the user already saw in chat instead of
+        # redrafting (which would produce slightly different wording and break
+        # the user's expectation that "what I see" == "what gets posted").
+        triage_drafts: dict[str, str] = {
+            item.comment_id: item.draft_reply
+            for item in extraction.items
+            if item.comment_id and item.draft_reply
+        }
+        existing_meta = state.get("metadata") or {}
+        meta_update: dict = {**existing_meta}
+        if triage_drafts:
+            meta_update["triage_drafts"] = {
+                **(existing_meta.get("triage_drafts") or {}),
+                **triage_drafts,
+            }
+
+        org_id = state.get("org_id") or ""
+        supabase = current_supabase.get()
+        if supabase is None or not _is_real_uuid(org_id):
+            return {"metadata": meta_update}
 
         thread_id = state.get("thread_id") or ""
         items = []
@@ -432,7 +456,7 @@ class CommunityManagerAgent(BaseAgent):
         except Exception as e:
             print(f"[community_manager] task spawn failed: {e!r}", flush=True)
 
-        return {}
+        return {"metadata": meta_update}
 
     async def _fetch_recent_comments_node(self, state: CommunityManagerState):
         """Pull a batch of recent comments to feed the pick_target step.
@@ -472,6 +496,26 @@ class CommunityManagerAgent(BaseAgent):
 
     async def _draft_reply_node(self, state: CommunityManagerState):
         profile = self._profile(state)
+
+        # If triage already wrote a draft for this exact comment in chat,
+        # reuse it verbatim — what the user saw is what gets sent. Re-running
+        # the LLM here would produce slightly different wording and break the
+        # match between "the draft you proposed" and "the draft in approval".
+        target_id = state.get("target_comment_id") or ""
+        triage_drafts = ((state.get("metadata") or {}).get("triage_drafts") or {})
+        cached = triage_drafts.get(target_id)
+        if cached:
+            draft = cached.strip()
+            author = state.get("target_author") or "the commenter"
+            chat_msg = (
+                f"Drafted a reply to **{author}** — review and approve below:\n\n> {draft}"
+            )
+            return {
+                "draft_reply": draft,
+                "approval_status": "pending",
+                "messages": [AIMessage(content=chat_msg)],
+            }
+
         context = (
             f"ORIGINAL COMMENT:\n"
             f"  Author: {state.get('target_author') or '(unknown)'}\n"
@@ -489,7 +533,18 @@ class CommunityManagerAgent(BaseAgent):
             SystemMessage(content=prompt),
             HumanMessage(content=context),
         ])
-        return {"draft_reply": response.content.strip(), "approval_status": "pending"}
+        draft = response.content.strip()
+        # Surface the draft in chat alongside the approval card. Without this
+        # the approval_gate interrupt fires with no visible AIMessage and the
+        # bot bubble is empty — UX reads as "stalled" even though the graph
+        # is correctly paused waiting for approve/reject.
+        author = state.get("target_author") or "the commenter"
+        chat_msg = f"Drafted a reply to **{author}** — review and approve below:\n\n> {draft}"
+        return {
+            "draft_reply": draft,
+            "approval_status": "pending",
+            "messages": [AIMessage(content=chat_msg)],
+        }
 
     async def _revise_reply_node(self, state: CommunityManagerState):
         profile = self._profile(state)
@@ -507,10 +562,13 @@ class CommunityManagerAgent(BaseAgent):
             SystemMessage(content=prompt),
             HumanMessage(content=context),
         ])
+        draft = response.content.strip()
+        chat_msg = f"Revised draft based on your feedback — review and approve below:\n\n> {draft}"
         return {
-            "draft_reply": response.content.strip(),
+            "draft_reply": draft,
             "approval_status": "pending",
             "feedback": None,
+            "messages": [AIMessage(content=chat_msg)],
         }
 
     async def _approval_gate_node(self, state: CommunityManagerState):
