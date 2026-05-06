@@ -94,6 +94,31 @@ export function ChannelView({ channel, mentionable }: ChannelViewProps) {
     });
   }, [fetchMessages]);
 
+  // Mark this channel read on mount. Fire-and-forget — the server-side
+  // upsert is the source of truth for the badge on next page load; the
+  // page-level state already cleared the sidebar count optimistically.
+  // We re-fire after each new realtime arrival below so a long-open
+  // tab keeps its `last_read_at` advancing without waiting for the
+  // user to click anything.
+  const markRead = useCallback(async () => {
+    try {
+      const auth = await authHeader();
+      if (!auth.Authorization) return;
+      await fetch(`${API}/api/channels/${channel.id}/read`, {
+        method: "POST",
+        headers: auth,
+      });
+    } catch {
+      // Read receipts are housekeeping — silent fail is fine.
+    }
+  }, [channel.id]);
+
+  useEffect(() => {
+    queueMicrotask(() => {
+      void markRead();
+    });
+  }, [markRead]);
+
   /**
    * One-shot resolver for a realtime row whose `sender_*_id` doesn't
    * resolve through the local mentionable maps (e.g. a brand-new agent
@@ -209,6 +234,10 @@ export function ChannelView({ channel, mentionable }: ChannelViewProps) {
             }
             return [...prev, message];
           });
+          // Advance our read receipt so the badge doesn't reappear after
+          // the user comes back to this tab. Fire-and-forget; failure
+          // is tolerable (next channel switch will reset).
+          void markRead();
         },
       )
       .on(
@@ -240,7 +269,7 @@ export function ChannelView({ channel, mentionable }: ChannelViewProps) {
     return () => {
       supabase.removeChannel(ch);
     };
-  }, [channel.id, mentionable, refetchOne]);
+  }, [channel.id, mentionable, refetchOne, markRead]);
 
   // Track scroll position so we know whether to auto-scroll on new arrivals.
   useEffect(() => {
