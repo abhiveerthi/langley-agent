@@ -31,7 +31,10 @@ from pydantic import BaseModel, Field
 from supabase import Client
 
 from app.dependencies import CurrentUser, get_current_user, get_supabase
-from app.services.channel_dispatch import run_dispatch_safely
+from app.services.channel_dispatch import (
+    run_dispatch_safely,
+    run_resume_to_channel_safely,
+)
 
 router = APIRouter(tags=["channels"])
 
@@ -43,6 +46,12 @@ class CreateChannelRequest(BaseModel):
     direct API caller can't slip a space / unicode / quote in."""
     name: str = Field(pattern=r"^[a-z0-9_-]{1,64}$")
     description: Optional[str] = None
+
+
+class RejectApprovalInChannelRequest(BaseModel):
+    """Optional feedback piped to the agent's revision logic — same
+    contract as the standalone `/api/approvals/{id}/reject` endpoint."""
+    feedback: Optional[str] = None
 
 
 class CreateMessageRequest(BaseModel):
@@ -204,6 +213,9 @@ def _serialize_message(row: dict) -> dict:
         "mentioned_agent_slugs": row.get("mentioned_agent_slugs") or [],
         "agent_run_id": row.get("agent_run_id"),
         "in_reply_to_message_id": row.get("in_reply_to_message_id"),
+        # `metadata.kind` drives FE rich-card rendering (currently
+        # `"approval"`; future kinds slot in here).
+        "metadata": row.get("metadata") or {},
         "created_at": row.get("created_at"),
         "edited_at": row.get("edited_at"),
     }
@@ -516,3 +528,170 @@ async def list_mentionable(
         ],
         "users": users_out,
     }
+
+
+def _find_approval_card_message(
+    supabase: Client, *, channel_id: str, org_id: str, approval_id: str,
+) -> dict | None:
+    """Locate the channel_messages row whose metadata.kind == "approval"
+    and metadata.approval_id matches. We need this to UPDATE in place
+    (not insert a new row) so the inline card transitions from
+    "needs decision" → "approved/rejected by X" without creating
+    duplicate timeline entries.
+
+    Postgrest's jsonb arrow-equality lets us filter directly:
+    `metadata->>approval_id=eq.<id>`. We still org-scope and channel-
+    scope to be safe even though the approval_id alone is unique.
+    """
+    try:
+        resp = (
+            supabase.table("channel_messages")
+            .select("id, metadata")
+            .eq("channel_id", channel_id)
+            .eq("org_id", org_id)
+            .filter("metadata->>approval_id", "eq", approval_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        print(f"[channels] approval-card lookup failed: {e!r}", flush=True)
+        return None
+    if not resp.data:
+        return None
+    return resp.data[0]
+
+
+def _mark_approval_card_resolved(
+    supabase: Client,
+    *,
+    card_message_id: str,
+    org_id: str,
+    approval_id: str,
+    decision: str,
+    reviewed_by: str,
+) -> None:
+    """UPDATE the approval-card channel_messages row's metadata in place
+    so the FE renders the resolved state. The supabase_realtime
+    publication includes UPDATE events on this table, so this fires the
+    FE to re-render.
+
+    Best-effort — failure leaves the card showing the buttons, but the
+    underlying approval row is already decided so a refresh re-syncs."""
+    try:
+        supabase.table("channel_messages").update({
+            "metadata": {
+                "kind": "approval",
+                "approval_id": approval_id,
+                "status": decision,
+                "reviewed_by": reviewed_by,
+            }
+        }).eq("id", card_message_id).eq("org_id", org_id).execute()
+    except Exception as e:
+        print(f"[channels] approval-card UPDATE failed: {e!r}", flush=True)
+
+
+@router.post("/channels/{channel_id}/approvals/{approval_id}/approve")
+async def approve_in_channel(
+    channel_id: str,
+    approval_id: str,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    """Approve a paused agent run from the inline channel card.
+
+    Splits the work in two:
+      1. Synchronous: locate the approval-card message and UPDATE its
+         metadata to {status: "approved", reviewed_by: <user>}. The
+         realtime UPDATE event fires immediately so the user sees the
+         card collapse to "approved by you" with no perceptible delay.
+      2. Background: drain the resume stream (the agent finishes its
+         work — sends the email, posts the YouTube comment, etc.) and
+         post the result back into the channel as a follow-up message.
+         If the resumed run pauses again at another gate, a fresh
+         approval card is posted.
+
+    The 202 Accepted response is intentional — the BG task races with
+    the user's next interaction. Returns the same Message shape as
+    other endpoints so the FE can drop it into local state immediately.
+    """
+    _assert_channel_in_org(supabase, channel_id=channel_id, org_id=user.org_id)
+
+    card = _find_approval_card_message(
+        supabase, channel_id=channel_id, org_id=user.org_id, approval_id=approval_id,
+    )
+    if card is None:
+        raise HTTPException(status_code=404, detail="Approval card not found in this channel")
+
+    _mark_approval_card_resolved(
+        supabase,
+        card_message_id=card["id"],
+        org_id=user.org_id,
+        approval_id=approval_id,
+        decision="approved",
+        reviewed_by=user.id,
+    )
+
+    background_tasks.add_task(
+        run_resume_to_channel_safely,
+        approval_id=approval_id,
+        decision="approved",
+        feedback=None,
+        channel_id=channel_id,
+        org_id=user.org_id,
+        user_id=user.id,
+        triggering_message_id=card["id"],
+        supabase=supabase,
+    )
+
+    return {"status": "approved", "approval_id": approval_id}
+
+
+@router.post("/channels/{channel_id}/approvals/{approval_id}/reject")
+async def reject_in_channel(
+    channel_id: str,
+    approval_id: str,
+    background_tasks: BackgroundTasks,
+    body: Optional[RejectApprovalInChannelRequest] = None,
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    """Reject a paused agent run from the inline channel card.
+
+    Mirrors `approve_in_channel` but routes the resume through the
+    `revise` branch so the agent regenerates the draft using the
+    provided feedback. The revised draft pauses at the same gate again,
+    and a fresh approval card is posted to the channel.
+    """
+    _assert_channel_in_org(supabase, channel_id=channel_id, org_id=user.org_id)
+
+    feedback = body.feedback if body else None
+
+    card = _find_approval_card_message(
+        supabase, channel_id=channel_id, org_id=user.org_id, approval_id=approval_id,
+    )
+    if card is None:
+        raise HTTPException(status_code=404, detail="Approval card not found in this channel")
+
+    _mark_approval_card_resolved(
+        supabase,
+        card_message_id=card["id"],
+        org_id=user.org_id,
+        approval_id=approval_id,
+        decision="rejected",
+        reviewed_by=user.id,
+    )
+
+    background_tasks.add_task(
+        run_resume_to_channel_safely,
+        approval_id=approval_id,
+        decision="rejected",
+        feedback=feedback,
+        channel_id=channel_id,
+        org_id=user.org_id,
+        user_id=user.id,
+        triggering_message_id=card["id"],
+        supabase=supabase,
+    )
+
+    return {"status": "rejected", "approval_id": approval_id}

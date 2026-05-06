@@ -14,6 +14,7 @@ import { MessageComposer } from "./MessageComposer";
 import type {
   Channel,
   ChannelMessage,
+  ChannelMessageMetadata,
   MentionableMaps,
 } from "./types";
 
@@ -154,6 +155,7 @@ export function ChannelView({ channel, mentionable }: ChannelViewProps) {
             mentioned_agent_slugs: string[];
             agent_run_id: string | null;
             in_reply_to_message_id: string | null;
+            metadata: ChannelMessageMetadata | null;
             created_at: string;
             edited_at: string | null;
           };
@@ -194,6 +196,7 @@ export function ChannelView({ channel, mentionable }: ChannelViewProps) {
             mentioned_agent_slugs: row.mentioned_agent_slugs ?? [],
             agent_run_id: row.agent_run_id,
             in_reply_to_message_id: row.in_reply_to_message_id,
+            metadata: row.metadata ?? {},
             created_at: row.created_at,
             edited_at: row.edited_at,
           };
@@ -206,6 +209,30 @@ export function ChannelView({ channel, mentionable }: ChannelViewProps) {
             }
             return [...prev, message];
           });
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          // UPDATEs fire when an approval card resolves (the channel
+          // approve/reject endpoint UPDATEs metadata in place to swap
+          // the buttons for a "approved by @sean" tag). The publication
+          // includes UPDATE events on this table, so we just need to
+          // listen and patch the in-memory row.
+          event: "UPDATE",
+          schema: "public",
+          table: "channel_messages",
+          filter: `channel_id=eq.${channel.id}`,
+        },
+        (payload) => {
+          const row = payload.new as { id: string; metadata: ChannelMessageMetadata | null; body: string };
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === row.id
+                ? { ...m, metadata: row.metadata ?? {}, body: row.body }
+                : m,
+            ),
+          );
         },
       )
       .subscribe();
@@ -269,6 +296,7 @@ export function ChannelView({ channel, mentionable }: ChannelViewProps) {
         mentioned_agent_slugs: [],
         agent_run_id: null,
         in_reply_to_message_id: null,
+        metadata: {},
         created_at: new Date().toISOString(),
         edited_at: null,
       };
