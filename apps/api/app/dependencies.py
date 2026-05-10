@@ -228,4 +228,17 @@ def _provision_personal_workspace(supabase: Client, user) -> dict:
         .execute()
     )
 
+    # Idempotent default-agent seeding (unique on org_id+slug). Without
+    # these rows, @mention autocomplete returns empty, mention parsing
+    # drops `@strategist`, and channel dispatch posts "isn't registered
+    # for this workspace" (see channel_dispatch._resolve_agent_id).
+    # Late import to keep the dependency graph one-way (apps → packages).
+    from packages.agents.registry import default_agent_seeds
+
+    (
+        supabase.table("agents")
+        .upsert(default_agent_seeds(org_row["id"]), on_conflict="org_id,slug")
+        .execute()
+    )
+
     return {"org_id": org_row["id"], "role": "owner"}
