@@ -10,7 +10,8 @@ Given the draft below, return a JSON object with these fields exactly:
   "thumbnail_ideas": ["...", "...", "..."],
   "social": {
     "twitter": "...",
-    "newsletter": "..."
+    "newsletter_subject": "...",
+    "newsletter_body": "..."
   }
 }
 
@@ -21,7 +22,8 @@ Rules:
 - `chapters` is a list of `{time, label}` objects. Keep the exact timestamp format from the draft (e.g. "0:00", "12:34", "1:02:15"); strip any em-dash or hyphen from the label.
 - `thumbnail_ideas` is a list of 3 short strings.
 - `social.twitter` is a single tweet string (≤ 280 chars).
-- `social.newsletter` is a single multi-line string (80–120 words), newlines preserved.
+- `social.newsletter_subject` is a single email subject line (≤ 70 chars), in the creator's voice — scroll-stopping in an inbox preview, not a clickbait headline.
+- `social.newsletter_body` is the full plain-text email body (120–250 words), newlines preserved. Include a short opener, the "what's in this one" pitch, and a `[link]` placeholder for the video URL. Do NOT wrap in HTML.
 
 If a section is missing from the draft, use sensible empty values (`[]`, `""`, `{}`) — do not invent content.
 

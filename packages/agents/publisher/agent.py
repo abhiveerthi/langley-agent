@@ -1,14 +1,16 @@
 """
 Publisher agent — packages YouTube videos into shippable metadata + social kits.
 
-Four graph paths, chosen by `state.intent`:
+Six graph paths, chosen by `state.intent`:
 
   - create_package    : fetch video context → generate kit → extract structured → persist
   - regenerate_field  : load package → regenerate one field → persist (that field only)
   - push_metadata     : load package → prepare diff → [interrupt: approval_gate] →
                           approved: update_video_metadata → mark package pushed
                           rejected: revise_metadata → approval_gate (loop)
-  - general           : ReAct loop over the 6 OAuth-backed tools for Q&A, SEO research
+  - push_x            : load package → prepare tweet → [interrupt] → post_to_x → mark
+  - push_newsletter   : load package → prepare email → [interrupt] → send_via_gmail → mark
+  - general           : ReAct loop over the OAuth-backed tools for Q&A, SEO research
 
 The orchestrator pre-sets `state.intent`, `state.video_id`, `state.package_id`, and
 `state.regen_field` when the Publisher API router kicks off a run via a one-click
@@ -43,7 +45,14 @@ from packages.integrations.context import current_supabase
 
 
 # Valid intents — treat anything else as "general".
-VALID_INTENTS = {"create_package", "regenerate_field", "push_metadata", "push_x", "general"}
+VALID_INTENTS = {
+    "create_package",
+    "regenerate_field",
+    "push_metadata",
+    "push_x",
+    "push_newsletter",
+    "general",
+}
 
 
 class PublisherState(BaseAgentState):
@@ -86,6 +95,13 @@ class PublisherState(BaseAgentState):
     x_push_result: str | None
     x_tweet_id: str | None
 
+    # Push-newsletter (Gmail) flow
+    proposed_newsletter_subject: str | None
+    proposed_newsletter_body: str | None
+    newsletter_recipient: str | None
+    newsletter_push_result: str | None
+    newsletter_message_id: str | None
+
     # Degraded-state marker, surfaced into publisher_packages.warning
     warning: str | None
 
@@ -96,7 +112,8 @@ class PublisherAgent(BaseAgent):
     description = (
         "Packages YouTube videos end-to-end: titles, descriptions, tags, chapters, "
         "thumbnail ideas, and social drafts (Twitter + newsletter). Pushes to "
-        "YouTube and posts to X — both gated behind explicit approval."
+        "YouTube, posts to X, and sends the newsletter via the connected Gmail "
+        "account — all gated behind explicit approval."
     )
     model = "claude-sonnet-4-6"
 
@@ -134,6 +151,22 @@ class PublisherAgent(BaseAgent):
                     "tweet_char_count": len(tweet),
                 },
                 "preview": f"Post to X: {tweet[:80]}…" if len(tweet) > 80 else f"Post to X: {tweet}",
+            }
+        if intent == "push_newsletter":
+            subject = state.get("proposed_newsletter_subject") or ""
+            body = state.get("proposed_newsletter_body") or ""
+            recipient = state.get("newsletter_recipient") or ""
+            return {
+                "action_type": "send_newsletter",
+                "action_payload": {
+                    "package_id": state.get("package_id"),
+                    "video_id": state.get("video_id"),
+                    "to": recipient,
+                    "subject": subject,
+                    "body": body,
+                    "body_word_count": len(body.split()) if body else 0,
+                },
+                "preview": f"Send newsletter to {recipient}: {subject}"[:500],
             }
         return None
 
@@ -176,6 +209,12 @@ class PublisherAgent(BaseAgent):
         graph.add_node("mark_x_pushed", self._mark_x_pushed_node)
         graph.add_node("revise_tweet", self._revise_tweet_node)
 
+        # push_newsletter branch (Gmail send). Reuses approval_gate.
+        graph.add_node("prepare_newsletter_push", self._prepare_newsletter_push_node)
+        graph.add_node("send_newsletter", self._send_newsletter_node)
+        graph.add_node("mark_newsletter_sent", self._mark_newsletter_sent_node)
+        graph.add_node("revise_newsletter", self._revise_newsletter_node)
+
         # general branch (ReAct)
         graph.add_node("react_agent", self._react_agent_node)
         graph.add_node("react_tools", self.tool_node)
@@ -194,6 +233,7 @@ class PublisherAgent(BaseAgent):
                 "regenerate_field": "load_package",
                 "push_metadata": "load_package",
                 "push_x": "load_package",
+                "push_newsletter": "load_package",
                 "general": "react_agent",
             },
         )
@@ -204,7 +244,7 @@ class PublisherAgent(BaseAgent):
         graph.add_edge("extract_structured", "persist_package")
         graph.add_edge("persist_package", "respond")
 
-        # load_package fan-out: regen vs push (YouTube) vs push (X)
+        # load_package fan-out: regen vs push (YouTube) vs push (X) vs push (newsletter)
         graph.add_conditional_edges(
             "load_package",
             self._route_after_load,
@@ -212,6 +252,7 @@ class PublisherAgent(BaseAgent):
                 "regenerate_field": "regenerate_field",
                 "push_metadata": "prepare_push",
                 "push_x": "prepare_x_push",
+                "push_newsletter": "prepare_newsletter_push",
             },
         )
 
@@ -219,18 +260,22 @@ class PublisherAgent(BaseAgent):
         graph.add_edge("regenerate_field", "persist_regen")
         graph.add_edge("persist_regen", "respond")
 
-        # push_metadata + push_x both flow through approval_gate; the post-gate
-        # split is intent-aware so a YouTube push doesn't accidentally fire a tweet.
+        # All three push lanes (metadata / X / newsletter) flow through the
+        # same approval_gate; the post-gate split is intent-aware so a
+        # YouTube push doesn't accidentally fire a tweet or send an email.
         graph.add_edge("prepare_push", "approval_gate")
         graph.add_edge("prepare_x_push", "approval_gate")
+        graph.add_edge("prepare_newsletter_push", "approval_gate")
         graph.add_conditional_edges(
             "approval_gate",
             self._route_by_approval,
             {
                 "approved_push_metadata": "push_metadata",
                 "approved_push_x": "post_to_x",
+                "approved_push_newsletter": "send_newsletter",
                 "rejected_push_metadata": "revise_metadata",
                 "rejected_push_x": "revise_tweet",
+                "rejected_push_newsletter": "revise_newsletter",
             },
         )
         graph.add_edge("push_metadata", "mark_pushed")
@@ -239,6 +284,9 @@ class PublisherAgent(BaseAgent):
         graph.add_edge("post_to_x", "mark_x_pushed")
         graph.add_edge("mark_x_pushed", "respond")
         graph.add_edge("revise_tweet", "approval_gate")
+        graph.add_edge("send_newsletter", "mark_newsletter_sent")
+        graph.add_edge("mark_newsletter_sent", "respond")
+        graph.add_edge("revise_newsletter", "approval_gate")
 
         # general ReAct sub-loop: react_agent ↔ react_tools; exits on no tool_calls
         graph.add_conditional_edges(
@@ -285,9 +333,14 @@ class PublisherAgent(BaseAgent):
     def _route_by_approval(self, state: PublisherState) -> str:
         status = (state.get("approval_status") or "approved").lower()
         intent = state.get("intent") or "push_metadata"
-        # `push_x` is the only non-default intent that hits this gate; default
-        # everything else to the YouTube push lane.
-        lane = "push_x" if intent == "push_x" else "push_metadata"
+        # Three push lanes hit this gate; everything else defaults to the
+        # YouTube metadata lane (the original gated path).
+        if intent == "push_x":
+            lane = "push_x"
+        elif intent == "push_newsletter":
+            lane = "push_newsletter"
+        else:
+            lane = "push_metadata"
         outcome = "rejected" if status == "rejected" else "approved"
         return f"{outcome}_{lane}"
 
@@ -452,7 +505,12 @@ class PublisherAgent(BaseAgent):
         all_empty = (
             not title_variants and not description and not tags
             and not chapters and not thumbnail_ideas
-            and not (social.get("twitter") or social.get("newsletter"))
+            and not (
+                social.get("twitter")
+                or social.get("newsletter")
+                or social.get("newsletter_subject")
+                or social.get("newsletter_body")
+            )
         )
         if all_empty:
             warning = _append_warning(warning, "agent produced empty kit — check transcript + retry")
@@ -578,7 +636,12 @@ class PublisherAgent(BaseAgent):
             return {}
 
         patch: dict[str, Any] = {"updated_at": _now_iso()}
-        if field == "social.twitter" or field == "social.newsletter":
+        if field in {
+            "social.twitter",
+            "social.newsletter",
+            "social.newsletter_subject",
+            "social.newsletter_body",
+        }:
             existing = (state.get("existing_package") or {}).get("social") or {}
             key = field.split(".", 1)[1]
             patch["social"] = {**existing, key: value}
@@ -809,6 +872,170 @@ class PublisherAgent(BaseAgent):
             "feedback": None,
         }
 
+    # ── push_newsletter branch (Gmail) ────────────────────────────────────
+    async def _prepare_newsletter_push_node(self, state: PublisherState):
+        """Pull `social.newsletter_subject` + `social.newsletter_body` off the
+        package row and resolve a recipient. Recipient precedence:
+
+          1. `state.newsletter_recipient` — explicit override from the API
+             call or chat ("send the newsletter to list@example.com")
+          2. `profile.brand.primary_email` — the creator's own address;
+             default for "email me the newsletter" usage. Self-send is the
+             honest v1 — Gmail isn't a newsletter platform, so we land
+             the polished draft in their inbox to forward / paste from.
+
+        If neither resolves, surface a "no recipient" warning that the
+        approval card can render so the user knows what to fix before
+        approving.
+        """
+        pkg = state.get("existing_package") or {}
+        social = pkg.get("social") or {}
+
+        # Newsletter copy can live as a single blob (`social.newsletter`)
+        # or as the richer subject+body split. Prefer the split when it
+        # exists; fall back to the blob as the body with a derived subject.
+        subject = (social.get("newsletter_subject") or "").strip()
+        body = (social.get("newsletter_body") or social.get("newsletter") or "").strip()
+        if not subject:
+            video_title = (state.get("video_title") or pkg.get("video_title") or "").strip()
+            subject = f"New video: {video_title}" if video_title else "New video drop"
+
+        explicit = (state.get("newsletter_recipient") or "").strip()
+        profile = self._profile(state)
+        fallback = (profile.brand.primary_email or "").strip()
+        recipient = explicit or fallback
+
+        return {
+            "proposed_newsletter_subject": subject,
+            "proposed_newsletter_body": body,
+            "newsletter_recipient": recipient,
+            "approval_status": "pending",
+        }
+
+    async def _send_newsletter_node(self, state: PublisherState):
+        """Resume on approve — call send_newsletter_via_gmail with the
+        approved subject/body/recipient."""
+        from packages.agents.publisher.tools import send_newsletter_via_gmail
+
+        recipient = (state.get("newsletter_recipient") or "").strip()
+        subject = (state.get("proposed_newsletter_subject") or "").strip()
+        body = (state.get("proposed_newsletter_body") or "").strip()
+
+        if not recipient or not subject or not body:
+            missing = ", ".join(
+                k for k, v in (
+                    ("recipient", recipient), ("subject", subject), ("body", body)
+                ) if not v
+            )
+            return {
+                "newsletter_push_result": f"Error: missing required field(s): {missing}",
+                "approval_status": "approved",
+            }
+
+        result = await _safe_tool(send_newsletter_via_gmail, {
+            "to": recipient,
+            "subject": subject,
+            "body": body,
+        })
+        # Pull message_id back out of the success line, if present.
+        message_id = None
+        if isinstance(result, str) and "message_id=" in result:
+            try:
+                message_id = result.split("message_id=", 1)[1].split()[0].strip()
+            except Exception:
+                message_id = None
+        return {
+            "newsletter_push_result": result,
+            "newsletter_message_id": message_id,
+            "approval_status": "approved",
+        }
+
+    async def _mark_newsletter_sent_node(self, state: PublisherState):
+        """Persist newsletter_sent_at + newsletter_message_id on the package
+        row. Skip when the send returned an error so the timestamp only
+        flips on a real success."""
+        result = state.get("newsletter_push_result") or ""
+        if not state.get("newsletter_message_id") or (
+            isinstance(result, str) and result.startswith("Error")
+        ):
+            return {}
+        supabase = current_supabase.get()
+        pkg_id = state.get("package_id")
+        if supabase is None or not pkg_id:
+            return {}
+        try:
+            supabase.table("publisher_packages").update({
+                "newsletter_sent_at": _now_iso(),
+                "newsletter_message_id": state.get("newsletter_message_id"),
+                "updated_at": _now_iso(),
+            }).eq("id", pkg_id).execute()
+        except Exception:
+            pass
+        return {}
+
+    async def _revise_newsletter_node(self, state: PublisherState):
+        """User rejected the newsletter — rewrite subject + body per feedback,
+        persist back to social.newsletter_{subject,body}, loop to gate."""
+        profile = self._profile(state)
+        current_subject = state.get("proposed_newsletter_subject") or ""
+        current_body = state.get("proposed_newsletter_body") or ""
+        context = (
+            f"CURRENT SUBJECT: {current_subject}\n\n"
+            f"CURRENT BODY:\n{current_body}\n\n"
+            f"USER FEEDBACK:\n{state.get('feedback') or '(no specific feedback)'}\n\n"
+            "Rewrite the newsletter subject + body. Body 80–200 words, "
+            'plain text with paragraph breaks. Return ONLY JSON: '
+            '{"subject": "...", "body": "..."}'
+        )
+        system_msg = (
+            f"You are revising a newsletter for {profile.brand.name} "
+            f"(voice: {profile.brand.voice}) based on user feedback. Return ONLY a "
+            'JSON object with keys "subject" and "body".'
+        )
+        response = await self.llm.ainvoke([
+            SystemMessage(content=system_msg),
+            HumanMessage(content=context),
+        ])
+        raw = response.content if isinstance(response.content, str) else _flatten_content(response.content)
+        cleaned = self._strip_json_fences(raw)
+        new_subject = current_subject
+        new_body = current_body
+        try:
+            parsed = json.loads(cleaned)
+            cand_s = (parsed.get("subject") or "").strip()
+            cand_b = (parsed.get("body") or "").strip()
+            if cand_s:
+                new_subject = cand_s
+            if cand_b:
+                new_body = cand_b
+        except Exception:
+            pass
+
+        # Mirror the X / YouTube revise pattern: persist back to the package
+        # so the detail page reflects the revision in real time.
+        supabase = current_supabase.get()
+        pkg_id = state.get("package_id")
+        if supabase is not None and pkg_id:
+            existing_social = (state.get("existing_package") or {}).get("social") or {}
+            try:
+                supabase.table("publisher_packages").update({
+                    "social": {
+                        **existing_social,
+                        "newsletter_subject": new_subject,
+                        "newsletter_body": new_body,
+                    },
+                    "updated_at": _now_iso(),
+                }).eq("id", pkg_id).execute()
+            except Exception:
+                pass
+
+        return {
+            "proposed_newsletter_subject": new_subject,
+            "proposed_newsletter_body": new_body,
+            "approval_status": "pending",
+            "feedback": None,
+        }
+
     # ── general branch (ReAct) ────────────────────────────────────────────
     async def _react_agent_node(self, state: PublisherState):
         profile = self._profile(state)
@@ -900,9 +1127,14 @@ def _as_chapters(value: Any) -> list[dict]:
 def _as_social(value: Any) -> dict:
     if not isinstance(value, dict):
         return {}
+    # `newsletter` (legacy single-blob blurb) is preserved for back-compat
+    # with packages generated before the subject/body split. New packages
+    # produce the split fields; both shapes are accepted by the push lane.
     return {
         "twitter": str(value.get("twitter") or ""),
         "newsletter": str(value.get("newsletter") or ""),
+        "newsletter_subject": str(value.get("newsletter_subject") or ""),
+        "newsletter_body": str(value.get("newsletter_body") or ""),
     }
 
 

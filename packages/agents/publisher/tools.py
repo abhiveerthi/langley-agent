@@ -6,6 +6,11 @@ from langchain_core.tools import tool
 
 from packages.agents.core.clients import perplexity_search, youtube_api_get
 from packages.integrations.context import current_org_id, current_supabase
+from packages.integrations.gmail.client import (
+    get_connection as gmail_get_connection,
+    get_fresh_access_token as gmail_get_fresh_access_token,
+    send_message as gmail_send_message,
+)
 from packages.integrations.x.client import (
     get_fresh_access_token as x_get_fresh_access_token,
     post_tweet as x_post_tweet,
@@ -349,6 +354,84 @@ async def post_tweet(text: str) -> str:
     return f"✓ Posted to X: tweet_id={tweet_id}{suffix}"
 
 
+# ── Gmail send (newsletter) ────────────────────────────────────────────────
+async def _gmail_access_token(org_id, supabase) -> tuple[str | None, str | None]:
+    import os
+    # Gmail uses the same Google OAuth client as YouTube but the scopes
+    # are stored separately on the integrations row, so connection lookup
+    # is keyed on provider='gmail'.
+    client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+    if not client_id or not client_secret:
+        return None, "Google OAuth is not configured on the server."
+    try:
+        token = await gmail_get_fresh_access_token(supabase, org_id, client_id, client_secret)
+        return token, None
+    except RuntimeError as e:
+        return None, str(e)
+
+
+@tool
+async def send_newsletter_via_gmail(
+    to: str,
+    subject: str,
+    body: str,
+) -> str:
+    """Send the polished newsletter draft from this org's connected Gmail account.
+
+    APPROVAL REQUIRED. Only call after the creator has explicitly approved
+    this exact subject + body + recipient. The Publisher graph routes
+    push_newsletter through approval_gate; do not bypass.
+
+    Args:
+        to: Single recipient email address (or comma-separated list).
+            For "send to my list" use a single mailing-list address — Gmail
+            isn't a newsletter platform and per-recipient quotas (500/day on
+            consumer Gmail, 2000/day on Workspace) apply.
+        subject: Email subject line.
+        body: Plain-text email body. Newlines preserved.
+    """
+    org_id, supabase, err = _oauth_context()
+    if err:
+        return f"Error: {err}"
+
+    token, err = await _gmail_access_token(org_id, supabase)
+    if err:
+        return f"Error: {err}"
+
+    # Pull connected Gmail address from the integrations metadata so the
+    # From header matches the actual sending account (Gmail rewrites it
+    # anyway, but explicit beats implicit and keeps reply-to coherent).
+    from_email: str | None = None
+    from_name: str | None = None
+    try:
+        conn = gmail_get_connection(supabase, org_id)
+        meta = (conn or {}).get("metadata") or {}
+        from_email = meta.get("email")
+        from_name = meta.get("name")
+    except Exception:
+        from_email = None
+
+    if not from_email:
+        return "Error: Gmail account email is missing from the connection metadata; reconnect Gmail."
+
+    try:
+        result = await gmail_send_message(
+            token,
+            to=to,
+            subject=subject,
+            body_text=body,
+            from_email=from_email,
+            from_name=from_name,
+            reply_to=from_email,
+        )
+    except RuntimeError as e:
+        return f"Error: {e}"
+
+    msg_id = result.get("id")
+    return f"✓ Sent newsletter via Gmail: message_id={msg_id} to={to}"
+
+
 @tool
 async def list_packages(limit: int = 10) -> str:
     """List recent Publisher packages for this org.
@@ -555,6 +638,7 @@ def get_publisher_tools():
         get_video_transcript,
         update_video_metadata,
         post_tweet,
+        send_newsletter_via_gmail,
         list_packages,
         get_package,
         get_package_by_video,

@@ -127,3 +127,92 @@ def mark_connection_error(supabase: Client, org_id: str, error: str) -> None:
         .eq("provider", PROVIDER)
         .execute()
     )
+
+
+# ── Outgoing message send ─────────────────────────────────────────────────
+# Gmail's `users.messages.send` takes a single field: a base64url-encoded
+# RFC 2822 message. Plain text only here; multipart/alternative + HTML can
+# slot in later if newsletter formatting outgrows plain.
+import base64
+from email.message import EmailMessage
+
+import httpx
+
+GMAIL_SEND_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+
+
+def _build_rfc2822(
+    *,
+    to: str,
+    subject: str,
+    body_text: str,
+    from_email: str,
+    from_name: str | None = None,
+    reply_to: str | None = None,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+) -> bytes:
+    msg = EmailMessage()
+    msg["From"] = f"{from_name} <{from_email}>" if from_name else from_email
+    msg["To"] = to
+    msg["Subject"] = subject
+    if reply_to:
+        msg["Reply-To"] = reply_to
+    if cc:
+        msg["Cc"] = ", ".join(cc)
+    if bcc:
+        # Bcc on the EmailMessage is honored by Gmail when sent via the API
+        # (it strips the header before delivery, same as a normal MUA).
+        msg["Bcc"] = ", ".join(bcc)
+    msg.set_content(body_text)
+    return bytes(msg)
+
+
+async def send_message(
+    access_token: str,
+    *,
+    to: str,
+    subject: str,
+    body_text: str,
+    from_email: str,
+    from_name: str | None = None,
+    reply_to: str | None = None,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+) -> dict:
+    """Send a plain-text email via Gmail's REST API.
+
+    Returns the parsed JSON body of the send response — at minimum
+    `{"id": "<gmail message id>", "threadId": "...", "labelIds": [...]}`.
+    Raises `RuntimeError` on any non-2xx so callers can surface the
+    error string to the user.
+    """
+    raw = _build_rfc2822(
+        to=to,
+        subject=subject,
+        body_text=body_text,
+        from_email=from_email,
+        from_name=from_name,
+        reply_to=reply_to,
+        cc=cc,
+        bcc=bcc,
+    )
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            GMAIL_SEND_ENDPOINT,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json={"raw": encoded},
+        )
+
+    if resp.status_code >= 400:
+        # Gmail returns structured errors in `error.message`. Surface the
+        # whole body for diagnostics; the agent layer trims for UI.
+        raise RuntimeError(
+            f"Gmail send failed ({resp.status_code}): {resp.text[:500]}"
+        )
+    return resp.json()
