@@ -64,6 +64,15 @@ class PushRequest(BaseModel):
     selected_title: Optional[str] = None
 
 
+class SendNewsletterRequest(BaseModel):
+    """Optional override for the newsletter recipient. When omitted the
+    Publisher graph defaults to the org's brand.primary_email (self-send
+    preview). Pass an explicit address to send to a single subscriber or
+    a small list — Gmail's per-day quota (500 consumer / 2000 Workspace)
+    means this isn't a substitute for a real newsletter platform."""
+    to: Optional[str] = None
+
+
 class PatchRequest(BaseModel):
     """Any subset of editable fields. Anything omitted is left unchanged."""
     title_variants: Optional[list[str]] = None
@@ -371,6 +380,59 @@ async def post_to_x(
             "video_title": pkg.get("video_title"),
             "proposed_tweet": tweet,
         },
+    )
+    asyncio.create_task(_run_in_background(
+        gen, org_id=user.org_id, user_id=user.id, supabase=supabase, package_id=package_id,
+    ))
+    return {"thread_id": thread_id}
+
+
+@router.post("/publisher/packages/{package_id}/send-newsletter")
+async def send_newsletter(
+    package_id: str,
+    body: SendNewsletterRequest | None = None,
+    user: CurrentUser = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    """Kick off the newsletter send flow for a package.
+
+    Pulls subject + body from the package's social.newsletter_{subject,body}
+    fields (falling back to the legacy `social.newsletter` blob) and pauses
+    at the approval gate. The recipient defaults to the org's
+    brand.primary_email unless `body.to` is supplied.
+    """
+    pkg = _get_package_or_404(supabase, user.org_id, package_id)
+    if pkg.get("status") == "generating":
+        raise HTTPException(409, "Package is still generating — try again when status=draft")
+
+    social = pkg.get("social") or {}
+    has_body = bool(
+        (social.get("newsletter_body") or "").strip()
+        or (social.get("newsletter") or "").strip()
+    )
+    if not has_body:
+        raise HTTPException(
+            400,
+            "Package has no newsletter copy yet — regenerate social.newsletter_body first",
+        )
+
+    thread_id = str(uuid4())
+    extra_state: dict = {
+        "intent": "push_newsletter",
+        "package_id": package_id,
+        "video_id": pkg.get("video_id"),
+        "video_title": pkg.get("video_title"),
+    }
+    if body and body.to:
+        extra_state["newsletter_recipient"] = body.to
+
+    gen = stream_new_run(
+        agent_slug="publisher",
+        message=f"Send newsletter for package {package_id}",
+        thread_id=thread_id,
+        org_id=user.org_id,
+        user_id=user.id,
+        extra_state=extra_state,
     )
     asyncio.create_task(_run_in_background(
         gen, org_id=user.org_id, user_id=user.id, supabase=supabase, package_id=package_id,

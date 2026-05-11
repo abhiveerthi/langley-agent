@@ -25,6 +25,10 @@ Return a JSON array of exactly 3 short overlay-text strings. Example: `["THE REA
 Return a JSON string — a single tweet ≤ 280 chars. Example: `"Just dropped a new video on ... here's the one takeaway that surprised me."`
 {% elif field == "social.newsletter" %}
 Return a JSON string — 80–120 word newsletter blurb. Preserve newlines as `\n`. Use `[link]` as the video URL placeholder.
+{% elif field == "social.newsletter_subject" %}
+Return a JSON string — a single email subject line ≤ 70 chars, in the creator's voice. Example: `"The ramen technique I had backwards for 5 years"`.
+{% elif field == "social.newsletter_body" %}
+Return a JSON string — full plain-text email body (120–250 words). Preserve newlines as `\n`. Open with a hook, pitch what's in the video, end with a `[link]` placeholder. No HTML.
 {% else %}
 Return valid JSON matching the shape of the field in the existing package. Do not invent extra fields.
 {% endif %}
