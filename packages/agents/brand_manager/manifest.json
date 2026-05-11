@@ -7,14 +7,23 @@
   "tagline": "Gets you paid.",
   "capabilities": ["outreach", "sales", "crm", "writing"],
   "required_integrations": ["resend"],
-  "optional_integrations": ["youtube", "slack"],
+  "optional_integrations": ["youtube"],
   "tools": [
     "find_sponsor_leads",
     "research_brand",
     "get_channel_stats",
-    "send_pitch_email"
+    "send_pitch_email",
+    "list_active_deals_tool"
   ],
   "interrupt_before": ["approval_gate"],
+  "writes": [
+    {
+      "tool": "send_pitch_email",
+      "label": "Send pitch email",
+      "description": "Sends the approved sponsor pitch via Resend using the configured sending domain. Logs the deal as 'pitched' in brand_deals on success.",
+      "requires": "resend"
+    }
+  ],
   "config_schema": {
     "sender_name": { "type": "string", "label": "Sender display name (defaults to brand.name)" },
     "min_deal_value_usd": { "type": "number", "default": 0, "label": "Minimum deal value to pursue" }

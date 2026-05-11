@@ -108,14 +108,25 @@ class _MockQuery:
 
         if self._mode == "upsert":
             conflict_cols = ((getattr(self, "_upsert_conflict", None) or "id")).split(",")
-            for r in rows:
-                if all(r.get(c) == self._payload.get(c) for c in conflict_cols):
-                    r.update(self._payload)
-                    return _MockResult([deepcopy(r)])
-            new_row = dict(self._payload)
-            new_row.setdefault("id", str(uuid.uuid4()))
-            rows.append(new_row)
-            return _MockResult([deepcopy(new_row)])
+            # Real Supabase accepts either a single dict or a list of dicts;
+            # the agent seeder (apps/api/app/dependencies.py) passes a list,
+            # so the mock needs to handle both.
+            payloads = self._payload if isinstance(self._payload, list) else [self._payload]
+            results: list[dict] = []
+            for payload in payloads:
+                matched = False
+                for r in rows:
+                    if all(r.get(c) == payload.get(c) for c in conflict_cols):
+                        r.update(payload)
+                        results.append(deepcopy(r))
+                        matched = True
+                        break
+                if not matched:
+                    new_row = dict(payload)
+                    new_row.setdefault("id", str(uuid.uuid4()))
+                    rows.append(new_row)
+                    results.append(deepcopy(new_row))
+            return _MockResult(results)
 
         if self._mode == "update":
             updated = []

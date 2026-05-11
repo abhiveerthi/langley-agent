@@ -1,21 +1,37 @@
 {
   "slug": "editor",
   "name": "Editor",
-  "description": "Cuts long-form videos into ready-to-post shorts. Selects highlight moments, applies the brand template, overlays captions, and exports in platform-specific formats.",
-  "version": "0.0.1",
+  "description": "Planned: cuts long-form videos into ready-to-post shorts. Currently a stub — no video worker is wired yet, so the agent acknowledges requests and redirects to other agents in the meantime.",
+  "version": "0.0.2",
   "icon": "scissors",
   "tagline": "Cuts your long-form videos into ready-to-post shorts.",
   "status": "coming-soon",
-  "capabilities": ["video-processing", "transcription", "captioning", "editing"],
-  "required_integrations": ["youtube"],
-  "optional_integrations": ["google", "dropbox"],
-  "tools": [
-    "youtube_get_video",
-    "transcribe_video",
-    "extract_highlight_clip",
-    "render_short"
-  ],
-  "interrupt_before": ["publish_short"],
+  "capabilities": [],
+  "required_integrations": [],
+  "optional_integrations": [],
+  "tools": [],
+  "interrupt_before": [],
+  "writes": [],
+  "planned": {
+    "capabilities": ["video-processing", "transcription", "captioning", "editing"],
+    "required_integrations": ["youtube"],
+    "optional_integrations": ["google", "dropbox"],
+    "tools": [
+      "youtube_get_video",
+      "transcribe_video",
+      "extract_highlight_clip",
+      "render_short"
+    ],
+    "writes": [
+      {
+        "tool": "render_short",
+        "label": "Publish short",
+        "description": "Renders + publishes the short to the connected channel.",
+        "requires": "youtube"
+      }
+    ],
+    "blocker": "Needs a video worker service (FFmpeg / Whisper / Shotstack) on GPU-capable infrastructure — out of scope for MVP."
+  },
   "config_schema": {
     "aspect_ratios": { "type": "array", "default": ["9:16"], "label": "Output aspect ratios" },
     "max_clip_length_s": { "type": "number", "default": 60, "label": "Max clip length (seconds)" },

@@ -74,7 +74,12 @@ class TestRegistry:
             return  # No gates — no contract to enforce.
 
         # Sample state with the fields a typical approval-gated agent uses.
+        # `intent` is set to publisher's primary write lane so its multi-lane
+        # `get_approval_request` resolves to a real branch — BM/CM ignore
+        # `intent` here (they have a single approval card), so this doesn't
+        # affect them.
         sample_state = {
+            "intent": "push_metadata",
             "draft": "test draft body",
             "recipient": "test@example.com",
             "subject": "Test",
