@@ -441,6 +441,32 @@ class CommunityManagerAgent(BaseAgent):
         except Exception as e:
             print(f"[community_manager] task spawn failed: {e!r}", flush=True)
 
+        # Archive the triage payload (structured items + raw chat narrative)
+        # to Storage Library so the creator can scroll back through past
+        # runs at /app/storage. JSON because the structured form is the
+        # primary value — easy to diff between runs and feed back into
+        # downstream tools.
+        import json as _json
+        from datetime import datetime, timezone
+        from packages.agents.core.storage_export import export_to_storage
+
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+        report_payload = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "thread_id": thread_id if _is_real_uuid(thread_id) else None,
+            "items": [item.model_dump() for item in extraction.items],
+            "narrative": last_ai.content,
+        }
+        await export_to_storage(
+            org_id=org_id,
+            agent_slug=self.slug,
+            kind="report",
+            filename=f"triage-{ts}.json",
+            content=_json.dumps(report_payload, indent=2, ensure_ascii=False),
+            mime_type="application/json",
+            tags=["triage"],
+        )
+
         return {"metadata": meta_update}
 
     async def _fetch_recent_comments_node(self, state: CommunityManagerState):

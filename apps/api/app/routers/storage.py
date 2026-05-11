@@ -44,7 +44,9 @@ BUCKET = "org-assets"
 
 ALLOWED_KINDS = {
     "upload", "brief", "package", "script",
-    "thumbnail", "image", "video", "audio", "other",
+    "thumbnail", "image", "video", "audio",
+    "pitch", "report",
+    "other",
 }
 
 # Whitelist for the slugified filename portion of the storage path. Anything

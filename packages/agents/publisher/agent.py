@@ -478,9 +478,41 @@ class PublisherAgent(BaseAgent):
                 .execute()
             )
             saved = resp.data[0] if resp.data else {}
-            return {"package_id": saved.get("id") or state.get("package_id")}
+            package_id = saved.get("id") or state.get("package_id")
         except Exception as e:
             return {"warning": f"persist failed: {e}"[:500]}
+
+        # Drop a JSON snapshot of the kit into Storage Library so the creator
+        # can browse old packages at /app/storage even after they've pushed
+        # to YouTube. The DB row is the live record; this is the archival
+        # copy. Best-effort — does not affect the user-facing flow.
+        import json as _json
+        from packages.agents.core.storage_export import export_to_storage
+
+        export_payload = {
+            "video_id": row["video_id"],
+            "video_title": row["video_title"],
+            "title_variants": title_variants,
+            "description": description,
+            "tags": tags,
+            "chapters": chapters,
+            "thumbnail_ideas": thumbnail_ideas,
+            "social": social,
+            "warning": warning,
+        }
+        safe_video_id = row["video_id"] or "package"
+        await export_to_storage(
+            org_id=org_id,
+            agent_slug=self.slug,
+            kind="package",
+            filename=f"{safe_video_id}-package.json",
+            content=_json.dumps(export_payload, indent=2, ensure_ascii=False),
+            mime_type="application/json",
+            source_id=package_id,
+            tags=[safe_video_id],
+        )
+
+        return {"package_id": package_id}
 
     # ── regen + push: load an existing package ────────────────────────────
     async def _load_package_node(self, state: PublisherState):

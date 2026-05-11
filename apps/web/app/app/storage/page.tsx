@@ -50,6 +50,8 @@ type AssetKind =
   | "brief"
   | "package"
   | "script"
+  | "pitch"
+  | "report"
   | "thumbnail"
   | "image"
   | "video"
@@ -68,6 +70,8 @@ const KIND_TABS: { key: KindTab; label: string }[] = [
   { key: "upload", label: "Uploads" },
   { key: "brief", label: "Briefs" },
   { key: "package", label: "Packages" },
+  { key: "pitch", label: "Pitches" },
+  { key: "report", label: "Reports" },
   { key: "script", label: "Scripts" },
   { key: "thumbnail", label: "Thumbnails" },
   { key: "image", label: "Images" },
@@ -114,7 +118,15 @@ function iconForKind(kind: AssetKind): React.ElementType {
   if (kind === "image" || kind === "thumbnail") return ImageIcon;
   if (kind === "video") return Video;
   if (kind === "audio") return Music;
-  if (kind === "brief" || kind === "package" || kind === "script") return FileText;
+  if (
+    kind === "brief" ||
+    kind === "package" ||
+    kind === "script" ||
+    kind === "pitch" ||
+    kind === "report"
+  ) {
+    return FileText;
+  }
   return FileIcon;
 }
 
@@ -133,6 +145,10 @@ function colorForKind(kind: AssetKind): string {
       return "text-sky-400 bg-sky-500/10 border-sky-500/20";
     case "script":
       return "text-amber-400 bg-amber-500/10 border-amber-500/20";
+    case "pitch":
+      return "text-rose-400 bg-rose-500/10 border-rose-500/20";
+    case "report":
+      return "text-teal-400 bg-teal-500/10 border-teal-500/20";
     default:
       return "text-muted-foreground bg-muted/30 border-border";
   }
