@@ -267,6 +267,43 @@ class StrategistAgent(BaseAgent):
             # Persistence is best-effort. Don't fail the run on it.
             pass
 
+        # ── Step 1b: drop a Markdown copy into Storage Library ───────────
+        # The DB row above is the structured form (peer agents read it).
+        # The Markdown export is the human-readable form the creator can
+        # reopen from /app/storage and share. Same render the chat uses
+        # in _respond_node — kept literal here so the file matches what
+        # the creator already saw.
+        from packages.agents.core.storage_export import export_to_storage
+        from datetime import datetime, timezone
+
+        md_lines = [f"# {brief.get('headline', 'Weekly brief')}", ""]
+        for i, idea in enumerate(brief.get("ideas") or [], 1):
+            md_lines.append(f"## {i}. {idea.get('title', '')}".rstrip())
+            if idea.get("hook"):
+                md_lines.append(f"**Hook:** {idea['hook']}")
+            if idea.get("why_now"):
+                md_lines.append(f"**Why now:** {idea['why_now']}")
+            if idea.get("confidence"):
+                md_lines.append(
+                    f"**Confidence:** {idea['confidence']}"
+                    + (f" — {idea['rationale']}" if idea.get("rationale") else "")
+                )
+            if idea.get("citations"):
+                md_lines.append(f"*Cites:* {'; '.join(idea['citations'])}")
+            md_lines.append("")
+        md_body = "\n".join(md_lines).rstrip() + "\n"
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        await export_to_storage(
+            org_id=org_id,
+            agent_slug=self.slug,
+            kind="brief",
+            filename=f"weekly-brief-{ts}.md",
+            content=md_body,
+            mime_type="text/markdown",
+            source_id=brief_id,
+            tags=["weekly-brief"],
+        )
+
         # ── Step 2: spawn one task per ranked idea ───────────────────────
         # Each idea becomes a To-Do so the user can move it across the
         # /app/tasks Kanban as they work through the week. Body of the

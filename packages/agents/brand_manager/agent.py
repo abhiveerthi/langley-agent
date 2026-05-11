@@ -346,6 +346,35 @@ USER FEEDBACK:
             send_result=result,
         )
 
+        # Archive the sent pitch as Markdown in Storage Library so the
+        # creator can reopen exactly what was sent (audit trail). The
+        # Resend message ID is captured in brand_deals; the readable copy
+        # lives here. Best-effort — never fails the send path.
+        from packages.agents.core.storage_export import export_to_storage
+        from datetime import datetime, timezone
+
+        recipient = state.get("recipient", "")
+        subject = state.get("subject", "")
+        body = state.get("body", "")
+        brand_name = self._last_user_text(state) or "brand"
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+        pitch_md = (
+            f"# Pitch to {brand_name}\n\n"
+            f"**To:** {recipient}\n"
+            f"**Subject:** {subject}\n"
+            f"**Sent:** {datetime.now(timezone.utc).isoformat()}\n\n"
+            f"---\n\n{body}\n"
+        )
+        await export_to_storage(
+            org_id=state.get("org_id") or "",
+            agent_slug=self.slug,
+            kind="pitch",
+            filename=f"pitch-{brand_name}-{ts}.md",
+            content=pitch_md,
+            mime_type="text/markdown",
+            tags=[brand_name],
+        )
+
         return {"send_result": result, "approval_status": "approved"}
 
     # ── shared terminal ────────────────────────────────────────────────────
