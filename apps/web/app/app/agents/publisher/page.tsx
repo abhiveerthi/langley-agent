@@ -103,6 +103,12 @@ const packageStatusLabel: Record<PublisherPackage["status"], string> = {
   pushed:       "Pushed to YouTube",
 };
 
+// IMPORTANT: keep this in sync with packages/agents/publisher/manifest.json.
+// The manifest is the single source of truth for what Publisher can actually
+// do — the test in tests/test_manifest_truth.py fails CI on drift between
+// manifest.tools and the registered get_publisher_tools(). When you add a
+// tool or write lane there, mirror the change here so the dashboard doesn't
+// promise something the agent can't deliver.
 const capabilities: { title: string; body: string; icon: React.ElementType }[] = [
   {
     icon: PackageOpen,
@@ -111,13 +117,13 @@ const capabilities: { title: string; body: string; icon: React.ElementType }[] =
   },
   {
     icon: FileText,
-    title: "Repurpose for every platform",
-    body: "Drafts 3 tweets, an X thread outline, a LinkedIn post, an Instagram caption, and a newsletter blurb — all grounded in the transcript.",
+    title: "Tweet + newsletter, drafted in voice",
+    body: "Produces one tweet (≤280 chars) and one email newsletter (≤70-char subject + 120–250 word body) per upload — all grounded in the transcript and matched to your brand voice.",
   },
   {
     icon: Send,
-    title: "Push metadata + tweets on approval",
-    body: "Writes new title/description/tags to YouTube via the API, or posts a tweet to X. Both writes pause for your sign-off first.",
+    title: "Three writes, all approval-gated",
+    body: "Pushes metadata to YouTube, posts the tweet to X, and sends the newsletter via your connected Gmail account. Each write pauses for your explicit sign-off first.",
   },
   {
     icon: Search,
@@ -137,6 +143,7 @@ const tools = [
   "get_package_by_video",
   "update_video_metadata",
   "post_tweet",
+  "send_newsletter_via_gmail",
 ];
 
 const privacyStyles: Record<string, { icon: React.ElementType; color: string; label: string }> = {
@@ -299,7 +306,7 @@ export default function PublisherAgentPage() {
         </div>
 
         {/* Capabilities */}
-        <Section title="What the Publisher does" subtitle="Read tools run free. Both writes — YouTube metadata and tweets — pause for your approval first.">
+        <Section title="What the Publisher does" subtitle="Read tools run free. All three writes — YouTube metadata, tweets, and newsletter sends — pause for your approval first.">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {capabilities.map((c) => (
               <CapabilityCard key={c.title} {...c} />
@@ -308,8 +315,8 @@ export default function PublisherAgentPage() {
         </Section>
 
         {/* Approval flow */}
-        <Section title="Approval flow" subtitle="Two independent gates — you can push metadata without sending the tweet, or vice versa.">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <Section title="Approval flow" subtitle="Three independent gates — push metadata, post the tweet, or send the newsletter individually. None implies the others.">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <div className="rounded-lg border border-border bg-card p-5">
               <div className="flex items-center gap-2 text-sm font-medium text-foreground mb-3">
                 <ShieldCheck className="h-4 w-4 text-sky-400" />
@@ -332,14 +339,28 @@ export default function PublisherAgentPage() {
                 <li className="flex gap-2.5"><span className="text-sky-400 font-mono">3.</span><span>Approve → <code className="font-mono text-foreground">post_tweet</code> publishes to your X account.</span></li>
               </ol>
             </div>
+            <div className="rounded-lg border border-border bg-card p-5">
+              <div className="flex items-center gap-2 text-sm font-medium text-foreground mb-3">
+                <ShieldCheck className="h-4 w-4 text-sky-400" />
+                Send newsletter
+              </div>
+              <ol className="space-y-2 text-sm text-muted-foreground">
+                <li className="flex gap-2.5"><span className="text-sky-400 font-mono">1.</span><span>From a package, hit Send on the newsletter draft (optionally override recipient).</span></li>
+                <li className="flex gap-2.5"><span className="text-sky-400 font-mono">2.</span><span>Agent shows the exact subject + body + recipient.</span></li>
+                <li className="flex gap-2.5"><span className="text-sky-400 font-mono">3.</span><span>Approve → <code className="font-mono text-foreground">send_newsletter_via_gmail</code> sends from your connected Gmail.</span></li>
+              </ol>
+            </div>
           </div>
         </Section>
 
         {/* Tools */}
-        <Section title="Tools available" subtitle="The functions the agent can call. The last two are the only writes.">
+        <Section title="Tools available" subtitle="The functions the agent can call. The last three are the only writes — all gated.">
           <div className="flex flex-wrap gap-1.5">
             {tools.map((t) => {
-              const isWrite = t === "update_video_metadata" || t === "post_tweet";
+              const isWrite =
+                t === "update_video_metadata" ||
+                t === "post_tweet" ||
+                t === "send_newsletter_via_gmail";
               return (
                 <span
                   key={t}
@@ -419,7 +440,11 @@ export default function PublisherAgentPage() {
             <span className="text-foreground font-medium">&quot;package my latest&quot;</span>.
           </p>
           <p>
-            X must be connected for tweet pushes. YouTube metadata pushes only need your YouTube connection.
+            YouTube must be connected for metadata pushes. X must be connected for tweet pushes. Gmail must be connected for newsletter sends — connect any subset of these on the{" "}
+            <Link href="/app/integrations" className="text-foreground underline underline-offset-2 hover:text-primary">
+              Integrations page
+            </Link>
+            ; the lanes you skip just stay greyed out at the approval gate.
           </p>
         </div>
       </div>

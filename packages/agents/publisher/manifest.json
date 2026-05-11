@@ -1,27 +1,53 @@
 {
   "slug": "publisher",
   "name": "Publisher",
-  "description": "Ships every video, everywhere. Writes titles, descriptions, tags, chapters, and pinned comments in the creator's voice, then repurposes each upload into tweets, LinkedIn posts, IG captions, and newsletter drafts.",
-  "version": "0.1.0",
+  "description": "Packages YouTube videos end-to-end: titles, descriptions, tags, chapters, thumbnail ideas, and social drafts. Pushes metadata to YouTube, posts the tweet to X, and sends the newsletter via the connected Gmail account — all gated behind explicit approval.",
+  "version": "0.2.0",
   "icon": "megaphone",
-  "tagline": "Ships every video, everywhere.",
+  "tagline": "Ships every video, everywhere it can.",
   "capabilities": ["writing", "seo", "publishing", "repurposing"],
   "required_integrations": ["youtube"],
-  "optional_integrations": ["google", "slack"],
+  "optional_integrations": ["twitter", "gmail"],
   "tools": [
-    "youtube_get_video",
-    "youtube_update_video",
-    "gdocs_create",
-    "gdocs_update",
-    "slack_post_message"
+    "get_video_details",
+    "get_video_comments",
+    "suggest_seo_keywords",
+    "get_latest_upload",
+    "get_video_transcript",
+    "update_video_metadata",
+    "post_tweet",
+    "send_newsletter_via_gmail",
+    "list_packages",
+    "get_package",
+    "get_package_by_video"
   ],
-  "interrupt_before": ["update_video_metadata", "publish_social_post"],
+  "interrupt_before": ["approval_gate"],
+  "writes": [
+    {
+      "tool": "update_video_metadata",
+      "label": "Push metadata to YouTube",
+      "description": "Writes new title, description, and tags to the video via YouTube's videos.update API.",
+      "requires": "youtube"
+    },
+    {
+      "tool": "post_tweet",
+      "label": "Post to X",
+      "description": "Posts the package's tweet copy to the connected X (Twitter) account.",
+      "requires": "twitter"
+    },
+    {
+      "tool": "send_newsletter_via_gmail",
+      "label": "Send newsletter",
+      "description": "Sends the polished newsletter draft from the connected Gmail account. Defaults to the creator's own address (preview send) unless an explicit recipient is supplied.",
+      "requires": "gmail"
+    }
+  ],
   "config_schema": {
     "channel_id": { "type": "string", "required": true, "label": "YouTube Channel ID" },
     "voice_sample_doc_id": { "type": "string", "label": "Voice/style reference doc" },
     "repurpose_targets": {
       "type": "array",
-      "default": ["twitter", "linkedin", "instagram", "newsletter"],
+      "default": ["twitter", "newsletter"],
       "label": "Platforms to repurpose to"
     }
   }

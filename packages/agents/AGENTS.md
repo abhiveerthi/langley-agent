@@ -28,11 +28,13 @@ The analytics-and-ideation brain. Doubles as the waitlist lead magnet — on sig
 - Drafts scripts, hooks, and cold opens on request
 - Watches competitor channels for gaps
 
-**Inputs** Channel ID, last 90 days of analytics, recent uploads, niche keywords
-**Outputs** Ranked brief of video ideas with rationale, optional script/outline/hook
-**Integrations** YouTube (required), Google Docs (optional, for brief delivery)
-**Typical tools** `youtube_get_analytics`, `youtube_search`, `youtube_get_video`, `web_search`, `gdocs_create`
+**Inputs** Channel ID (resolved from OAuth), last 90 days of analytics, recent uploads, niche keywords
+**Outputs** Ranked brief — persisted to `strategist_briefs`, exported as Markdown to Storage Library, and one workspace task per ranked idea
+**Integrations** YouTube (required, OAuth for analytics)
+**Typical tools** `get_channel_stats`, `get_recent_video_performance`, `search_niche_trends`, `search_competitor_videos`, `get_channel_analytics_overview`
 **Approval gates** None — read-only agent, nothing hits the outside world
+
+> **v2 plan:** Google Docs export, dedicated script/outline tool, ad-hoc one-video deep dives.
 
 ---
 
@@ -44,14 +46,14 @@ Takes one video in and produces a week of content out.
 
 **Capabilities**
 - Writes titles, descriptions, tags, chapters, and pinned comments in the creator's voice
-- Repurposes each upload into tweets, LinkedIn posts, IG captions, newsletter drafts
-- Schedules cross-platform posts
+- Drafts a tweet + an email newsletter (subject + body) per upload
+- Pushes metadata to YouTube, posts the tweet to X, and sends the newsletter via the connected Gmail account — all gated
 
-**Inputs** Fresh upload + transcript, voice/style reference doc, target platforms
-**Outputs** Packaged YouTube metadata, platform-specific post drafts, scheduling plan
-**Integrations** YouTube (required), Google Docs + Slack (optional)
-**Typical tools** `youtube_get_video`, `youtube_update_video`, `gdocs_create`, `slack_post_message`
-**Approval gates** `update_video_metadata`, `publish_social_post`
+**Inputs** Fresh upload + transcript, voice/style reference doc
+**Outputs** Packaged YouTube metadata, tweet copy, newsletter (subject + body)
+**Integrations** YouTube (required), X / Twitter (optional, for tweet push), Gmail (optional, for newsletter send)
+**Typical tools** `get_video_details`, `get_video_transcript`, `update_video_metadata`, `post_tweet`, `send_newsletter_via_gmail`
+**Approval gates** `update_video_metadata`, `post_tweet`, `send_newsletter_via_gmail` — three lanes, one shared `approval_gate` node, intent-aware routing
 
 > Full product & UX spec: [publisher/PRODUCT.md](publisher/PRODUCT.md) — input model, workflow, launch vs v2 scope, required tool additions.
 
@@ -66,11 +68,13 @@ Takes one video in and produces a week of content out.
 - Drafts replies in the creator's voice for approval
 - Pings the creator when a superfan or larger creator drops in
 
-**Inputs** Comment stream, VIP list, auto-hide rules, voice reference
-**Outputs** Prioritized comment queue, draft replies, VIP alerts
-**Integrations** YouTube (required), Slack (optional, for VIP pings)
-**Typical tools** `youtube_get_comments`, `youtube_reply_comment`, `youtube_moderate_comment`, `slack_post_message`
-**Approval gates** `reply_comment`, `moderate_comment`, `send_dm` (replies can be whitelisted per channel)
+**Inputs** Comment stream, VIP list, voice reference
+**Outputs** Prioritized comment queue, draft replies, archived triage report
+**Integrations** YouTube (required, OAuth — for both reads and the reply write)
+**Typical tools** `get_recent_comments`, `lookup_channel`
+**Approval gates** `reply_to_comment` — single lane through the shared `approval_gate` node; the reply tool is invoked from the send node only after the gate clears (not exposed as a callable tool to the LLM).
+
+> **v2 plan:** Comment moderation (`hide_comment`, `pin_comment`), Slack VIP ping, rejection→revise loop on rejected drafts.
 
 ---
 
@@ -79,15 +83,17 @@ Takes one video in and produces a week of content out.
 **Gets you paid.**
 
 **Capabilities**
-- Drafts cold outreach to sponsors and follow-ups
-- Tracks deal stages — pitched, replied, negotiating, signed
-- Writes a tailored pitch for any brand on request
+- Drafts tailored cold pitches to sponsors using channel stats + brand research
+- Sends approved pitches via Resend (server-side API key — no per-user OAuth)
+- Logs each sent pitch to `brand_deals` as `pitched` for the pipeline view
 
-**Inputs** Media kit / rate card, brand name, channel fit signals, prior thread history
-**Outputs** Tailored pitch email, follow-up schedule, updated deal pipeline
-**Integrations** Gmail + Google Docs (required), Slack / YouTube (optional)
-**Typical tools** `gmail_send`, `gmail_search`, `gmail_get_thread`, `gdocs_create`, `web_search`
-**Approval gates** `send_email`, `log_deal_status_change`
+**Inputs** Brand name (or "find leads in my niche"), channel stats, prior thread context
+**Outputs** Tailored pitch email (subject + body), updated deal pipeline row
+**Integrations** Resend (required, for sending), YouTube (optional, for stats lookup)
+**Typical tools** `find_sponsor_leads`, `research_brand`, `get_channel_stats`, `send_pitch_email`, `list_active_deals_tool`
+**Approval gates** `send_pitch_email` — single lane through the shared `approval_gate` node
+
+> **v2 plan:** Gmail OAuth send (so pitches come from the creator's actual address) + manual deal-status updates (`replied` / `negotiating` / `signed`).
 
 ---
 

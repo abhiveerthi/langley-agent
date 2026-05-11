@@ -52,7 +52,7 @@ const AGENTS: AgentMeta[] = [
   {
     slug: "publisher",
     name: "Publisher",
-    tagline: "Ships every video end-to-end — metadata, chapters, social drafts, approval-gated YouTube push.",
+    tagline: "Ships every video end-to-end — metadata kits, voice-matched tweet + newsletter, three approval-gated writes.",
     href: "/app/agents/publisher",
     icon: Megaphone,
     accent: {
@@ -61,7 +61,7 @@ const AGENTS: AgentMeta[] = [
       border: "border-sky-500/20",
     },
     status: "active",
-    highlights: ["Metadata kits", "Tweet + newsletter", "Push to YouTube"],
+    highlights: ["Push to YouTube", "Post to X", "Send newsletter via Gmail"],
   },
   {
     slug: "community-manager",
