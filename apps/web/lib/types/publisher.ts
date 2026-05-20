@@ -11,7 +11,11 @@ export type PublisherChapter = { time: string; label: string };
 
 export type PublisherSocial = {
   twitter?: string;
+  /** Legacy single-blob newsletter copy. New packages prefer the
+   *  subject + body split below; this stays for backwards-compat. */
   newsletter?: string;
+  newsletter_subject?: string;
+  newsletter_body?: string;
 };
 
 export type PublisherPackage = {
@@ -56,6 +60,15 @@ export type XApprovalPayload = {
   tweet_char_count: number;
 };
 
+export type NewsletterApprovalPayload = {
+  package_id: string;
+  video_id: string;
+  to: string;
+  subject: string;
+  body: string;
+  body_word_count: number;
+};
+
 export type PublisherApproval =
   | {
       id: string;
@@ -78,6 +91,17 @@ export type PublisherApproval =
       preview: string;
       status: "pending" | "approved" | "rejected";
       created_at: string;
+    }
+  | {
+      id: string;
+      org_id: string;
+      thread_id: string | null;
+      requested_by_agent: string;
+      action_type: "send_newsletter";
+      action_payload: NewsletterApprovalPayload;
+      preview: string;
+      status: "pending" | "approved" | "rejected";
+      created_at: string;
     };
 
 // Which fields can be regenerated through POST /packages/{id}/regenerate
@@ -90,6 +114,8 @@ export const REGEN_FIELDS = [
   "thumbnail_ideas",
   "social.twitter",
   "social.newsletter",
+  "social.newsletter_subject",
+  "social.newsletter_body",
 ] as const;
 
 export type RegenField = (typeof REGEN_FIELDS)[number];

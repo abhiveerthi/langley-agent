@@ -207,6 +207,21 @@ export default function PublisherAgentPage() {
     fetchPackages();
   }, [fetchUploads, fetchPackages]);
 
+  // After every Publisher chat turn the agent may have written a new
+  // package row (or updated an existing one). useChat fires a
+  // `marcus:chat-turn-complete` window event when the SSE stream
+  // finishes; refetch the list so the UI sees the new card without a
+  // manual reload.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ agentSlug?: string }>).detail;
+      if (detail?.agentSlug && detail.agentSlug !== "publisher") return;
+      fetchPackages();
+    };
+    window.addEventListener("marcus:chat-turn-complete", handler);
+    return () => window.removeEventListener("marcus:chat-turn-complete", handler);
+  }, [fetchPackages]);
+
   // Handle ?youtube=connected|error redirect params once
   useEffect(() => {
     const yt = searchParams.get("youtube");

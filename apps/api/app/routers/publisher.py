@@ -482,15 +482,18 @@ async def get_pending_approval(
 ):
     """Find the most-recent pending approval for this package, if any.
 
-    Returns either a `youtube_metadata_update` or `x_post` row — the UI keys
-    off `action_type` to render the right dialog body.
+    Returns a `youtube_metadata_update`, `x_post`, or `send_newsletter`
+    row — the UI keys off `action_type` to render the right dialog body.
+    Without `send_newsletter` in this filter the package detail page
+    would never see newsletter approvals and the user would have to walk
+    over to /approvals to finalize.
     """
     _get_package_or_404(supabase, user.org_id, package_id)  # tenant guard
     resp = (
         supabase.table("approvals")
         .select("*")
         .eq("org_id", user.org_id)
-        .in_("action_type", ["youtube_metadata_update", "x_post"])
+        .in_("action_type", ["youtube_metadata_update", "x_post", "send_newsletter"])
         .eq("status", "pending")
         .order("created_at", desc=True)
         .limit(20)

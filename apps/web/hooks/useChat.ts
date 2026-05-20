@@ -311,6 +311,16 @@ export function useChat(options: UseChatOptions = {}) {
         setIsStreaming(false);
         setThinkingNode(null);
         abortRef.current = null;
+        // Tell the host page a turn completed so it can refresh
+        // server-state widgets (Publisher's package list, Strategist's
+        // briefs, etc.) without polling or coupling to the chat hook.
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("marcus:chat-turn-complete", {
+              detail: { agentSlug: options.agentSlug || "general" },
+            })
+          );
+        }
       }
     },
     [threadId, options.agentSlug, consumeSseStream]
@@ -366,9 +376,16 @@ export function useChat(options: UseChatOptions = {}) {
         setIsStreaming(false);
         setThinkingNode(null);
         abortRef.current = null;
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("marcus:chat-turn-complete", {
+              detail: { agentSlug: options.agentSlug || "general" },
+            })
+          );
+        }
       }
     },
-    [consumeSseStream]
+    [consumeSseStream, options.agentSlug]
   );
 
   /**
@@ -414,7 +431,12 @@ export function useChat(options: UseChatOptions = {}) {
 
   const loadThread = useCallback(
     async (id: string) => {
-      const res = await fetch(`${API_URL}/api/chat/threads/${id}`);
+      // Previous version omitted the auth header, which silently 401'd
+      // when the supabase service_key path was active. Always send it now.
+      const auth = await authHeader();
+      const res = await fetch(`${API_URL}/api/chat/threads/${id}`, {
+        headers: { ...auth },
+      });
 
       if (!res.ok) return;
       const data = await res.json();
@@ -429,9 +451,24 @@ export function useChat(options: UseChatOptions = {}) {
         }))
       );
       setPendingApproval(null);
+      setError(null);
     },
     []
   );
+
+  /**
+   * Clear the current conversation and start a fresh thread. The next
+   * `sendMessage` call won't carry a thread_id, so the backend mints one
+   * and returns it on the `X-Thread-Id` response header.
+   */
+  const newChat = useCallback(() => {
+    abortRef.current?.abort();
+    setMessages([]);
+    setThreadId(undefined);
+    setPendingApproval(null);
+    setError(null);
+    setThinkingNode(null);
+  }, []);
 
   return {
     messages,
@@ -445,5 +482,39 @@ export function useChat(options: UseChatOptions = {}) {
     cancelApproval,
     stopStreaming,
     loadThread,
+    newChat,
   };
+}
+
+/**
+ * Thread summary used by the MiniChat sidebar to render the list of past
+ * chats with a given agent. Mirrors the row shape returned by
+ * `GET /api/chat/threads?agent_slug=<slug>`.
+ */
+export interface ThreadSummary {
+  id: string;
+  title: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * List active threads for the current org, optionally filtered to a single
+ * agent. Returns `[]` on any failure — the sidebar treats an empty list
+ * the same as "no chats yet" and shows the new-chat prompt.
+ */
+export async function listThreads(agentSlug?: string): Promise<ThreadSummary[]> {
+  try {
+    const auth = await authHeader();
+    const url = new URL(`${API_URL}/api/chat/threads`);
+    if (agentSlug) url.searchParams.set("agent_slug", agentSlug);
+    const res = await fetch(url.toString(), { headers: { ...auth } });
+    if (!res.ok) return [];
+    const data = (await res.json()) as ThreadSummary[];
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
 }
