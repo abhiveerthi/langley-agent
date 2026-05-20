@@ -37,6 +37,7 @@ from packages.agents.publisher.tools import (
     get_video_details,
     get_video_transcript,
     get_video_comments,
+    get_latest_upload,
     update_video_metadata,
     post_tweet,
     get_publisher_tools,
@@ -383,8 +384,25 @@ class PublisherAgent(BaseAgent):
     # ── create_package: fetch details / transcript / comments ─────────────
     async def _fetch_video_context_node(self, state: PublisherState):
         vid = state.get("video_id")
+        title_from_latest: str | None = None
+
+        # No explicit video_id (free-form chat like "package my latest" or just
+        # "make a kit for the new one"). Publisher's PRODUCT spec says this is
+        # the "latest upload" entry point — call get_latest_upload, parse the
+        # video_id out of its text response, and continue with that. If the
+        # tool errors (YouTube not connected, no uploads), bail with the same
+        # warning the FE renders today so the user knows to attach a video.
         if not vid:
-            return {"warning": "no video_id supplied"}
+            latest = await _safe_tool(get_latest_upload, {})
+            vid, title_from_latest = _parse_latest_upload(latest)
+            if not vid:
+                # Surface a friendlier message than the raw tool error.
+                msg = "no video_id supplied"
+                if latest and latest.startswith("Error"):
+                    msg = latest[: 200]
+                elif latest and latest.startswith("No videos"):
+                    msg = "no videos on the connected channel yet"
+                return {"warning": msg}
 
         # Pull these sequentially so we can attribute failures to the right source.
         details = await _safe_tool(get_video_details, {"video_id": vid})
@@ -403,8 +421,14 @@ class PublisherAgent(BaseAgent):
         title = state.get("video_title")
         if not title and details and details.startswith("# "):
             title = details.split("\n", 1)[0].removeprefix("# ").strip()
+        if not title and title_from_latest:
+            title = title_from_latest
 
         return {
+            # Propagate the resolved video_id so downstream nodes (persist,
+            # storage export, respond) see the same value the user implicitly
+            # asked for via "my latest".
+            "video_id": vid,
             "video_details": details,
             "transcript": transcript,
             "comments": comments,
@@ -489,6 +513,15 @@ class PublisherAgent(BaseAgent):
         supabase = current_supabase.get()
         org_id = state.get("org_id")
         if supabase is None or not org_id:
+            return {}
+
+        # No video_id = the user is chatting with Publisher generically (no
+        # video attached). The `publisher_packages.video_id` column is
+        # NOT NULL, so attempting the upsert would 23502 and the agent
+        # would surface "persist failed: …" in chat. Skip persistence —
+        # the kit still lives in the conversation history (which IS persisted
+        # via the chat message rows), and the user can revisit it there.
+        if not state.get("video_id"):
             return {}
 
         structured = state.get("structured") or {}
@@ -774,10 +807,19 @@ class PublisherAgent(BaseAgent):
 
     # ── push_x branch (Twitter) ───────────────────────────────────────────
     async def _prepare_x_push_node(self, state: PublisherState):
-        """Pull `social.twitter` off the package row as the proposed tweet."""
+        """Pull `social.twitter` off the package row as the proposed tweet.
+
+        The kit-generator prompt instructs the LLM to use `[link]` as a
+        placeholder URL (so it doesn't hallucinate one). We resolve that
+        to the actual `https://youtu.be/<video_id>` here, right before
+        the user reviews the tweet for approval — so what they approve is
+        exactly what gets posted.
+        """
         pkg = state.get("existing_package") or {}
         social = pkg.get("social") or {}
         proposed = (social.get("twitter") or "").strip()
+        video_id = pkg.get("video_id") or state.get("video_id")
+        proposed = _resolve_video_link(proposed, video_id)
         return {
             "proposed_tweet": proposed,
             "approval_status": "pending",
@@ -800,24 +842,30 @@ class PublisherAgent(BaseAgent):
         }
 
     async def _mark_x_pushed_node(self, state: PublisherState):
-        """Persist x_posted_at + x_tweet_id on the package row.
-
-        If post_to_x failed (string starts with "Error"), don't flip the row;
-        the warning surfaces via the response.
-        """
+        """Persist x_posted_at + x_tweet_id on the package row, OR stamp a
+        warning on failure so the UI sees the error instead of silently
+        appearing to succeed."""
         result = state.get("x_push_result") or ""
-        if not state.get("x_tweet_id") or (isinstance(result, str) and result.startswith("Error")):
-            return {}
+        failed = (
+            not state.get("x_tweet_id")
+            or (isinstance(result, str) and result.startswith("Error"))
+        )
         supabase = current_supabase.get()
         pkg_id = state.get("package_id")
         if supabase is None or not pkg_id:
             return {}
         try:
-            supabase.table("publisher_packages").update({
-                "x_posted_at": _now_iso(),
-                "x_tweet_id": state.get("x_tweet_id"),
-                "updated_at": _now_iso(),
-            }).eq("id", pkg_id).execute()
+            if failed:
+                supabase.table("publisher_packages").update({
+                    "warning": f"X post failed: {str(result)[:200]}",
+                    "updated_at": _now_iso(),
+                }).eq("id", pkg_id).execute()
+            else:
+                supabase.table("publisher_packages").update({
+                    "x_posted_at": _now_iso(),
+                    "x_tweet_id": state.get("x_tweet_id"),
+                    "updated_at": _now_iso(),
+                }).eq("id", pkg_id).execute()
         except Exception:
             pass
         return {}
@@ -905,6 +953,13 @@ class PublisherAgent(BaseAgent):
         fallback = (profile.brand.primary_email or "").strip()
         recipient = explicit or fallback
 
+        # Same `[link]` placeholder substitution as the X push — the kit
+        # generator was told to write `[link]` so it doesn't fabricate URLs;
+        # we resolve to the real video URL at push time.
+        video_id = pkg.get("video_id") or state.get("video_id")
+        subject = _resolve_video_link(subject, video_id)
+        body = _resolve_video_link(body, video_id)
+
         return {
             "proposed_newsletter_subject": subject,
             "proposed_newsletter_body": body,
@@ -951,24 +1006,32 @@ class PublisherAgent(BaseAgent):
         }
 
     async def _mark_newsletter_sent_node(self, state: PublisherState):
-        """Persist newsletter_sent_at + newsletter_message_id on the package
-        row. Skip when the send returned an error so the timestamp only
-        flips on a real success."""
+        """Persist newsletter_sent_at + newsletter_message_id on success,
+        OR stamp `warning` with the error string on failure. Previously
+        this returned silently on failure, which left the UI looking like
+        the send succeeded — the platforms sidebar would still show
+        'Send newsletter' (no timestamp) but no surfaced reason."""
         result = state.get("newsletter_push_result") or ""
-        if not state.get("newsletter_message_id") or (
-            isinstance(result, str) and result.startswith("Error")
-        ):
-            return {}
+        failed = (
+            not state.get("newsletter_message_id")
+            or (isinstance(result, str) and result.startswith("Error"))
+        )
         supabase = current_supabase.get()
         pkg_id = state.get("package_id")
         if supabase is None or not pkg_id:
             return {}
         try:
-            supabase.table("publisher_packages").update({
-                "newsletter_sent_at": _now_iso(),
-                "newsletter_message_id": state.get("newsletter_message_id"),
-                "updated_at": _now_iso(),
-            }).eq("id", pkg_id).execute()
+            if failed:
+                supabase.table("publisher_packages").update({
+                    "warning": f"newsletter send failed: {str(result)[:200]}",
+                    "updated_at": _now_iso(),
+                }).eq("id", pkg_id).execute()
+            else:
+                supabase.table("publisher_packages").update({
+                    "newsletter_sent_at": _now_iso(),
+                    "newsletter_message_id": state.get("newsletter_message_id"),
+                    "updated_at": _now_iso(),
+                }).eq("id", pkg_id).execute()
         except Exception:
             pass
         return {}
@@ -1060,6 +1123,8 @@ class PublisherAgent(BaseAgent):
             content = state.get("push_result") or "Push complete."
         elif intent == "push_x":
             content = state.get("x_push_result") or "Tweet posted."
+        elif intent == "push_newsletter":
+            content = state.get("newsletter_push_result") or "Newsletter sent."
         else:
             last_ai = next(
                 (m for m in reversed(state["messages"]) if isinstance(m, AIMessage)),
@@ -1104,6 +1169,52 @@ async def _safe_tool(tool_obj, args: dict) -> str:
         return await tool_obj.ainvoke(args)
     except Exception as e:
         return f"Error: {e}"
+
+
+def _resolve_video_link(text: str, video_id: str | None) -> str:
+    """Replace `[link]` (and a few common variants) with the real YouTube URL.
+
+    The kit-generation prompt instructs the LLM to write `[link]` as a
+    placeholder so it doesn't hallucinate URLs. Push nodes call this right
+    before the user approves the draft so the proposed copy is exactly
+    what will be posted/sent. No-op when video_id is missing.
+    """
+    if not text or not video_id:
+        return text or ""
+    url = f"https://youtu.be/{video_id}"
+    # Order matters: longest/most-specific first so we don't half-replace.
+    for token in ("[link]", "[LINK]", "[Link]", "[url]", "[URL]", "[video_url]"):
+        text = text.replace(token, url)
+    return text
+
+
+def _parse_latest_upload(text: str | None) -> tuple[str | None, str | None]:
+    """Pull (video_id, title) out of `get_latest_upload`'s string payload.
+
+    The tool returns a Markdown-ish block:
+
+        # <title>
+        - Video ID: <vid>
+        - Published: ...
+        - Current description:
+        ...
+
+    Returns (None, None) on anything that doesn't match (errors, empty
+    channel, unexpected shape).
+    """
+    if not text or text.startswith("Error") or text.startswith("No videos"):
+        return None, None
+    vid: str | None = None
+    title: str | None = None
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("# "):
+            title = s[2:].strip() or None
+        elif s.startswith("- Video ID:"):
+            vid = s.split(":", 1)[1].strip() or None
+            if vid:
+                break
+    return vid, title
 
 
 def _as_str_list(value: Any) -> list[str]:

@@ -39,6 +39,8 @@ import type {
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+type PlatformTab = "youtube" | "x" | "email";
+
 async function authHeader(): Promise<Record<string, string>> {
   const supabase = createClient();
   const { data: { session } } = await supabase.auth.getSession();
@@ -79,6 +81,13 @@ export default function PackageDetailPage({
   const [pushPending, setPushPending] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState<null | "regen-all" | "delete">(null);
   const [bulkActing, setBulkActing] = useState(false);
+  // Which platform tab is currently active. The Push-all button kicks off
+  // YouTube → X → Email in sequence; individual tab actions kick off one
+  // platform at a time. The right sidebar still mirrors all three.
+  const [tab, setTab] = useState<PlatformTab>("youtube");
+  // Recipient override for the Email tab. Empty = backend falls back to
+  // the org's brand.primary_email.
+  const [newsletterTo, setNewsletterTo] = useState("");
   // Track approval IDs we've already auto-opened — so if the user dismisses
   // the dialog, polling doesn't keep reopening it on the same row.
   const [openedApprovalIds, setOpenedApprovalIds] = useState<Set<string>>(new Set());
@@ -286,18 +295,81 @@ export default function PackageDetailPage({
     }
   }
 
+  async function sendNewsletter() {
+    if (!pkg) return;
+    setPushPending(true);
+    try {
+      const auth = await authHeader();
+      const body = newsletterTo.trim()
+        ? JSON.stringify({ to: newsletterTo.trim() })
+        : undefined;
+      const res = await fetch(`${API}/api/publisher/packages/${pkg.id}/send-newsletter`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...auth },
+        body,
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        throw new Error(detail?.detail || `HTTP ${res.status}`);
+      }
+      setToast("Preparing newsletter — waiting for your approval");
+      fetchApproval();
+    } catch (e) {
+      setToast(`Newsletter send failed: ${(e as Error).message}`);
+      setPushPending(false);
+    }
+  }
+
   /**
    * Drain the SSE body so the server-side task finishes its work.
    * Canceling (.cancel()) aborts mid-graph, which can leave the approval
    * status flipped but the downstream push/revise never runs.
+   *
+   * Returns a failure summary (or null) extracted from the stream so
+   * approve/reject can show a real toast when the resumed graph hits an
+   * error — e.g. "send_newsletter_via_gmail" returning "Error: Gmail not
+   * connected …". Without this the UI would silently show "Sending
+   * newsletter…" forever even though the row's `newsletter_sent_at`
+   * stayed NULL.
    */
-  async function drainStream(res: Response) {
+  async function drainStream(res: Response): Promise<string | null> {
     const reader = res.body?.getReader();
-    if (!reader) return;
+    if (!reader) return null;
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let firstError: string | null = null;
+    let assistantText = "";
     while (true) {
-      const { done } = await reader.read();
+      const { done, value } = await reader.read();
       if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const jsonStr = line.slice(6).trim();
+        if (!jsonStr || jsonStr === "[DONE]") continue;
+        try {
+          const ev = JSON.parse(jsonStr) as { type?: string; data?: Record<string, unknown> };
+          if (ev.type === "error" && !firstError) {
+            firstError = (ev.data?.message as string) || "Unknown error";
+          } else if (ev.type === "token") {
+            const c = ev.data?.content as string | undefined;
+            if (c) assistantText += c;
+          }
+        } catch {
+          // ignore malformed
+        }
+      }
     }
+    if (firstError) return firstError;
+    // The Publisher respond_node returns the tool's own "Error: …" string
+    // verbatim for push_x / push_newsletter failures. Surface that too.
+    const trimmed = assistantText.trim();
+    if (trimmed.startsWith("Error") || /failed:/i.test(trimmed.slice(0, 80))) {
+      return trimmed.slice(0, 240);
+    }
+    return null;
   }
 
   async function approvePush() {
@@ -306,7 +378,13 @@ export default function PackageDetailPage({
     // Close the dialog immediately for responsiveness — the server-side flip
     // to status=approved means polling won't find this row again.
     setShowApprovalDialog(false);
-    setToast(approval.action_type === "x_post" ? "Posting to X…" : "Pushing to YouTube…");
+    setToast(
+      approval.action_type === "x_post"
+        ? "Posting to X…"
+        : approval.action_type === "send_newsletter"
+        ? "Sending newsletter…"
+        : "Pushing to YouTube…",
+    );
     try {
       const auth = await authHeader();
       const res = await fetch(`${API}/api/approvals/${approval.id}/approve`, {
@@ -314,9 +392,15 @@ export default function PackageDetailPage({
         headers: { "Content-Type": "application/json", ...auth },
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      await drainStream(res);
+      const streamErr = await drainStream(res);
       setApproval(null);
       fetchPackage();
+      if (streamErr) {
+        // The approval row flipped to `approved` but the downstream tool
+        // failed — show the actual reason rather than the optimistic
+        // "Posting…" toast that was set when the dialog closed.
+        setToast(`Send failed: ${streamErr}`);
+      }
     } catch (e) {
       setToast(`Approve failed: ${(e as Error).message}`);
     } finally {
@@ -504,6 +588,13 @@ export default function PackageDetailPage({
 
         </div>
 
+        {/* Platform tabs — each tab focuses the editor on one destination.
+            "Push all" kicks off YouTube → X → Email in sequence; users can
+            still post any single platform from its own tab. */}
+        <PlatformTabs active={tab} onChange={setTab} />
+
+        {tab === "youtube" && (
+        <>
         <div id="section-titles" />
         {/* Title variants — each row has a radio to mark it as the push title */}
         <TitleVariantsSection
@@ -593,14 +684,43 @@ export default function PackageDetailPage({
           onCopy={copy}
         />
 
-        {/* Socials */}
+        <TabActionBar
+          label={pkg.youtube_pushed_at ? "Re-push to YouTube" : "Push to YouTube"}
+          disabled={!canPush || pushPending || ytConnected !== true}
+          disabledHint={
+            ytConnected !== true
+              ? "Connect YouTube in Integrations to enable pushing"
+              : !canPush
+              ? "Available once status is draft"
+              : undefined
+          }
+          onAction={() => pushPackage(pkg.title_variants[0])}
+        />
+        </>
+        )}
+
+        {tab === "x" && (
+        <>
         <div id="section-twitter" />
         <div className="rounded-lg border border-border bg-card/50 p-5 space-y-4">
-          <div className="text-sm font-semibold text-foreground">Social Drafts</div>
-
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold text-foreground">X / Twitter</div>
+            <div
+              className={cn(
+                "font-mono text-xs",
+                (pkg.social.twitter || "").length > 280
+                  ? "text-red-400"
+                  : (pkg.social.twitter || "").length > 260
+                  ? "text-amber-400"
+                  : "text-muted-foreground",
+              )}
+            >
+              {(pkg.social.twitter || "").length}/280
+            </div>
+          </div>
           <EditableSection
             variant="inline"
-            title="X / Twitter"
+            title="Tweet copy"
             icon={Send}
             kind="text"
             value={pkg.social.twitter || ""}
@@ -618,29 +738,126 @@ export default function PackageDetailPage({
             copiedKey={copiedKey}
             onCopy={copy}
           />
+          <p className="text-[11px] text-muted-foreground">
+            Tip: write <code className="rounded bg-muted/40 px-1">[link]</code> anywhere — it
+            resolves to <code className="rounded bg-muted/40 px-1">https://youtu.be/{pkg.video_id}</code> at post time.
+          </p>
+        </div>
 
-          <div id="section-newsletter" />
+        <TabActionBar
+          label={pkg.x_posted_at ? "Post to X again" : "Post to X"}
+          disabled={!canPush || pushPending || xConnected !== true || !(pkg.social.twitter || "")}
+          disabledHint={
+            xConnected !== true
+              ? "Connect X in Integrations to enable posting"
+              : !(pkg.social.twitter || "")
+              ? "Regenerate the tweet copy first"
+              : !canPush
+              ? "Available once status is draft"
+              : undefined
+          }
+          onAction={postToX}
+        />
+        </>
+        )}
+
+        {tab === "email" && (
+        <>
+        <div id="section-newsletter" />
+        <div className="rounded-lg border border-border bg-card/50 p-5 space-y-4">
+          <div className="text-sm font-semibold text-foreground">Newsletter</div>
+
           <EditableSection
             variant="inline"
-            title="Newsletter"
+            title="Subject"
             icon={Mail}
             kind="text"
-            value={pkg.social.newsletter || ""}
-            placeholder="80–120 word blurb"
-            skeletonLabel="Writing newsletter blurb…"
-            isGenerating={isGenerating && !pkg.social.newsletter}
-            onSave={async (v) =>
-              patchPackage({ social: { ...pkg.social, newsletter: v as string } }, "Newsletter saved")
+            value={pkg.social.newsletter_subject || ""}
+            placeholder="One-line subject (defaults to 'New video: <title>')"
+            skeletonLabel="Writing subject…"
+            isGenerating={
+              isGenerating &&
+              !pkg.social.newsletter_subject &&
+              !pkg.social.newsletter
             }
-            onRegen={() => regenerate("social.newsletter")}
-            regenActive={regenField === "social.newsletter"}
+            onSave={async (v) =>
+              patchPackage(
+                { social: { ...pkg.social, newsletter_subject: v as string } },
+                "Subject saved",
+              )
+            }
+            onRegen={() => regenerate("social.newsletter_subject")}
+            regenActive={regenField === "social.newsletter_subject"}
             disabled={isGenerating}
-            copyText={pkg.social.newsletter || ""}
-            copyKey="social-newsletter"
+            copyText={pkg.social.newsletter_subject || ""}
+            copyKey="newsletter-subject"
             copiedKey={copiedKey}
             onCopy={copy}
           />
+
+          <EditableSection
+            variant="inline"
+            title="Body"
+            icon={MessageSquare}
+            kind="text"
+            value={pkg.social.newsletter_body || pkg.social.newsletter || ""}
+            placeholder="80–120 word blurb. Use [link] for the video URL."
+            skeletonLabel="Writing newsletter blurb…"
+            isGenerating={
+              isGenerating &&
+              !pkg.social.newsletter_body &&
+              !pkg.social.newsletter
+            }
+            onSave={async (v) =>
+              patchPackage(
+                { social: { ...pkg.social, newsletter_body: v as string } },
+                "Newsletter saved",
+              )
+            }
+            onRegen={() => regenerate("social.newsletter_body")}
+            regenActive={regenField === "social.newsletter_body"}
+            disabled={isGenerating}
+            copyText={pkg.social.newsletter_body || pkg.social.newsletter || ""}
+            copyKey="newsletter-body"
+            copiedKey={copiedKey}
+            onCopy={copy}
+          />
+
+          <div>
+            <label className="text-[11px] uppercase tracking-wider text-muted-foreground mb-1.5 block">
+              Recipient (optional)
+            </label>
+            <input
+              type="email"
+              value={newsletterTo}
+              onChange={(e) => setNewsletterTo(e.target.value)}
+              placeholder="Defaults to your brand primary email"
+              className="w-full rounded-md border border-border bg-muted/10 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:border-sky-500/40 focus:outline-none"
+            />
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Sends via your connected Gmail account. <code className="rounded bg-muted/40 px-1">[link]</code> is replaced with the real video URL before sending.
+            </p>
+          </div>
         </div>
+
+        <TabActionBar
+          label="Send newsletter"
+          disabled={
+            !canPush ||
+            pushPending ||
+            !(pkg.social.newsletter_body || pkg.social.newsletter || "")
+          }
+          disabledHint={
+            !(pkg.social.newsletter_body || pkg.social.newsletter || "")
+              ? "Regenerate the newsletter body first"
+              : !canPush
+              ? "Available once status is draft"
+              : undefined
+          }
+          onAction={sendNewsletter}
+        />
+        </>
+        )}
 
         {pkg.status === "pushed" && pkg.youtube_pushed_at && (
           <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4 flex items-center gap-3">
@@ -692,6 +909,8 @@ export default function PackageDetailPage({
               hasPendingApproval={!!approval && approval.status === "pending"}
               onPushYouTube={() => pushPackage(pkg.title_variants[0])}
               onPostX={postToX}
+              onSendNewsletter={sendNewsletter}
+              onSelectTab={setTab}
               onReviewPending={() => setShowApprovalDialog(true)}
             />
           </aside>
@@ -733,6 +952,65 @@ export default function PackageDetailPage({
 }
 
 // ── Layout helpers ──────────────────────────────────────────────────────
+
+function PlatformTabs({
+  active,
+  onChange,
+}: {
+  active: PlatformTab;
+  onChange: (t: PlatformTab) => void;
+}) {
+  const tabs: { id: PlatformTab; label: string; Icon: React.ElementType }[] = [
+    { id: "youtube", label: "YouTube", Icon: Video },
+    { id: "x", label: "X", Icon: Send },
+    { id: "email", label: "Email", Icon: Mail },
+  ];
+  return (
+    <div className="flex items-center gap-1 border-b border-border">
+      {tabs.map(({ id, label, Icon }) => (
+        <button
+          key={id}
+          onClick={() => onChange(id)}
+          className={cn(
+            "flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition-colors",
+            active === id
+              ? "border-sky-400 text-foreground"
+              : "border-transparent text-muted-foreground hover:text-foreground",
+          )}
+        >
+          <Icon className="h-3.5 w-3.5" />
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TabActionBar({
+  label,
+  disabled,
+  disabledHint,
+  onAction,
+}: {
+  label: string;
+  disabled: boolean;
+  disabledHint?: string;
+  onAction: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-end pt-1">
+      <button
+        onClick={onAction}
+        disabled={disabled}
+        title={disabled ? disabledHint : undefined}
+        className="flex items-center gap-1.5 rounded-md bg-sky-500/10 border border-sky-500/30 px-4 py-2 text-sm font-medium text-sky-400 hover:bg-sky-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        <UploadIcon className="h-3.5 w-3.5" />
+        {label}
+      </button>
+    </div>
+  );
+}
 
 type EditKind = "text" | "list-newlines" | "list-commas" | "chapters";
 type EditableValue = string | string[] | { time: string; label: string }[];
@@ -1190,10 +1468,21 @@ function ApprovalDialog({
   acting: "approve" | "reject" | null;
 }) {
   const isX = approval.action_type === "x_post";
-  const heading = isX ? "Post to X (Twitter)" : "Push metadata to YouTube";
-  const approveLabel = isX ? "Approve & post" : "Approve & push";
+  const isNewsletter = approval.action_type === "send_newsletter";
+  const heading = isX
+    ? "Post to X (Twitter)"
+    : isNewsletter
+    ? "Send newsletter"
+    : "Push metadata to YouTube";
+  const approveLabel = isX
+    ? "Approve & post"
+    : isNewsletter
+    ? "Approve & send"
+    : "Approve & push";
   const feedbackPlaceholder = isX
     ? "e.g. punchier, drop the emoji, lead with the surprising stat…"
+    : isNewsletter
+    ? "e.g. tighter subject, lose the exclamation point…"
     : "e.g. less clickbaity, shorter tags…";
 
   return (
@@ -1239,7 +1528,7 @@ function ApprovalDialog({
                 </details>
               </div>
             </>
-          ) : (
+          ) : approval.action_type === "x_post" ? (
             <div>
               <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1.5 flex items-center justify-between">
                 <span>Tweet</span>
@@ -1259,6 +1548,33 @@ function ApprovalDialog({
               <pre className="rounded-md border border-sky-500/30 bg-sky-500/5 p-3 whitespace-pre-wrap font-sans text-sm text-foreground/90">
                 {approval.action_payload.proposed_tweet}
               </pre>
+            </div>
+          ) : (
+            // send_newsletter
+            <div className="space-y-3">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">To</div>
+                <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-sm text-foreground/90 font-mono">
+                  {approval.action_payload.to || "(no recipient — set one before sending)"}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">Subject</div>
+                <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-sm text-foreground/90">
+                  {approval.action_payload.subject || "(empty)"}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1.5 flex items-center justify-between">
+                  <span>Body</span>
+                  <span className="font-mono text-[10px] text-muted-foreground">
+                    {approval.action_payload.body_word_count} words
+                  </span>
+                </div>
+                <pre className="rounded-md border border-sky-500/30 bg-sky-500/5 p-3 whitespace-pre-wrap font-sans text-sm text-foreground/90 max-h-64 overflow-y-auto">
+                  {approval.action_payload.body}
+                </pre>
+              </div>
             </div>
           )}
 
@@ -1310,6 +1626,8 @@ function PlatformsSidebar({
   hasPendingApproval,
   onPushYouTube,
   onPostX,
+  onSendNewsletter,
+  onSelectTab,
   onReviewPending,
 }: {
   pkg: PublisherPackage;
@@ -1320,17 +1638,14 @@ function PlatformsSidebar({
   hasPendingApproval: boolean;
   onPushYouTube: () => void;
   onPostX: () => void;
+  onSendNewsletter: () => void;
+  onSelectTab: (t: PlatformTab) => void;
   onReviewPending: () => void;
 }) {
-  function scrollTo(anchor: string) {
-    const el = document.getElementById(anchor);
-    if (!el) return;
-    el.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-
   const pushedYouTube = !!pkg.youtube_pushed_at;
   const postedX = !!pkg.x_posted_at;
   const tweet = pkg.social.twitter || "";
+  const newsletterBody = pkg.social.newsletter_body || pkg.social.newsletter || "";
 
   return (
     <div className="rounded-lg border border-border bg-card/50 p-4 lg:sticky lg:top-6">
@@ -1355,7 +1670,7 @@ function PlatformsSidebar({
               ? "Ready to push"
               : null
           }
-          onClick={() => scrollTo("section-titles")}
+          onClick={() => onSelectTab("youtube")}
           actionLabel={pushedYouTube ? "Re-push" : "Push to YouTube"}
           actionVariant="primary"
           actionDisabled={!canPush || pushPending || ytConnected !== true}
@@ -1385,7 +1700,7 @@ function PlatformsSidebar({
               ? "No tweet copy yet"
               : `${tweet.length}/280 chars`
           }
-          onClick={() => scrollTo("section-twitter")}
+          onClick={() => onSelectTab("x")}
           actionLabel={postedX ? "Post again" : "Post to X"}
           actionVariant="primary"
           actionDisabled={!canPush || pushPending || xConnected !== true || !tweet}
@@ -1418,12 +1733,19 @@ function PlatformsSidebar({
           icon={Mail}
           iconClass="text-amber-400"
           connected={null}
-          status="Coming soon"
-          onClick={() => scrollTo("section-newsletter")}
-          actionLabel="Coming soon"
-          actionVariant="muted"
-          actionDisabled
-          onAction={() => {}}
+          status={newsletterBody ? "Ready to send" : "No body yet"}
+          onClick={() => onSelectTab("email")}
+          actionLabel="Send newsletter"
+          actionVariant="primary"
+          actionDisabled={!canPush || pushPending || !newsletterBody}
+          onAction={onSendNewsletter}
+          actionTitle={
+            !newsletterBody
+              ? "Regenerate the newsletter body first"
+              : !canPush
+              ? "Available once status is draft"
+              : undefined
+          }
         />
       </div>
 

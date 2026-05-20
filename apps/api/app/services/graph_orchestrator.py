@@ -197,30 +197,116 @@ async def _compile_agent(agent: BaseAgent):
     )
 
 
-async def _ensure_thread_row(*, org_id: str, thread_id: str, agent_slug: str) -> None:
-    """Idempotently upsert a `threads` row so the approvals FK is satisfied.
+async def _ensure_thread_row(
+    *,
+    org_id: str,
+    thread_id: str,
+    agent_slug: str,
+    user_id: str | None = None,
+    first_message: str | None = None,
+) -> None:
+    """Idempotently upsert a `threads` row so the chat-history + approvals
+    FKs are satisfied.
 
     Runs via `current_supabase` (set on the request-scoped ContextVar). If the
     context isn't set (e.g. in dev without Supabase), quietly no-ops — the FK
     won't blow up because there's no real DB behind the in-memory store.
+
+    `metadata.agent_slug` is what `list_threads` filters on so the MiniChat
+    sidebar can show only this agent's chats. `agent_id` is looked up
+    best-effort from the agents table (seeded per org by migration 014); if
+    the lookup fails we still write the row so the chat persists.
+
+    `first_message` seeds the title when a thread is being created for the
+    first time — a short snippet of the user's prompt so the sidebar shows
+    something meaningful instead of "untitled".
     """
     supabase = current_supabase.get()
     if supabase is None or not org_id or org_id == "dev":
         return
     try:
-        supabase.table("threads").upsert(
-            {
-                "id": thread_id,
-                "org_id": org_id,
-                "title": f"{agent_slug} approval gate",
-                "status": "active",
-            },
-            on_conflict="id",
-        ).execute()
+        agent_id = None
+        try:
+            res = (
+                supabase.table("agents")
+                .select("id")
+                .eq("org_id", org_id)
+                .eq("slug", agent_slug)
+                .limit(1)
+                .execute()
+            )
+            if res.data:
+                agent_id = res.data[0]["id"]
+        except Exception:
+            pass
+
+        payload: dict = {
+            "id": thread_id,
+            "org_id": org_id,
+            "status": "active",
+            "metadata": {"agent_slug": agent_slug},
+        }
+        if user_id and user_id != "dev":
+            payload["user_id"] = user_id
+        if agent_id:
+            payload["agent_id"] = agent_id
+        if first_message:
+            # Trim to a sidebar-friendly length; the DB column is `text` so
+            # the cap is purely cosmetic.
+            payload["title"] = first_message.strip().splitlines()[0][:80]
+
+        supabase.table("threads").upsert(payload, on_conflict="id").execute()
     except Exception as e:
         # Non-fatal — if the upsert fails, store.create will raise its own FK
         # error and the real diagnostic bubbles up from there.
         print(f"[orchestrator] _ensure_thread_row failed: {e!r}", flush=True)
+
+
+def _persist_message(
+    thread_id: str,
+    role: str,
+    content: str,
+    metadata: dict | None = None,
+) -> None:
+    """Append a row to `messages` so the thread can be re-loaded later.
+
+    No-op when there's no Supabase client on the ContextVar (dev/test) or
+    when `content` is empty — empty assistant turns happen if the graph
+    pauses before emitting any tokens, and we'd rather skip them than save
+    blank bubbles.
+    """
+    supabase = current_supabase.get()
+    if supabase is None or not content:
+        return
+    try:
+        supabase.table("messages").insert(
+            {
+                "thread_id": thread_id,
+                "role": role,
+                "content": content,
+                "metadata": metadata or {},
+            }
+        ).execute()
+    except Exception as e:
+        print(f"[orchestrator] _persist_message failed: {e!r}", flush=True)
+
+
+def _extract_token_content(event_str: str) -> str | None:
+    """If `event_str` is an SSE `token` event, return its content delta.
+
+    Used by `stream_new_run` / `_resume` to accumulate the assistant's text
+    as it streams, so we can write the final message to the DB at the end
+    of the turn without having to re-walk LangGraph state.
+    """
+    if not event_str.startswith("data: "):
+        return None
+    try:
+        data = json.loads(event_str[6:].strip())
+    except Exception:
+        return None
+    if data.get("type") != "token":
+        return None
+    return data.get("data", {}).get("content")
 
 
 async def _stream_until_done_or_pause(
@@ -278,11 +364,11 @@ async def _stream_until_done_or_pause(
         "preview": "An agent action is waiting for your review.",
     }
 
-    # The approvals table FKs thread_id -> threads(id). LangGraph manages its
-    # own thread_id via the checkpointer, but nothing has inserted a matching
-    # row in the legacy threads table — so insert one now (idempotent upsert).
-    # Keeps the FK happy and gives us a future hook for linking LangGraph
-    # threads to the chat-history table.
+    # The approvals table FKs thread_id -> threads(id). `stream_new_run`
+    # already upserts the row at the top of the turn, but a paused-state
+    # resume path may hit this branch without going through `stream_new_run`
+    # first (e.g. an approval started in an earlier process). Keep the
+    # idempotent upsert here as a safety net.
     await _ensure_thread_row(org_id=org_id, thread_id=thread_id, agent_slug=agent.slug)
 
     store = get_approval_store()
@@ -341,13 +427,40 @@ async def stream_new_run(
         input_data.update(extra_state)
     config = {"configurable": {"thread_id": thread_id}}
 
+    # Ensure the threads row exists *before* we persist the user message —
+    # `messages.thread_id` FKs to `threads.id`. Also seeds the title from
+    # the first user message when the thread doesn't yet exist (the upsert
+    # path only overwrites the title key if `first_message` is provided, so
+    # follow-up turns won't clobber it via the brief snippet trick — but
+    # the underlying upsert *will* keep the existing title because PostgREST
+    # merges only the keys we send).
+    await _ensure_thread_row(
+        org_id=org_id,
+        thread_id=thread_id,
+        agent_slug=agent.slug,
+        user_id=user_id,
+        first_message=message,
+    )
+    _persist_message(thread_id, "user", message)
+
+    assistant_buf: list[str] = []
     try:
         async for event in _stream_until_done_or_pause(
             app, input_data, config, agent, org_id, thread_id
         ):
+            token = _extract_token_content(event)
+            if token:
+                assistant_buf.append(token)
             yield event
     except Exception as e:
         yield _sse("error", {"message": str(e)})
+    finally:
+        # Persist whatever the assistant produced before the turn ended (or
+        # paused for approval). Resume paths append their own message rows
+        # via `_resume`, so the conversation reads chronologically when
+        # reloaded — pre-pause prose, then the post-resume continuation.
+        if assistant_buf:
+            _persist_message(thread_id, "assistant", "".join(assistant_buf))
 
 
 async def _resume(
@@ -400,13 +513,25 @@ async def _resume(
     # after the interrupt. Graph may pause again (Brand Manager reject loop
     # revise_pitch -> approval_gate), and the pause handler creates a fresh
     # approval row for the next gate.
+    assistant_buf: list[str] = []
     try:
         async for event in _stream_until_done_or_pause(
             app, None, config, agent, org_id, thread_id
         ):
+            token = _extract_token_content(event)
+            if token:
+                assistant_buf.append(token)
             yield event
     except Exception as e:
         yield _sse("error", {"message": str(e)})
+    finally:
+        if assistant_buf:
+            _persist_message(
+                thread_id,
+                "assistant",
+                "".join(assistant_buf),
+                metadata={"resumed_from_approval": approval_id},
+            )
 
 
 async def stream_resume_approved(

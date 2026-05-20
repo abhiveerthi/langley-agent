@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query
 from app.dependencies import get_current_user, CurrentUser, get_supabase
 from supabase import Client
 
@@ -20,18 +22,28 @@ async def create_thread(
 
 @router.get("/chat/threads")
 async def list_threads(
+    agent_slug: Optional[str] = Query(default=None),
     user: CurrentUser = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
 ):
-    result = (
+    """List active threads for the user's org.
+
+    `agent_slug` filters via the JSON-path on `metadata.agent_slug` so the
+    per-agent MiniChat sidebar only sees its own chats. The orchestrator
+    stamps that key on every `_ensure_thread_row` upsert (see
+    services/graph_orchestrator.py).
+    """
+    q = (
         supabase.table("threads")
         .select("*, messages(id, role, content, created_at)")
         .eq("org_id", user.org_id)
         .eq("status", "active")
-        .order("updated_at", desc=True)
-        .limit(50)
-        .execute()
     )
+    if agent_slug:
+        # PostgREST JSON-path filter — `metadata->>agent_slug` matches the
+        # text value stamped by the orchestrator on thread creation.
+        q = q.eq("metadata->>agent_slug", agent_slug)
+    result = q.order("updated_at", desc=True).limit(50).execute()
     return result.data
 
 
