@@ -50,8 +50,11 @@ from packages.agents.core.tasks import create_tasks_from_agent
 from packages.agents.core.templates import render
 from packages.agents.community_manager.tools import (
     get_recent_comments,
+    get_recent_x_comments,
     lookup_channel,
+    lookup_x_user,
     reply_to_comment,
+    reply_to_x_comment,
 )
 from packages.integrations.context import current_supabase
 
@@ -166,7 +169,17 @@ class CommunityManagerAgent(BaseAgent):
         # Tool-bound LLM is used by the triage/research ReAct branch — same
         # pattern as Brand Manager's research/leads branch. The drafting nodes
         # use a plain LLM so they can't accidentally call write tools.
-        self.tools = [get_recent_comments, lookup_channel]
+        #
+        # YouTube tools + X tools are both bound at the LLM. The system prompt
+        # advertises only the surfaces the connected org actually has (YT,
+        # X, or both), so the model self-restricts to live platforms instead
+        # of hitting unconfigured endpoints.
+        self.tools = [
+            get_recent_comments,
+            lookup_channel,
+            get_recent_x_comments,
+            lookup_x_user,
+        ]
         self.llm_with_tools = ChatAnthropic(model=self.model).bind_tools(self.tools)
         self.tool_node = ToolNode(self.tools)
         self.llm = ChatAnthropic(model=self.model)
@@ -475,16 +488,33 @@ class CommunityManagerAgent(BaseAgent):
 
         Uses fewer videos / fewer-per-video than the triage default since
         we just need enough surface area to find the comment the user named.
+
+        When X is connected, X replies are appended after YouTube comments so
+        a `draft_reply` intent can target either platform — the pick_target
+        prompt sees both and picks by id. (Platform routing in `_send_reply_node`
+        keys off the id shape: numeric → X, otherwise → YouTube.)
         """
         try:
-            raw = await get_recent_comments.ainvoke({
+            yt_raw = await get_recent_comments.ainvoke({
                 "channel_id": self._channel_id(state),
                 "max_videos": 5,
                 "per_video": 30,
             })
         except Exception as e:
-            raw = f"Error fetching recent comments: {e}"
-        return {"recent_comments_raw": raw}
+            yt_raw = f"Error fetching recent comments: {e}"
+
+        parts = [yt_raw]
+        if self._profile(state).x.connected:
+            try:
+                x_raw = await get_recent_x_comments.ainvoke({
+                    "max_tweets": 5,
+                    "per_tweet": 30,
+                })
+            except Exception as e:
+                x_raw = f"Error fetching recent X comments: {e}"
+            parts.append(x_raw)
+
+        return {"recent_comments_raw": "\n\n".join(parts)}
 
     async def _pick_target_node(self, state: CommunityManagerState):
         profile = self._profile(state)
@@ -589,10 +619,15 @@ class CommunityManagerAgent(BaseAgent):
         return {}
 
     async def _send_reply_node(self, state: CommunityManagerState):
-        result = await reply_to_comment(
-            parent_comment_id=state.get("target_comment_id") or "",
-            text=state.get("draft_reply") or "",
-        )
+        # Platform routing: X tweet IDs are pure numeric strings; YouTube
+        # comment IDs contain dots / letters. Cheap, accurate disambiguation
+        # without threading an extra `target_platform` field through state.
+        target_id = (state.get("target_comment_id") or "").strip()
+        draft = state.get("draft_reply") or ""
+        if target_id.isdigit():
+            result = await reply_to_x_comment(parent_tweet_id=target_id, text=draft)
+        else:
+            result = await reply_to_comment(parent_comment_id=target_id, text=draft)
         return {"send_result": result, "approval_status": "approved"}
 
     async def _respond_node(self, state: CommunityManagerState):

@@ -123,6 +123,196 @@ async def mark_connection_error(supabase: Client, org_id: str, error: str) -> No
     )
 
 
+def get_authenticated_user(supabase: Client, org_id: str) -> dict | None:
+    """Return the X user record stored at connect time (id, username, name).
+
+    The Community Manager needs the authenticated user_id to pull *the user's
+    own tweets* — without it we can't scope the timeline read to the right
+    account. Stored in `integrations.metadata` by `save_connection`.
+    """
+    conn = get_connection(supabase, org_id)
+    if not conn:
+        return None
+    meta = conn.get("metadata") or {}
+    if not meta.get("user_id"):
+        return None
+    return {
+        "user_id": meta.get("user_id"),
+        "username": meta.get("username"),
+        "name": meta.get("name"),
+    }
+
+
+async def get_user_tweets(
+    access_token: str,
+    user_id: str,
+    *,
+    max_results: int = 10,
+) -> list[dict]:
+    """GET /2/users/:id/tweets — the authenticated user's recent original tweets.
+
+    Excludes retweets and replies so the triage pass only operates on the
+    user's *own* threads. Returns a list of {id, text, created_at,
+    public_metrics, conversation_id} dicts.
+
+    Raises RuntimeError with a friendly message on the usual failure modes
+    (rate limit, expired token, free-tier read block).
+    """
+    # X caps max_results in [5, 100] for this endpoint.
+    capped = max(5, min(int(max_results), 100))
+    params = {
+        "max_results": capped,
+        "exclude": "retweets,replies",
+        "tweet.fields": "created_at,public_metrics,conversation_id",
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"https://api.x.com/2/users/{user_id}/tweets",
+            params=params,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if resp.status_code == 200:
+        return list((resp.json().get("data") or []))
+    _raise_for_x_status(resp, what="fetch user tweets")
+    return []
+
+
+async def get_tweet_replies(
+    access_token: str,
+    conversation_id: str,
+    *,
+    author_id: str,
+    max_results: int = 100,
+) -> list[dict]:
+    """Replies to one of the user's tweets, fetched via the recent-search
+    endpoint with a `conversation_id:<id>` query.
+
+    `author_id` is the connected user's own id; we use it to filter out their
+    own replies inside their own thread (so a self-reply doesn't get triaged
+    as an incoming comment) and to detect whether the user already replied to
+    a given commenter — analogous to the YouTube "owner already replied" guard.
+
+    Returns a list of reply tweet dicts with author + text + metrics expanded.
+    """
+    capped = max(10, min(int(max_results), 100))
+    params = {
+        "query": f"conversation_id:{conversation_id}",
+        "max_results": capped,
+        "tweet.fields": "created_at,public_metrics,in_reply_to_user_id,author_id,conversation_id",
+        "expansions": "author_id",
+        "user.fields": "username,name,public_metrics,verified",
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            "https://api.x.com/2/tweets/search/recent",
+            params=params,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if resp.status_code != 200:
+        _raise_for_x_status(resp, what="fetch tweet replies")
+        return []
+
+    payload = resp.json()
+    tweets = payload.get("data") or []
+    users_by_id = {
+        u["id"]: u for u in ((payload.get("includes") or {}).get("users") or [])
+    }
+    out: list[dict] = []
+    for t in tweets:
+        a_id = t.get("author_id") or ""
+        # Skip the user's own contributions to their thread.
+        if a_id == author_id:
+            continue
+        user = users_by_id.get(a_id) or {}
+        out.append({
+            "id": t.get("id"),
+            "text": t.get("text") or "",
+            "created_at": t.get("created_at"),
+            "author_id": a_id,
+            "author_username": user.get("username"),
+            "author_name": user.get("name"),
+            "author_followers": ((user.get("public_metrics") or {}).get("followers_count")),
+            "author_verified": user.get("verified", False),
+            "in_reply_to_user_id": t.get("in_reply_to_user_id"),
+            "metrics": t.get("public_metrics") or {},
+            "conversation_id": t.get("conversation_id"),
+        })
+    return out
+
+
+async def lookup_user(access_token: str, handle_or_id: str) -> dict | None:
+    """GET /2/users by username or id. Returns dict or None when not found."""
+    is_id = handle_or_id.isdigit() and len(handle_or_id) >= 5
+    base = "https://api.x.com/2"
+    if is_id:
+        url = f"{base}/users/{handle_or_id}"
+    else:
+        url = f"{base}/users/by/username/{handle_or_id.lstrip('@')}"
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            url,
+            params={"user.fields": "public_metrics,verified,description,created_at"},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if resp.status_code == 404:
+        return None
+    if resp.status_code != 200:
+        _raise_for_x_status(resp, what="lookup user")
+        return None
+    return resp.json().get("data") or None
+
+
+async def reply_to_tweet(access_token: str, parent_tweet_id: str, text: str) -> dict:
+    """POST /2/tweets with `reply.in_reply_to_tweet_id` set — posts a reply to
+    an existing tweet as the authenticated user.
+
+    Symmetric with `post_tweet` so the Community Manager's `_send_reply_node`
+    can call this when the target lives on X (vs `reply_to_comment` for YT).
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            "https://api.x.com/2/tweets",
+            json={"text": text, "reply": {"in_reply_to_tweet_id": parent_tweet_id}},
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+        )
+    if resp.status_code == 201:
+        data = resp.json().get("data") or {}
+        return {"id": data.get("id"), "text": data.get("text") or text}
+    _raise_for_x_status(resp, what="reply to tweet")
+    return {}
+
+
+def _raise_for_x_status(resp: httpx.Response, *, what: str) -> None:
+    """Translate non-2xx X API responses into a friendly RuntimeError.
+
+    Mirrors the messaging in `post_tweet` so every X call surfaces the same
+    "this is the actual cause" hint for free-tier blocks, rate limits, and
+    expired tokens — instead of a bare HTTP status the LLM has to interpret.
+    """
+    body = resp.text
+    if resp.status_code == 403:
+        raise RuntimeError(
+            f"X rejected the {what} call (403). Reads/writes beyond the Free "
+            f"tier require Basic ($200/mo) or higher, or the connected app "
+            f"may be missing the required scope. Body: {body}"
+        )
+    if resp.status_code == 429:
+        retry_after = resp.headers.get("x-rate-limit-reset") or resp.headers.get("retry-after")
+        raise RuntimeError(
+            f"X rate limit hit while trying to {what} (429). "
+            f"Retry after {retry_after or 'unknown'}: {body}"
+        )
+    if resp.status_code == 401:
+        raise RuntimeError(
+            f"X access token rejected while trying to {what} (401). Reconnect X. Body: {body}"
+        )
+    raise RuntimeError(f"X {what} failed: {resp.status_code} {body}")
+
+
 async def post_tweet(access_token: str, text: str) -> dict:
     """POST /2/tweets. Returns {id, text} on success.
 
