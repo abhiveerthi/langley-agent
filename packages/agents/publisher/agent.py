@@ -370,7 +370,9 @@ class PublisherAgent(BaseAgent):
         profile = self._profile(state)
         prompt = render("publisher", "classify.j2", profile=profile)
         try:
-            response = await self.llm.ainvoke([
+            # `marcus:silent` keeps the classifier's bare-slug response out of
+            # the chat stream — see graph_orchestrator on_chat_model_stream filter.
+            response = await self.llm.with_config(tags=["marcus:silent"]).ainvoke([
                 SystemMessage(content=prompt),
                 HumanMessage(content=self._last_user_text(state)),
             ])
@@ -469,7 +471,8 @@ class PublisherAgent(BaseAgent):
         draft = state.get("draft_markdown") or ""
 
         async def _attempt() -> tuple[dict | None, str]:
-            response = await self.llm.ainvoke([
+            # Internal JSON extraction — never streamed to chat.
+            response = await self.llm.with_config(tags=["marcus:silent"]).ainvoke([
                 SystemMessage(content=prompt),
                 HumanMessage(content=draft),
             ])

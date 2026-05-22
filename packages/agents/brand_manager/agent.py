@@ -206,7 +206,8 @@ class BrandManagerAgent(BaseAgent):
     async def _classify_intent_node(self, state: BrandManagerState):
         profile = self._profile(state)
         prompt = render("brand_manager", "classify.j2", profile=profile)
-        response = await self.llm.ainvoke([
+        # `marcus:silent` keeps the classifier's bare-slug response out of chat.
+        response = await self.llm.with_config(tags=["marcus:silent"]).ainvoke([
             SystemMessage(content=prompt),
             HumanMessage(content=self._last_user_text(state)),
         ])
@@ -297,7 +298,8 @@ USER FEEDBACK:
     async def _extract_email_node(self, state: BrandManagerState):
         profile = self._profile(state)
         prompt = render("brand_manager", "extract.j2", profile=profile)
-        response = await self.llm.ainvoke([
+        # Internal JSON extraction — never streamed to chat.
+        response = await self.llm.with_config(tags=["marcus:silent"]).ainvoke([
             SystemMessage(content=prompt),
             HumanMessage(content=state.get("draft", "")),
         ])

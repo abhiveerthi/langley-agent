@@ -359,10 +359,19 @@ async def _stream_until_done_or_pause(
 
         # ── LLM token stream ───────────────────────────────────────────
         if et == "on_chat_model_stream":
-            # LangGraph stamps `langgraph_node` on the event metadata when a
-            # model invocation happens inside a graph node. We use it to
-            # filter out internal LLM calls (intent classification, JSON
-            # extraction) — their output is state plumbing, not chat prose.
+            # Two-layer filter for internal LLM calls (intent classification,
+            # JSON extraction) whose output is state plumbing, not chat prose:
+            #   1. Explicit `marcus:silent` tag at the call site
+            #      (`self.llm.with_config(tags=["marcus:silent"]).ainvoke(...)`).
+            #      Most reliable — set at the call so it always propagates.
+            #   2. `metadata.langgraph_node` ∈ `_THINKING_NODE_SKIP`. Belt-and-
+            #      braces fallback for nodes that wired the LLM call but
+            #      forgot the tag; some LangGraph versions don't populate this
+            #      reliably for streamed chunks, which is exactly the bug
+            #      that leaked `classify_intent`'s "general" into chat.
+            tags = ev.get("tags") or []
+            if "marcus:silent" in tags:
+                continue
             metadata = ev.get("metadata") or {}
             origin_node = metadata.get("langgraph_node") or ""
             if origin_node in _THINKING_NODE_SKIP:

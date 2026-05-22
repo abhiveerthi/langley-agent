@@ -309,7 +309,8 @@ class CommunityManagerAgent(BaseAgent):
     async def _classify_intent_node(self, state: CommunityManagerState):
         profile = self._profile(state)
         prompt = render("community_manager", "classify.j2", profile=profile)
-        response = await self.llm.ainvoke([
+        # `marcus:silent` keeps the classifier's bare-slug response out of chat.
+        response = await self.llm.with_config(tags=["marcus:silent"]).ainvoke([
             SystemMessage(content=prompt),
             HumanMessage(content=self._last_user_text(state)),
         ])
