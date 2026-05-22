@@ -90,8 +90,8 @@ const capabilities: { title: string; body: string; icon: React.ElementType }[] =
   },
   {
     icon: Send,
-    title: "Send approved pitches via Resend",
-    body: "Once you approve the draft, it sends via Resend and logs the deal as 'pitched' in the pipeline. No auto-sends.",
+    title: "Send approved pitches from your Gmail",
+    body: "Once you approve the draft, it sends from your connected Gmail account and logs the deal as 'pitched' in the pipeline. No auto-sends.",
   },
 ];
 
@@ -171,7 +171,7 @@ export default function BrandManagerAgentPage() {
             <div className="flex-1">
               <h1 className="text-xl font-semibold text-foreground">Brand Manager</h1>
               <p className="text-sm text-muted-foreground">
-                Drafts sponsor outreach and tailored pitches, tracks deal stages. Sends via Resend — gated by your approval.
+                Drafts sponsor outreach and tailored pitches, tracks deal stages. Sends from your connected Gmail — gated by your approval.
               </p>
             </div>
             <div className="flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5">
@@ -208,7 +208,7 @@ export default function BrandManagerAgentPage() {
               <li className="flex gap-2.5"><span className="text-amber-400 font-mono">1.</span><span>You ask: <span className="text-foreground">&quot;draft a pitch to Magpul&quot;</span></span></li>
               <li className="flex gap-2.5"><span className="text-amber-400 font-mono">2.</span><span>It pulls your media kit, researches Magpul, and drafts an email tailored to their products + your audience.</span></li>
               <li className="flex gap-2.5"><span className="text-amber-400 font-mono">3.</span><span>Pauses at the approval gate — you see the To / Subject / Body in chat or Slack.</span></li>
-              <li className="flex gap-2.5"><span className="text-amber-400 font-mono">4.</span><span>Approve → Resend sends it, deal logged as <code className="font-mono text-foreground">pitched</code>. Reject with feedback → revise + re-pause.</span></li>
+              <li className="flex gap-2.5"><span className="text-amber-400 font-mono">4.</span><span>Approve → it sends from your Gmail, deal logged as <code className="font-mono text-foreground">pitched</code>. Reject with feedback → revise + re-pause.</span></li>
             </ol>
           </div>
         </Section>
@@ -244,10 +244,10 @@ export default function BrandManagerAgentPage() {
         <div className="rounded-lg border border-border bg-muted/20 p-4 text-xs text-muted-foreground space-y-2">
           <div className="flex items-center gap-2 text-foreground font-medium">
             <Mail className="h-3.5 w-3.5 text-amber-400" />
-            Resend
+            Gmail
           </div>
           <p>
-            Pitches send via Resend using a server-side API key — no per-user OAuth needed. If sends are failing, the API key on the backend is the first place to check.
+            Pitches send from your connected Gmail account via OAuth, so brands see a real address and replies thread back into your inbox. Connect Gmail on the Integrations page if sends fail.
           </p>
         </div>
 

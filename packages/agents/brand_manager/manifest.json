@@ -1,12 +1,12 @@
 {
   "slug": "brand-manager",
   "name": "Brand Manager",
-  "description": "Gets you paid. Drafts cold outreach to sponsors, researches target brands, sends approved pitches via Resend, and tracks deal stages.",
-  "version": "0.2.0",
+  "description": "Gets you paid. Drafts cold outreach to sponsors, researches target brands, sends approved pitches from the creator's connected Gmail, and tracks deal stages.",
+  "version": "0.3.0",
   "icon": "handshake",
   "tagline": "Gets you paid.",
   "capabilities": ["outreach", "sales", "crm", "writing"],
-  "required_integrations": ["resend"],
+  "required_integrations": ["gmail"],
   "optional_integrations": ["youtube"],
   "tools": [
     "find_sponsor_leads",
@@ -20,8 +20,8 @@
     {
       "tool": "send_pitch_email",
       "label": "Send pitch email",
-      "description": "Sends the approved sponsor pitch via Resend using the configured sending domain. Logs the deal as 'pitched' in brand_deals on success.",
-      "requires": "resend"
+      "description": "Sends the approved sponsor pitch from the org's connected Gmail account via OAuth. Logs the deal as 'pitched' in brand_deals on success.",
+      "requires": "gmail"
     }
   ],
   "config_schema": {

@@ -39,62 +39,6 @@ async def perplexity_search(
         return _strip_code_blocks(content)
 
 
-async def resend_send(
-    to: str | list[str],
-    subject: str,
-    body_text: str,
-    body_html: str | None = None,
-    from_name: str | None = None,
-    reply_to: str | None = None,
-) -> dict:
-    """Send an email via Resend.
-
-    Args:
-        to: Recipient email address (or list of addresses).
-        subject: Email subject line.
-        body_text: Plain-text body. Used as fallback if body_html not given.
-        body_html: Optional HTML body.
-        from_name: Optional sender display name. The actual From address
-            is always EMAIL_FROM (configured in .env, must be a domain
-            verified in Resend). The display name is what shows in inboxes.
-        reply_to: Optional Reply-To address.
-
-    Returns the parsed JSON response from Resend (`{"id": "..."}`).
-    Raises ValueError if API key or sender is not configured.
-    """
-    api_key = os.environ.get("RESEND_API_KEY")
-    if not api_key:
-        raise ValueError("RESEND_API_KEY not set — add it to .env")
-
-    sender_addr = os.environ.get("EMAIL_FROM")
-    if not sender_addr:
-        raise ValueError("EMAIL_FROM not set — add it to .env")
-
-    from_field = f"{from_name} <{sender_addr}>" if from_name else sender_addr
-    payload: dict = {
-        "from": from_field,
-        "to": [to] if isinstance(to, str) else to,
-        "subject": subject,
-        "text": body_text,
-    }
-    if body_html:
-        payload["html"] = body_html
-    if reply_to:
-        payload["reply_to"] = reply_to
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            "https://api.resend.com/emails",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-        )
-        response.raise_for_status()
-        return response.json()
-
-
 async def youtube_api_get(endpoint: str, params: dict) -> dict:
     """Call YouTube Data API v3 with the static API key.
 

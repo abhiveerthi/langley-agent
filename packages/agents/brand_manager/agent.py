@@ -36,7 +36,8 @@ class BrandManagerAgent(BaseAgent):
     name = "Brand Manager"
     description = (
         "Drafts sponsor outreach and tailored pitches, tracks deal stages. "
-        "Sends approved pitches via Resend with a human-in-the-loop approval gate."
+        "Sends approved pitches from the creator's connected Gmail with a "
+        "human-in-the-loop approval gate."
     )
     model = "claude-sonnet-4-6"
 
@@ -348,7 +349,7 @@ USER FEEDBACK:
 
         # Archive the sent pitch as Markdown in Storage Library so the
         # creator can reopen exactly what was sent (audit trail). The
-        # Resend message ID is captured in brand_deals; the readable copy
+        # Gmail message ID is captured in brand_deals; the readable copy
         # lives here. Best-effort — never fails the send path.
         from packages.agents.core.storage_export import export_to_storage
         from datetime import datetime, timezone
