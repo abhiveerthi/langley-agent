@@ -103,6 +103,18 @@ class YoutubeChannel(BaseModel):
     channel_id: str | None = None
 
 
+class XAccount(BaseModel):
+    """The X (Twitter) account this org has connected via OAuth.
+
+    Populated by `_overlay_oauth_x_account` from the `integrations` row's
+    metadata. Empty when X isn't connected — agents key off `connected` to
+    decide whether to expose X-scoped tools in prompts."""
+    connected: bool = False
+    user_id: str | None = None
+    username: str | None = None
+    display_name: str | None = None
+
+
 def _generic_niche() -> "Niche":
     """Fallback niche used when a profile has no `niche_slug` set yet
     (typical for orgs mid-onboarding). Keeps templates that read
@@ -126,6 +138,7 @@ class OrgProfile(BaseModel):
     # Always non-None so templates can render — see _generic_niche() above.
     niche: Niche = Field(default_factory=_generic_niche)
     youtube: YoutubeChannel = Field(default_factory=YoutubeChannel)
+    x: XAccount = Field(default_factory=XAccount)
     owners: list[str] = Field(default_factory=list)
     is_fixture: bool = False
 
@@ -294,6 +307,35 @@ def _load_from_yaml(slug: str) -> OrgProfile | None:
     )
 
 
+def _overlay_oauth_x_account(profile: OrgProfile, org_id: str) -> None:
+    """Read the connected X user (id/username) from the integrations row and
+    graft onto the profile. Same pattern as `_overlay_oauth_channel_id`:
+    OAuth is the source of truth for "which account are we acting on".
+
+    No-op when X isn't connected — `profile.x.connected` stays False and
+    Community Manager templates branch on that to decide whether to advertise
+    X tools.
+    """
+    supabase = current_supabase.get()
+    if supabase is None or not org_id:
+        return
+    try:
+        from packages.integrations.x.client import (
+            get_authenticated_user as get_oauth_x_user,
+        )
+        user = get_oauth_x_user(supabase, org_id)
+        if user and user.get("user_id"):
+            profile.x = XAccount(
+                connected=True,
+                user_id=user.get("user_id"),
+                username=user.get("username"),
+                display_name=user.get("name"),
+            )
+    except Exception:
+        # Best-effort — never fail profile load on a missing/malformed X row.
+        pass
+
+
 def _overlay_oauth_channel_id(profile: OrgProfile, org_id: str) -> None:
     """If the profile has no channel_id but the org has connected YouTube via
     OAuth, graft the connected channel onto the profile in place.
@@ -350,6 +392,7 @@ def load_profile(org_id_or_slug: str | None) -> OrgProfile:
             # still run; the user gets stub voice/niche until they save.
             profile = _blank_profile(identifier)
         _overlay_oauth_channel_id(profile, identifier)
+        _overlay_oauth_x_account(profile, identifier)
         return profile
 
     profile = _load_from_yaml(identifier)
