@@ -84,9 +84,15 @@ class TestOrchestratorEmission:
         from app.services import graph_orchestrator as orch
 
         # Build a minimal stub agent that pretends compose_brief ran.
+        class _StubGraph:
+            # The orchestrator filters astream_events on_chain_start events
+            # to actual graph nodes via `agent.graph.nodes`.
+            nodes = {"compose_brief": object()}
+
         class _StubAgent:
             slug = "stub-strategist"
             interrupt_before_nodes: list[str] = []
+            graph = _StubGraph()
 
             def get_structured_outputs(self, state, visited):
                 if "compose_brief" in visited:
@@ -97,16 +103,17 @@ class TestOrchestratorEmission:
                 return None
 
         # Stub `app` returned by _compile_agent — no real graph, just an
-        # async iterable for astream and a snapshot getter.
+        # async event stream (astream_events v2 shape) and a snapshot getter.
         class _StubSnapshot:
             def __init__(self):
                 self.next = ()
                 self.values = {"brief": {"headline": "stubbed", "ideas": [{"title": "A"}]}}
 
         class _StubApp:
-            async def astream(self, input_data, config, stream_mode):
-                # Pretend compose_brief ran by yielding it.
-                yield {"compose_brief": {}}
+            async def astream_events(self, input_data, config, version):
+                # Mimic LangGraph's v2 stream: a graph node opens and closes.
+                yield {"event": "on_chain_start", "name": "compose_brief", "run_id": "r1", "data": {}}
+                yield {"event": "on_chain_end", "name": "compose_brief", "run_id": "r1", "data": {"output": {}}}
 
             async def aget_state(self, config):
                 return _StubSnapshot()
@@ -143,9 +150,13 @@ class TestOrchestratorEmission:
         calls the contract method."""
         from app.services import graph_orchestrator as orch
 
+        class _QuietGraph:
+            nodes = {"some_node": object()}
+
         class _Quiet:
             slug = "quiet"
             interrupt_before_nodes: list[str] = []
+            graph = _QuietGraph()
             def get_structured_outputs(self, state, visited): return {}
             def get_approval_request(self, state): return None
 
@@ -154,8 +165,9 @@ class TestOrchestratorEmission:
             values: dict = {}
 
         class _StubApp:
-            async def astream(self, input_data, config, stream_mode):
-                yield {"some_node": {}}
+            async def astream_events(self, input_data, config, version):
+                yield {"event": "on_chain_start", "name": "some_node", "run_id": "r2", "data": {}}
+                yield {"event": "on_chain_end", "name": "some_node", "run_id": "r2", "data": {"output": {}}}
 
             async def aget_state(self, config):
                 return _StubSnapshot()

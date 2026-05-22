@@ -12,9 +12,9 @@ import {
   History,
 } from "lucide-react";
 import { useChat, listThreads, type ThreadSummary } from "@/hooks/useChat";
+import { humanizeAgentNode } from "@/lib/agentNodes";
 import { cn } from "@/lib/utils";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { MarkdownBody } from "./MarkdownBody";
 
 interface MiniChatProps {
   agentSlug: string;
@@ -107,6 +107,16 @@ export function MiniChat({ agentSlug, agentName }: MiniChatProps) {
     sendMessage(trimmed);
     setInputValue("");
   }, [inputValue, isStreaming, sendMessage]);
+
+  // Only the last assistant message wears the streaming caret. Earlier
+  // assistant turns are completed history and render statically.
+  let lastAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant") {
+      lastAssistantIdx = i;
+      break;
+    }
+  }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -244,38 +254,61 @@ export function MiniChat({ agentSlug, agentName }: MiniChatProps) {
                 </div>
               </div>
             )}
-            {messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={cn(
-                  "flex gap-2",
-                  msg.role === "user" ? "justify-end" : "justify-start"
-                )}
-              >
+            {messages.map((msg, idx) => {
+              const isAssistantStreaming =
+                isStreaming && idx === lastAssistantIdx && msg.role === "assistant";
+              // Empty assistant slot before the first token arrives — let
+              // the thinking indicator below carry the visual weight instead
+              // of rendering a blank bubble.
+              if (msg.role === "assistant" && !msg.content) {
+                return null;
+              }
+              return (
                 <div
+                  key={msg.id}
                   className={cn(
-                    "max-w-[85%] rounded-lg px-3 py-2 text-xs leading-relaxed",
-                    msg.role === "user"
-                      ? "bg-primary text-primary-foreground rounded-tr-sm"
-                      : "bg-card border border-border text-foreground rounded-tl-sm"
+                    "flex gap-2 chat-bubble-in",
+                    msg.role === "user" ? "justify-end" : "justify-start"
                   )}
                 >
-                  {msg.role === "user" ? (
-                    <p className="whitespace-pre-wrap">{msg.content}</p>
-                  ) : (
-                    <div className="prose prose-invert prose-xs max-w-none [&_p]:text-xs [&_p]:leading-relaxed [&_li]:text-xs [&_h1]:text-sm [&_h2]:text-xs [&_h3]:text-xs [&_pre]:text-[10px]">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {msg.content}
-                      </ReactMarkdown>
-                    </div>
-                  )}
+                  <div
+                    className={cn(
+                      "max-w-[85%] rounded-lg px-3 py-2 text-xs leading-relaxed",
+                      msg.role === "user"
+                        ? "bg-primary text-primary-foreground rounded-tr-sm"
+                        : "bg-card border border-border text-foreground rounded-tl-sm"
+                    )}
+                  >
+                    {msg.role === "user" ? (
+                      <p className="whitespace-pre-wrap">{msg.content}</p>
+                    ) : (
+                      <div className="relative">
+                        <MarkdownBody content={msg.content} size="xs" />
+                        {isAssistantStreaming && (
+                          <span className="chat-caret" aria-hidden="true" />
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
-            {thinkingNode && (
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
-                Thinking...
+              );
+            })}
+            {/* Thinking indicator — 3 bouncing dots inside an assistant-styled
+                bubble so the transition from "thinking" to "answering" feels
+                continuous. Only visible between/before LLM token streams; the
+                hook clears `thinkingNode` on first token. */}
+            {(thinkingNode || (isStreaming && lastAssistantIdx >= 0 && !messages[lastAssistantIdx]?.content)) && (
+              <div className="flex justify-start chat-bubble-in">
+                <div className="flex items-center gap-2 rounded-lg rounded-tl-sm border border-border bg-card px-3 py-2.5">
+                  <div className="flex items-end gap-1">
+                    <span className="chat-typing-dot h-1.5 w-1.5 rounded-full bg-primary" style={{ animationDelay: "0ms" }} />
+                    <span className="chat-typing-dot h-1.5 w-1.5 rounded-full bg-primary" style={{ animationDelay: "160ms" }} />
+                    <span className="chat-typing-dot h-1.5 w-1.5 rounded-full bg-primary" style={{ animationDelay: "320ms" }} />
+                  </div>
+                  <span className="text-[11px] text-muted-foreground">
+                    {humanizeAgentNode(thinkingNode)}…
+                  </span>
+                </div>
               </div>
             )}
             {error && (

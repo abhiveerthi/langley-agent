@@ -37,7 +37,7 @@ import json
 import os
 from typing import Any, AsyncIterator
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 
 from packages.agents.core.base import BaseAgent
@@ -140,10 +140,13 @@ def _sse(event_type: str, data: dict) -> str:
     return f"data: {json.dumps({'type': event_type, 'data': data})}\n\n"
 
 
-def _ai_message_text(msg: AIMessage) -> str:
-    """Flatten Claude's content-block list into a plain string."""
+def _ai_message_text(msg: AIMessage | AIMessageChunk) -> str:
+    """Flatten Claude's content-block list (or a chunk's content) into a plain string."""
     content = msg.content
     if isinstance(content, list):
+        # Claude streams content as a list of blocks; tool-use blocks have no
+        # "text" key, so they get filtered out here and surface via the
+        # dedicated tool_call_start/end SSE events instead.
         return "".join(
             block.get("text", "") for block in content
             if isinstance(block, dict) and block.get("type") == "text"
@@ -151,42 +154,36 @@ def _ai_message_text(msg: AIMessage) -> str:
     return content or ""
 
 
-def _emit_message_events(messages: list, seen_texts: set[str]) -> list[str]:
-    """Translate LangGraph message deltas into SSE events.
-
-    Several agents have a terminal `_respond_node` that re-emits the previous
-    ReAct loop's final AIMessage so the graph terminates with a clean user-
-    facing reply. From the orchestrator's perspective that's the same text
-    appearing in two consecutive `updates` chunks — and the frontend
-    accumulates both, so the user sees the message twice. `seen_texts` lets
-    us suppress the redundant re-emission while still letting fresh deltas
-    (tokens, partial drafts) flow through.
-    """
-    events: list[str] = []
-    for msg in messages:
-        if isinstance(msg, AIMessage):
-            text = _ai_message_text(msg)
-            if text and text not in seen_texts:
-                if seen_texts:
-                    events.append(_sse("token", {"content": "\n\n"}))
-                events.append(_sse("token", {"content": text}))
-                seen_texts.add(text)
-            if getattr(msg, "tool_calls", None):
-                for tc in msg.tool_calls:
-                    events.append(_sse("tool_call_start", {
-                        "id": tc.get("id", ""),
-                        "tool": tc.get("name", ""),
-                        "input": tc.get("args", {}),
-                        "status": "running",
-                    }))
-        elif isinstance(msg, ToolMessage):
-            events.append(_sse("tool_call_end", {
-                "id": msg.tool_call_id,
-                "tool": msg.name,
-                "output": str(msg.content)[:500],
-                "status": "success",
-            }))
-    return events
+# Graph nodes whose entry is too internal / too fast to be worth surfacing
+# as a "thinking…" indicator. Two categories live here:
+#
+#   1. No-op / housekeeping nodes (load_profile, approval_gate, respond)
+#      that flash past in milliseconds and would just add noise to the chat.
+#   2. Internal LLM nodes whose output is JSON for state (intent classifier,
+#      JSON extractor, target picker). Streaming raw model output from these
+#      would dump `{"intent": "draft_pitch"}` into the bubble — the same set
+#      is reused below to gate `on_chat_model_stream` events so those
+#      internal model calls stay invisible to the user.
+#
+# Visible nodes (research_target_brand, draft_pitch, generate_kit,
+# compose_brief, draft_reply, the ReAct loop agents, etc.) are deliberately
+# absent so they DO surface the thinking indicator and DO stream tokens.
+_THINKING_NODE_SKIP = {
+    # No-op / housekeeping
+    "load_profile",
+    "load_brand_profile",
+    "load_peer_context",
+    "approval_gate",
+    "respond",
+    # Internal LLM calls — emit JSON for state, not user-facing prose
+    "classify_intent",
+    "extract_email",       # Brand Manager — parses draft into To/Subject/Body
+    "extract_structured",  # Publisher — parses kit into typed package fields
+    "pick_target",         # Community Manager — picks which comment to reply to
+    # LangGraph sentinel node names
+    "__start__",
+    "__end__",
+}
 
 
 async def _compile_agent(agent: BaseAgent):
@@ -195,6 +192,20 @@ async def _compile_agent(agent: BaseAgent):
         checkpointer=get_checkpointer(),
         interrupt_before=agent.interrupt_before_nodes,
     )
+
+
+def _graph_node_names(agent: BaseAgent) -> set[str]:
+    """Return the set of node names registered on the agent's StateGraph.
+
+    Used to filter `astream_events` `on_chain_start` events down to actual
+    graph nodes — the v2 event stream also fires for the outer graph, for
+    RunnableSequence wrappers, and for tool/model invocations, none of
+    which should drive the chat's thinking indicator.
+    """
+    try:
+        return set(agent.graph.nodes.keys())  # StateGraph.nodes is a dict
+    except Exception:
+        return set()
 
 
 async def _ensure_thread_row(
@@ -319,20 +330,110 @@ async def _stream_until_done_or_pause(
 ) -> AsyncIterator[str]:
     """Shared body used by both fresh-run and resume.
 
-    Runs `app.astream` to completion or until LangGraph pauses at an interrupt,
-    emits per-node SSE events, and (if paused) inserts an approvals row + emits
-    a `waiting_approval` event with the approval payload. Yields `done` at the
-    end if the graph completed without pausing.
+    Drives the graph via `astream_events(version="v2")` so we get three
+    things at once:
+
+      - per-token streaming via `on_chat_model_stream` (Claude AIMessageChunks)
+      - per-node "thinking…" events via `on_chain_start` for graph nodes
+      - per-tool call start/end events via `on_tool_start` / `on_tool_end`
+
+    Synthetic AIMessages (e.g. Brand Manager's `_respond_node` repackaging
+    `send_result` as the final reply) don't go through `on_chat_model_stream`
+    because no LLM was invoked — those are emitted as a final `token` from
+    the node's `on_chain_end`, with a dedup against what was already
+    streamed so the ReAct-loop branches (where `_respond_node` just echoes
+    the last AIMessage) don't duplicate text.
+
+    After the event stream drains, we inspect graph state via `aget_state`
+    to decide between `done` and a pause + `waiting_approval` event.
     """
     visited_nodes: list[str] = []
-    seen_texts: set[str] = set()
-    async for chunk in app.astream(input_data, config=config, stream_mode="updates"):
-        for _node, node_data in chunk.items():
-            visited_nodes.append(_node)
-            if not node_data:
+    streamed_buffer: list[str] = []  # all token content emitted so far (for dedup)
+    tool_run_meta: dict[str, str] = {}  # run_id -> tool name (for matching end events)
+    graph_node_names = _graph_node_names(agent)
+
+    async for ev in app.astream_events(input_data, config=config, version="v2"):
+        et = ev.get("event")
+        name = ev.get("name") or ""
+        data = ev.get("data") or {}
+
+        # ── LLM token stream ───────────────────────────────────────────
+        if et == "on_chat_model_stream":
+            # LangGraph stamps `langgraph_node` on the event metadata when a
+            # model invocation happens inside a graph node. We use it to
+            # filter out internal LLM calls (intent classification, JSON
+            # extraction) — their output is state plumbing, not chat prose.
+            metadata = ev.get("metadata") or {}
+            origin_node = metadata.get("langgraph_node") or ""
+            if origin_node in _THINKING_NODE_SKIP:
                 continue
-            for event in _emit_message_events(node_data.get("messages", []), seen_texts):
-                yield event
+            chunk = data.get("chunk")
+            if not isinstance(chunk, (AIMessage, AIMessageChunk)):
+                continue
+            text = _ai_message_text(chunk)
+            if text:
+                streamed_buffer.append(text)
+                yield _sse("token", {"content": text})
+            continue
+
+        # ── Graph node entry → thinking indicator ──────────────────────
+        if et == "on_chain_start" and name in graph_node_names:
+            visited_nodes.append(name)
+            if name not in _THINKING_NODE_SKIP:
+                yield _sse("agent_thinking", {"node": name})
+            continue
+
+        # ── Graph node exit → catch synthetic (non-LLM) AIMessages ────
+        if et == "on_chain_end" and name in graph_node_names:
+            output = data.get("output")
+            if isinstance(output, dict):
+                for msg in output.get("messages", []) or []:
+                    if not isinstance(msg, AIMessage):
+                        continue
+                    text = _ai_message_text(msg)
+                    if not text:
+                        continue
+                    # Skip if this exact text already streamed via tokens —
+                    # avoids the duplicate when a terminal node just echoes
+                    # the previous LLM message.
+                    if text in "".join(streamed_buffer):
+                        continue
+                    # Separate from any preceding streamed text with a soft
+                    # break so the synthetic reply doesn't run into prior
+                    # ReAct-loop tokens.
+                    if streamed_buffer:
+                        yield _sse("token", {"content": "\n\n"})
+                        streamed_buffer.append("\n\n")
+                    streamed_buffer.append(text)
+                    yield _sse("token", {"content": text})
+            continue
+
+        # ── Tool invocation ────────────────────────────────────────────
+        if et == "on_tool_start":
+            run_id = str(ev.get("run_id") or "")
+            tool_run_meta[run_id] = name
+            yield _sse("tool_call_start", {
+                "id": run_id or name,
+                "tool": name,
+                "input": data.get("input") or {},
+                "status": "running",
+            })
+            continue
+
+        if et == "on_tool_end":
+            run_id = str(ev.get("run_id") or "")
+            output = data.get("output")
+            output_str = ""
+            if output is not None:
+                # ToolMessage instances carry content; everything else stringifies.
+                output_str = str(getattr(output, "content", output))
+            yield _sse("tool_call_end", {
+                "id": run_id or name,
+                "tool": tool_run_meta.get(run_id, name),
+                "output": output_str[:500],
+                "status": "success",
+            })
+            continue
 
     # After astream returns, inspect the graph state to see if we paused at
     # an interrupt. state.next is a tuple of node names the graph is waiting
