@@ -1,7 +1,6 @@
 "use client";
 
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { MarkdownBody } from "./MarkdownBody";
 import { ToolCallCard } from "./ToolCallCard";
 import { BriefCard } from "@/components/structured/BriefCard";
 import type { ChatMessage, WeeklyBrief } from "@/hooks/useChat";
@@ -10,13 +9,23 @@ import { Bot, User } from "lucide-react";
 
 interface MessageBubbleProps {
   message: ChatMessage;
+  /**
+   * True only for the assistant message currently receiving tokens. When set,
+   * a blinking caret renders at the end of the bubble content so the user
+   * has a real visual signal that streaming is in flight.
+   */
+  isStreaming?: boolean;
 }
 
-export function MessageBubble({ message }: MessageBubbleProps) {
+export function MessageBubble({ message, isStreaming = false }: MessageBubbleProps) {
   const isUser = message.role === "user";
+  // Show caret only on an assistant bubble that is mid-stream. Tool-call
+  // sub-cards have their own running state, so the caret stays on the
+  // prose bubble.
+  const showCaret = isStreaming && !isUser;
 
   return (
-    <div className={cn("flex gap-3", isUser && "flex-row-reverse")}>
+    <div className={cn("flex gap-3 chat-bubble-in", isUser && "flex-row-reverse")}>
       <div
         className={cn(
           "flex h-8 w-8 shrink-0 items-center justify-center rounded-md",
@@ -43,29 +52,9 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             {isUser ? (
               <p className="whitespace-pre-wrap">{message.content}</p>
             ) : (
-              <div
-                className={cn(
-                  "prose prose-invert prose-sm max-w-none",
-                  // Open the layout up — default `prose-sm` packs paragraphs
-                  // tightly, which makes long agent responses feel like a
-                  // wall of text in a small chat bubble.
-                  "leading-relaxed",
-                  "prose-p:my-3 prose-p:leading-relaxed",
-                  "prose-headings:mt-5 prose-headings:mb-2 prose-headings:font-semibold",
-                  "prose-h1:text-base prose-h2:text-sm prose-h3:text-sm",
-                  "prose-ul:my-3 prose-ol:my-3 prose-li:my-1",
-                  "prose-hr:my-4 prose-hr:border-border",
-                  "prose-table:my-3 prose-table:text-xs",
-                  "prose-blockquote:my-3 prose-blockquote:border-l-2 prose-blockquote:pl-3",
-                  "prose-pre:my-3",
-                  // Trim leading/trailing whitespace from the bubble itself
-                  // so the first/last block doesn't add an extra gap.
-                  "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
-                )}
-              >
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {message.content}
-                </ReactMarkdown>
+              <div className="relative">
+                <MarkdownBody content={message.content || ""} size="sm" />
+                {showCaret && <span className="chat-caret" aria-hidden="true" />}
               </div>
             )}
           </div>

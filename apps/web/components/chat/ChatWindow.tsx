@@ -85,7 +85,7 @@ export function ChatWindow({ threadId, agentSlug }: ChatWindowProps) {
             </div>
           </div>
         ) : (
-          <MessageList messages={messages} />
+          <MessageList messages={messages} isStreaming={isStreaming} />
         )}
 
         {/* Inline approval card — shows up when the agent's graph paused at

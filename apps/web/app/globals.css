@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
 @theme {
   /* Dark base — near-black like Supabase */
@@ -142,4 +143,45 @@ body {
 /* Radial glow mask for hero */
 .hero-glow {
   background: radial-gradient(ellipse at top, rgba(239, 68, 68, 0.18), transparent 60%);
+}
+
+/* ── Chat streaming animations ─────────────────────────────────────────── */
+
+/* Three-dot typing indicator. Each dot uses `animation-delay` to stagger
+   the bounce, producing the classic …pulsing dots… feel. */
+@keyframes chat-typing-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+  40%           { transform: translateY(-3px); opacity: 1; }
+}
+.chat-typing-dot {
+  animation: chat-typing-bounce 1.2s ease-in-out infinite;
+}
+
+/* Blinking caret rendered next to the last character of the streaming
+   assistant message. Sharper than `animate-pulse` (which crossfades),
+   which reads more like a real cursor. */
+@keyframes chat-caret-blink {
+  0%, 49%   { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.chat-caret {
+  display: inline-block;
+  width: 2px;
+  height: 0.95em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: var(--color-primary);
+  border-radius: 1px;
+  animation: chat-caret-blink 1s steps(1, end) infinite;
+}
+
+/* Subtle slide-in for new chat bubbles. Triggered by appending the class
+   on render; the animation only plays once per mount so token streams
+   don't re-animate the same bubble. */
+@keyframes chat-bubble-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.chat-bubble-in {
+  animation: chat-bubble-in 180ms ease-out both;
 }
