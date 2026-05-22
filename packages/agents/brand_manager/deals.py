@@ -3,8 +3,8 @@ Brand Manager deal-pipeline persistence.
 
 Two responsibilities:
 
-  - `log_deal_pitched(...)` — called from `_send_email_node` after Resend
-    confirms an approved pitch went out. Writes a `brand_deals` row with
+  - `log_deal_pitched(...)` — called from `_send_email_node` after the Gmail
+    API confirms an approved pitch went out. Writes a `brand_deals` row with
     stage='pitched'. Best-effort; failures don't break the user-facing
     reply (the email already left the building either way).
 
@@ -35,16 +35,17 @@ def _is_real_uuid(value: str | None) -> bool:
         return False
 
 
-# `send_pitch_email` returns "Sent. Resend message id: <id>" on success — capture
+# `send_pitch_email` returns "Sent. Gmail message id: <id>" on success — capture
 # the id for later "did this email bounce / open" features without needing to
-# refactor the tool's return shape.
-_RESEND_ID_RE = re.compile(r"Resend message id:\s*(\S+)")
+# refactor the tool's return shape. The column `external_message_id` stays
+# provider-agnostic so a future custom-domain sender (Resend / SES) can reuse it.
+_MESSAGE_ID_RE = re.compile(r"(?:Gmail|Resend)\s+message\s+id:\s*(\S+)", re.IGNORECASE)
 
 
-def _extract_resend_id(send_result: str | None) -> str | None:
+def _extract_message_id(send_result: str | None) -> str | None:
     if not send_result:
         return None
-    m = _RESEND_ID_RE.search(send_result)
+    m = _MESSAGE_ID_RE.search(send_result)
     return m.group(1) if m else None
 
 
@@ -80,7 +81,7 @@ async def log_deal_pitched(
         "recipient": recipient,
         "subject": subject,
         "stage": "pitched",
-        "external_message_id": _extract_resend_id(send_result),
+        "external_message_id": _extract_message_id(send_result),
     }
     try:
         result = supabase.table("brand_deals").insert(payload).execute()

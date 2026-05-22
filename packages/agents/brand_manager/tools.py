@@ -1,8 +1,14 @@
 import json
+import os
 from datetime import datetime
 from langchain_core.tools import tool
-from packages.agents.core.clients import perplexity_search, resend_send, youtube_api_get
-from packages.integrations.context import current_org_id
+from packages.agents.core.clients import perplexity_search, youtube_api_get
+from packages.integrations.context import current_org_id, current_supabase
+from packages.integrations.gmail.client import (
+    get_connection as gmail_get_connection,
+    get_fresh_access_token as gmail_get_fresh_access_token,
+    send_message as gmail_send_message,
+)
 
 
 @tool
@@ -148,33 +154,65 @@ async def send_pitch_email(
     from_name: str | None = None,
     reply_to: str | None = None,
 ) -> str:
-    """Send a sponsor pitch email via Resend.
+    """Send a sponsor pitch email from the creator's connected Gmail account.
+
+    The From address is the email of the org's connected Gmail integration — pitches
+    land in the brand's inbox looking like a real person reaching out, and replies
+    thread back into the creator's Gmail naturally. Requires the org to have
+    completed the Gmail OAuth connect flow with the `gmail.send` scope.
 
     Args:
         recipient: Email address of the sponsor contact.
         subject: Email subject line.
-        body: Plain-text body. (Resend will accept this as text/plain.)
+        body: Plain-text body.
         from_name: Display name to show in the From line — typically the brand name
-            (e.g. "Langley Outdoors Academy"). Sender domain is fixed via EMAIL_FROM env.
-        reply_to: Optional Reply-To address — usually the creator's real email so
-            replies don't go to the noreply sender.
+            (e.g. "Langley Outdoors Academy"). The actual sender address is fixed
+            to the connected Gmail account.
+        reply_to: Optional Reply-To address. Useful when the brand's preferred
+            inbox differs from the connected Gmail (e.g. pitches sent from a
+            personal Gmail but replies should go to business@brand.com).
     """
     if not recipient:
         return "Error: no recipient supplied."
 
+    org_id = current_org_id.get()
+    supabase = current_supabase.get()
+    if not org_id or supabase is None:
+        return "Error: no authenticated session. Sign in before sending."
+
+    client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+    if not client_id or not client_secret:
+        return "Error: Google OAuth is not configured on the server."
+
     try:
-        result = await resend_send(
+        token = await gmail_get_fresh_access_token(supabase, org_id, client_id, client_secret)
+    except RuntimeError as e:
+        return f"Error: {e}. Connect Gmail on the Integrations page, then retry."
+
+    # Match the sender address to the connected account. Gmail rewrites the
+    # From header to the authenticated user anyway, so we read it from the
+    # integration metadata to keep the message consistent.
+    conn = gmail_get_connection(supabase, org_id)
+    meta = (conn or {}).get("metadata") or {}
+    from_email = meta.get("email")
+    if not from_email:
+        return "Error: connected Gmail email is missing from integration metadata; reconnect Gmail."
+
+    try:
+        result = await gmail_send_message(
+            token,
             to=recipient,
             subject=subject,
             body_text=body,
+            from_email=from_email,
             from_name=from_name,
             reply_to=reply_to,
         )
-        return f"Sent. Resend message id: {result.get('id', 'unknown')}"
-    except ValueError as e:
-        return f"Email config error: {e}"
-    except Exception as e:
+    except RuntimeError as e:
         return f"Send failed: {e}"
+
+    return f"Sent. Gmail message id: {result.get('id', 'unknown')}"
 
 
 @tool

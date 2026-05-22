@@ -2,7 +2,7 @@
 Brand Manager deal pipeline — `log_deal_pitched`, `list_active_deals`,
 auto-log on `_send_email_node`, and the peer_context wiring.
 
-No live Postgres or Resend — uses a hand-rolled MockSupabase to capture
+No live Postgres or Gmail — uses a hand-rolled MockSupabase to capture
 inserts and serve canned rows.
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from packages.agents.brand_manager.deals import (
-    _extract_resend_id,
+    _extract_message_id,
     list_active_deals,
     log_deal_pitched,
 )
@@ -87,17 +87,20 @@ class MockSupabase:
         return _MockQuery(name, self._canned)
 
 
-# ── _extract_resend_id ────────────────────────────────────────────────────
-class TestExtractResendId:
+# ── _extract_message_id ───────────────────────────────────────────────────
+class TestExtractMessageId:
     @pytest.mark.parametrize("input_str, expected", [
+        ("Sent. Gmail message id: 18f0a1b2c3d4e5f6", "18f0a1b2c3d4e5f6"),
+        ("Sent. Gmail message id: msg_abc-123", "msg_abc-123"),
+        # Backwards-compat with any legacy Resend send_result strings
+        # the agent may have produced before the Gmail migration.
         ("Sent. Resend message id: re_abc123", "re_abc123"),
-        ("Sent. Resend message id: 1234abcd-5678", "1234abcd-5678"),
         ("Send failed: foo", None),
         (None, None),
         ("", None),
     ])
     def test_parses(self, input_str, expected):
-        assert _extract_resend_id(input_str) == expected
+        assert _extract_message_id(input_str) == expected
 
 
 # ── log_deal_pitched ──────────────────────────────────────────────────────
@@ -113,7 +116,7 @@ class TestLogDealPitched:
             brand_name="Magpul",
             recipient="marketing@magpul.com",
             subject="Sponsor opportunity — Langley",
-            send_result="Sent. Resend message id: re_test_xyz",
+            send_result="Sent. Gmail message id: msg_test_xyz",
         )
 
         assert deal_id is not None
@@ -127,7 +130,7 @@ class TestLogDealPitched:
         assert row["recipient"] == "marketing@magpul.com"
         assert row["subject"] == "Sponsor opportunity — Langley"
         assert row["stage"] == "pitched"
-        assert row["external_message_id"] == "re_test_xyz"
+        assert row["external_message_id"] == "msg_test_xyz"
 
     async def test_noop_in_dev_mode(self):
         # No supabase set, no org_id — should be a clean no-op.
@@ -329,8 +332,8 @@ class TestPipelineRendersInTemplate:
 @pytest.mark.asyncio
 class TestSendEmailAutoLogs:
     async def test_pitched_row_inserted_after_send(self, real_uuid, monkeypatch):
-        """End-to-end-ish: invoke `_send_email_node` with mocked Resend
-        and verify a brand_deals row gets logged with the right shape."""
+        """End-to-end-ish: invoke `_send_email_node` with a mocked Gmail
+        send and verify a brand_deals row gets logged with the right shape."""
         from packages.agents.brand_manager.agent import BrandManagerAgent
         from langchain_core.messages import HumanMessage
 
@@ -351,9 +354,9 @@ class TestSendEmailAutoLogs:
         })
         current_supabase.set(sb)
 
-        # Patch the send_pitch_email tool so no real Resend call.
+        # Patch the send_pitch_email tool so no real Gmail call.
         async def fake_send(*a, **k):
-            return "Sent. Resend message id: re_mock_xyz"
+            return "Sent. Gmail message id: msg_mock_xyz"
 
         # The tool is bound on the agent's class via `await tool.ainvoke(...)`,
         # so monkey-patch the module function the tool wraps. Easiest: patch
@@ -386,4 +389,4 @@ class TestSendEmailAutoLogs:
         # brand_name comes from the user's request verbatim
         assert "Magpul" in row["brand_name"]
         assert row["recipient"] == "marketing@magpul.com"
-        assert row["external_message_id"] == "re_mock_xyz"
+        assert row["external_message_id"] == "msg_mock_xyz"
