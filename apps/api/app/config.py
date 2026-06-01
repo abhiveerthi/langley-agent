@@ -70,6 +70,16 @@ class Settings(BaseSettings):
     resend_api_key: str = ""
     email_from: str = "Backroom <invites@backroom.app>"
 
+    # Background scheduler (apps/api/app/services/scheduler.py). The poll loop
+    # is started from the FastAPI lifespan ONLY when `scheduler_enabled` is
+    # true. It defaults OFF so importing the app in tests / scripts never
+    # spawns a live network loop; production turns it on via SCHEDULER_ENABLED=
+    # true (set in the deploy env). `scheduler_poll_interval_seconds` is how
+    # often the YouTube new-upload poller wakes; 300s (5 min) balances
+    # freshness against YouTube Data API quota.
+    scheduler_enabled: bool = False
+    scheduler_poll_interval_seconds: int = 300
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
