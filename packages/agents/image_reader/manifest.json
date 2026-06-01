@@ -1,0 +1,17 @@
+{
+  "slug": "image-reader",
+  "name": "Image Reader",
+  "description": "Reads screenshots with native vision — YouTube analytics, competitor channels, news articles, social posts, bills/lawsuits, infographics — extracts the figures, summarizes, analyzes (including trends across multiple shots), and files a Markdown report to the Storage Library. Also transcribes voice notes into text so you can talk instead of type.",
+  "version": "0.1.0",
+  "icon": "scan-eye",
+  "tagline": "Reads your screenshots and listens to your voice notes.",
+  "capabilities": ["vision", "ocr", "analysis", "transcription"],
+  "required_integrations": [],
+  "optional_integrations": ["slack"],
+  "tools": [],
+  "interrupt_before": [],
+  "writes": [],
+  "config_schema": {
+    "transcription_provider": { "type": "string", "default": "local", "label": "Voice transcription backend (local|openai)" }
+  }
+}

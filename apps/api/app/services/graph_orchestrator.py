@@ -40,7 +40,7 @@ from typing import Any, AsyncIterator
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 
-from packages.agents.core.base import BaseAgent
+from packages.agents.core.base import BaseAgent, DEFAULT_APPROVAL_CHAIN
 from packages.agents.registry import get_agent
 from packages.integrations.context import current_supabase
 
@@ -481,27 +481,115 @@ async def _stream_until_done_or_pause(
     # idempotent upsert here as a safety net.
     await _ensure_thread_row(org_id=org_id, thread_id=thread_id, agent_slug=agent.slug)
 
+    # Resolve the ordered approval chain for this gate. Default is a single
+    # step (["approver"]) — identical to the historical one-approver flow.
+    # Multi-step agents return e.g. ["reviewer", "owner"], in which case we
+    # create the FIRST step's row here and only advance through the rest on
+    # successive approvals (see `_resume`).
+    chain = agent.approval_chain(snapshot.values) or list(DEFAULT_APPROVAL_CHAIN)
     store = get_approval_store()
     try:
-        row = await store.create(
+        row = await _create_chain_step(
+            store,
             org_id=org_id,
             thread_id=thread_id,
-            requested_by_agent=agent.slug,
-            action_type=approval_req["action_type"],
-            action_payload=approval_req["action_payload"],
-            preview=approval_req["preview"],
+            agent_slug=agent.slug,
+            approval_req=approval_req,
+            chain=chain,
+            step_index=0,
         )
         print(f"[orchestrator] approval row created id={row.get('id')}", flush=True)
     except Exception as e:
         print(f"[orchestrator] approval store.create FAILED: {e!r}", flush=True)
         raise
-    yield _sse("waiting_approval", {
+    yield _waiting_approval_event(
+        row=row, thread_id=thread_id, agent_slug=agent.slug,
+        approval_req=approval_req, chain=chain, step_index=0,
+    )
+
+
+# ── Approval-chain helpers ────────────────────────────────────────────────
+# A multi-step gate is modelled as a SEQUENCE of `approvals` rows that share
+# the same `chain` and action payload but differ by `step_index`. The graph
+# stays paused at the same interrupt the whole time; only the FINAL step's
+# approval resumes it. These helpers keep the per-step row creation and the
+# (backward-compatible, additive) SSE shape in one place.
+
+
+def _chain_role(chain: list[str], step_index: int) -> str | None:
+    """Role label for a given step, tolerant of out-of-range indices."""
+    if 0 <= step_index < len(chain):
+        return chain[step_index]
+    return None
+
+
+async def _create_chain_step(
+    store,
+    *,
+    org_id: str,
+    thread_id: str,
+    agent_slug: str,
+    approval_req: dict,
+    chain: list[str],
+    step_index: int,
+) -> dict:
+    """Create the pending `approvals` row for one step of a chain.
+
+    For a single-step chain we pass `chain=None` so the insert is identical to
+    the legacy single-approver row (keeps existing DB rows / Supabase inserts
+    byte-compatible and works even before migration 019 is applied).
+    """
+    is_multi_step = len(chain) > 1
+    return await store.create(
+        org_id=org_id,
+        thread_id=thread_id,
+        requested_by_agent=agent_slug,
+        action_type=approval_req["action_type"],
+        action_payload=approval_req["action_payload"],
+        preview=approval_req["preview"],
+        chain=list(chain) if is_multi_step else None,
+        step_index=step_index,
+        approver_role=_chain_role(chain, step_index) if is_multi_step else None,
+    )
+
+
+def _waiting_approval_event(
+    *,
+    row: dict,
+    thread_id: str,
+    agent_slug: str,
+    approval_req: dict,
+    chain: list[str],
+    step_index: int,
+) -> str:
+    """Build the `waiting_approval` SSE event.
+
+    Backward compatible: every field the frontend already consumes
+    (approval_id, thread_id, agent_slug, action_type, preview, payload) is
+    unchanged. New ADDITIVE fields describe the chain so the UI can render
+    "Reviewer approval (1 of 2)":
+      - chain:               ordered role labels (single-step → ["approver"])
+      - step_index:          0-based index of THIS step
+      - step_number:         1-based, for display
+      - total_steps:         len(chain)
+      - approver_role:       role label for THIS step
+      - remaining_approvers: role labels still to come AFTER this step
+    """
+    total = len(chain)
+    return _sse("waiting_approval", {
         "approval_id": row["id"],
         "thread_id": thread_id,
-        "agent_slug": agent.slug,
+        "agent_slug": agent_slug,
         "action_type": approval_req["action_type"],
         "preview": approval_req["preview"],
         "payload": approval_req["action_payload"],
+        # Additive chain metadata.
+        "chain": list(chain),
+        "step_index": step_index,
+        "step_number": step_index + 1,
+        "total_steps": total,
+        "approver_role": _chain_role(chain, step_index),
+        "remaining_approvers": list(chain[step_index + 1:]),
     })
 
 
@@ -601,6 +689,61 @@ async def _resume(
     app = await _compile_agent(agent)
     config = {"configurable": {"thread_id": thread_id}}
 
+    # ── Multi-step approval chains ─────────────────────────────────────────
+    # If this row is part of a chain (chain is set with >1 step) AND the
+    # decision is "approved" AND there's a later step still to satisfy, we do
+    # NOT resume the graph. Instead we mark THIS step approved and create the
+    # NEXT pending step, re-emitting `waiting_approval`. The graph stays paused
+    # at the same interrupt; only the FINAL approval falls through to resume.
+    #
+    # Reject / cancel at ANY step end the chain (handled below / in the router)
+    # exactly like today's single-step gate.
+    chain = row.get("chain")
+    step_index = row.get("step_index") or 0
+    if (
+        decision == "approved"
+        and isinstance(chain, list)
+        and step_index + 1 < len(chain)
+    ):
+        # Record this step's approval (audit trail), then advance.
+        await store.update_status(
+            approval_id, status="approved", reviewed_by=reviewer_user_id
+        )
+        yield _sse("approval_recorded", {
+            "approval_id": approval_id,
+            "decision": "approved",
+            "advanced": True,
+            "step_index": step_index,
+            "approver_role": _chain_role(chain, step_index),
+        })
+
+        # Recompute the action payload from the still-paused state so the next
+        # approver sees exactly what step 0 saw (graph state is unchanged).
+        snapshot = await app.aget_state(config)
+        approval_req = agent.get_approval_request(snapshot.values) or {
+            "action_type": row.get("action_type") or "unknown",
+            "action_payload": row.get("action_payload") or {},
+            "preview": row.get("preview") or "An agent action is waiting for your review.",
+        }
+        next_index = step_index + 1
+        await _ensure_thread_row(
+            org_id=org_id, thread_id=thread_id, agent_slug=agent_slug
+        )
+        next_row = await _create_chain_step(
+            store,
+            org_id=org_id,
+            thread_id=thread_id,
+            agent_slug=agent_slug,
+            approval_req=approval_req,
+            chain=chain,
+            step_index=next_index,
+        )
+        yield _waiting_approval_event(
+            row=next_row, thread_id=thread_id, agent_slug=agent_slug,
+            approval_req=approval_req, chain=chain, step_index=next_index,
+        )
+        return
+
     # Patch approval_status (and feedback, if rejecting) onto the paused state.
     # Brand Manager's _route_by_approval conditional reads these on resume to
     # pick send_email vs revise_pitch.
@@ -617,6 +760,10 @@ async def _resume(
     yield _sse("approval_recorded", {
         "approval_id": approval_id,
         "decision": decision,
+        # Final step (or single-step gate): the graph is about to resume.
+        "advanced": False,
+        "resuming": decision == "approved",
+        "step_index": step_index,
     })
 
     # Resume by passing None as input — LangGraph picks up at the next node

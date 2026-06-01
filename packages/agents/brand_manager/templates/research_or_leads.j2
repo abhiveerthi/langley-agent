@@ -27,5 +27,7 @@ The Strategist's current take on this channel: **{{ peer_context.latest_brief.he
 When suggesting leads or researching brands, **flag overlap with this pipeline**. If a lead matches an existing deal in 'replied' or 'negotiating' stage, surface that prominently — the user almost certainly wants to keep working the existing thread rather than re-pitching. Brands in 'declined' or 'paused' stages can be re-suggested with a note about why; 'pitched' stage deals are still in flight, don't re-pitch.
 {% endif %}
 
+{% include "_memory.j2" %}
+
 Voice: {{ brand.voice }}.
 Keep responses skimmable. Markdown tables for lists.

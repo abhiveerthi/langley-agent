@@ -29,7 +29,10 @@ def _utcnow_iso() -> str:
 class ApprovalStore(Protocol):
     async def create(self, *, org_id: str, thread_id: str,
                      requested_by_agent: str, action_type: str,
-                     action_payload: dict, preview: str) -> dict: ...
+                     action_payload: dict, preview: str,
+                     chain: list[str] | None = None,
+                     step_index: int = 0,
+                     approver_role: str | None = None) -> dict: ...
 
     async def get(self, approval_id: str) -> dict | None: ...
 
@@ -46,7 +49,8 @@ class InMemoryApprovalStore:
         self._rows: dict[str, dict] = {}
 
     async def create(self, *, org_id, thread_id, requested_by_agent,
-                     action_type, action_payload, preview):
+                     action_type, action_payload, preview,
+                     chain=None, step_index=0, approver_role=None):
         row = {
             "id": str(uuid.uuid4()),
             "org_id": org_id,
@@ -58,6 +62,12 @@ class InMemoryApprovalStore:
             "status": "pending",
             "reviewed_by": None,
             "reviewed_at": None,
+            # Multi-step approval chain (migration 019). `chain` is the ordered
+            # list of role labels; `step_index` is which one this row is;
+            # `approver_role` mirrors chain[step_index] for convenience.
+            "chain": list(chain) if chain else None,
+            "step_index": step_index,
+            "approver_role": approver_role,
             "created_at": _utcnow_iso(),
         }
         self._rows[row["id"]] = row
@@ -89,18 +99,27 @@ class SupabaseApprovalStore:
         self._client = client
 
     async def create(self, *, org_id, thread_id, requested_by_agent,
-                     action_type, action_payload, preview):
+                     action_type, action_payload, preview,
+                     chain=None, step_index=0, approver_role=None):
+        payload: dict = {
+            "org_id": org_id,
+            "thread_id": thread_id,
+            "requested_by_agent": requested_by_agent,
+            "action_type": action_type,
+            "action_payload": action_payload,
+            "preview": preview,
+            "status": "pending",
+        }
+        # Only send chain columns when a real multi-step chain is in play, so
+        # the single-step default insert is byte-identical to the legacy one.
+        # (The DB columns default to NULL/0 for omitted single-step rows.)
+        if chain is not None:
+            payload["chain"] = list(chain)
+            payload["step_index"] = step_index
+            payload["approver_role"] = approver_role
         result = (
             self._client.table("approvals")
-            .insert({
-                "org_id": org_id,
-                "thread_id": thread_id,
-                "requested_by_agent": requested_by_agent,
-                "action_type": action_type,
-                "action_payload": action_payload,
-                "preview": preview,
-                "status": "pending",
-            })
+            .insert(payload)
             .execute()
         )
         return result.data[0]

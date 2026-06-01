@@ -7,6 +7,8 @@ from packages.agents.publisher.agent import PublisherAgent
 from packages.agents.community_manager.agent import CommunityManagerAgent
 from packages.agents.brand_manager.agent import BrandManagerAgent
 from packages.agents.editor.agent import EditorAgent
+from packages.agents.image_reader.agent import ImageReaderAgent
+from packages.agents.broll.agent import BRollAgent
 
 
 AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
@@ -15,6 +17,8 @@ AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
     "community-manager": CommunityManagerAgent,
     "brand-manager": BrandManagerAgent,
     "editor": EditorAgent,
+    "image-reader": ImageReaderAgent,
+    "broll": BRollAgent,
 }
 
 
@@ -28,6 +32,8 @@ _AGENT_DIRS: dict[str, str] = {
     "community-manager": "community_manager",
     "brand-manager": "brand_manager",
     "editor": "editor",
+    "image-reader": "image_reader",
+    "broll": "broll",
 }
 
 

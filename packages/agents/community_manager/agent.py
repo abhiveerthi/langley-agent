@@ -140,6 +140,9 @@ class CommunityManagerAgent(BaseAgent):
         "actually fires."
     )
     model = "claude-sonnet-4-6"
+    # Long-term memory: CM remembers VIPs, recurring questions, and how the
+    # creator likes replies framed across sessions. See core/memory.py.
+    memory_enabled = True
 
     # The only thing gated is posting an approved reply. Triage and research
     # are read-only, no gate. Mirrors Brand Manager exactly so the existing
@@ -194,6 +197,9 @@ class CommunityManagerAgent(BaseAgent):
         # main. Hydrated once at the top so triage and draft prompts can both
         # cite it via state.metadata.peer_context.
         graph.add_node("load_peer_context", self._load_peer_context_node)
+        # load_memory: recall relevant past-session notes (VIPs, recurring
+        # questions, reply-tone preferences) into state.metadata.memories.
+        graph.add_node("load_memory", self._load_memory_node)
         graph.add_node("classify_intent", self._classify_intent_node)
 
         # triage / research branch — ReAct sub-loop
@@ -216,7 +222,8 @@ class CommunityManagerAgent(BaseAgent):
         # ── Edges ──────────────────────────────────────────────────────────
         graph.add_edge(START, "load_profile")
         graph.add_edge("load_profile", "load_peer_context")
-        graph.add_edge("load_peer_context", "classify_intent")
+        graph.add_edge("load_peer_context", "load_memory")
+        graph.add_edge("load_memory", "classify_intent")
 
         graph.add_conditional_edges(
             "classify_intent",
@@ -271,6 +278,11 @@ class CommunityManagerAgent(BaseAgent):
         """Latest Strategist brief / Publisher package, hydrated by the
         load_peer_context node. Empty dict in dev mode."""
         return (state.get("metadata") or {}).get("peer_context") or {}
+
+    def _memories(self, state: CommunityManagerState) -> list[dict]:
+        """Recalled long-term memories, hydrated by the load_memory node.
+        Empty list in dev mode / without an embedding backend."""
+        return (state.get("metadata") or {}).get("memories") or []
 
     def _channel_id(self, state: CommunityManagerState) -> str:
         """Channel ID for tool arguments. Already overlaid from OAuth onto
@@ -342,6 +354,7 @@ class CommunityManagerAgent(BaseAgent):
             template,
             profile=profile,
             peer_context=self._peer_context(state),
+            memories=self._memories(state),
         )
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
         response = await self.llm_with_tools.ainvoke(messages)
@@ -481,6 +494,44 @@ class CommunityManagerAgent(BaseAgent):
             tags=["triage"],
         )
 
+        # Polished PDF of the triage report — archived in Storage + delivered
+        # to the creator's Dropbox. The JSON above is the structured form; this
+        # is the human-readable artifact. The triage agent's narrative is
+        # already Markdown, so it renders cleanly. Best-effort and non-blocking.
+        from packages.agents.core.pdf_export import (
+            deliver_pdf_to_dropbox,
+            render_pdf,
+        )
+        from packages.agents.core.storage_export import export_pdf_to_storage
+
+        brand_name = self._profile(state).brand.name
+        report_md = f"# Community Triage\n\n{last_ai.content}\n"
+        pdf_filename = f"triage-{ts}.pdf"
+        try:
+            await export_pdf_to_storage(
+                org_id=org_id,
+                agent_slug=self.slug,
+                kind="report",
+                filename=pdf_filename,
+                title="Community Triage",
+                subtitle=report_payload.get("generated_at"),
+                brand_name=brand_name,
+                markdown_body=report_md,
+                tags=["triage"],
+            )
+            pdf_bytes = render_pdf(
+                "Community Triage", report_md,
+                subtitle=report_payload.get("generated_at"), brand_name=brand_name,
+            )
+            await deliver_pdf_to_dropbox(
+                org_id,
+                filename=pdf_filename,
+                pdf_bytes=pdf_bytes,
+                subfolder="reports",
+            )
+        except Exception as e:
+            print(f"[community_manager] triage PDF export/delivery failed: {e!r}", flush=True)
+
         return {"metadata": meta_update}
 
     async def _fetch_recent_comments_node(self, state: CommunityManagerState):
@@ -570,6 +621,7 @@ class CommunityManagerAgent(BaseAgent):
             "draft.j2",
             profile=profile,
             peer_context=self._peer_context(state),
+            memories=self._memories(state),
         )
         response = await self.llm.ainvoke([
             SystemMessage(content=prompt),
@@ -654,4 +706,7 @@ class CommunityManagerAgent(BaseAgent):
             )
             content = (last_ai.content if last_ai else "") or "Done."
 
+        # Persist a concise summary of this turn to long-term memory. Best-
+        # effort — no-ops without Supabase / an embedding backend.
+        await self._persist_turn_memory(state, takeaway=content)
         return {"messages": [AIMessage(content=content)]}

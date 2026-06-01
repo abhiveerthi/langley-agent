@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.routers import chat, stream, agents, tasks, projects, runs, approvals, notifications, dashboard, integrations, publisher, profile, strategist, brand_manager, storage, slack_events, slack_interactive, invites, me, slack_meta, channels
 from app.services.graph_orchestrator import close_checkpointer, init_checkpointer
+from app.services.scheduler import start_scheduler, stop_scheduler
 
 settings = get_settings()
 
@@ -16,9 +17,16 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     """App lifespan — wires the LangGraph checkpointer to Postgres on startup
     and tears it down on shutdown. Without this, the orchestrator falls back
-    to an in-memory checkpointer that loses paused approvals on restart."""
+    to an in-memory checkpointer that loses paused approvals on restart.
+
+    Also starts the background scheduler (YouTube new-upload poller). That
+    only spawns its loop when `settings.scheduler_enabled` is true (default
+    False), so importing the app in tests doesn't kick off a live poll loop —
+    `start_scheduler` is a no-op when disabled."""
     await init_checkpointer()
+    start_scheduler()
     yield
+    await stop_scheduler()
     await close_checkpointer()
 
 

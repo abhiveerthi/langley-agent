@@ -60,6 +60,10 @@ class StrategistAgent(BaseAgent):
         "ranks video ideas, drafts scripts and hooks."
     )
     model = "claude-sonnet-4-6"
+    # Long-term memory: the Strategist remembers what it recommended and what
+    # the creator reacted to across sessions, so briefs build on the running
+    # relationship rather than starting cold each week. See core/memory.py.
+    memory_enabled = True
 
     def get_structured_outputs(self, state: dict, visited_nodes: list[str]) -> dict[str, dict]:
         """Surface the WeeklyBrief as a structured frontend card — but ONLY
@@ -89,6 +93,10 @@ class StrategistAgent(BaseAgent):
         # Strategist reads it so a repeat brief can build on what was said
         # last time rather than starting cold.
         graph.add_node("load_peer_context", self._load_peer_context_node)
+        # load_memory: recall the most relevant snippets from past sessions
+        # (state.metadata.memories), parallel to peer_context. Best-effort —
+        # empty list in dev mode / without an embedding backend.
+        graph.add_node("load_memory", self._load_memory_node)
         graph.add_node("classify_intent", self._classify_intent_node)
         graph.add_node("agent", self._agent_node)
         graph.add_node("tools", self.tool_node)
@@ -101,7 +109,8 @@ class StrategistAgent(BaseAgent):
 
         graph.add_edge(START, "load_profile")
         graph.add_edge("load_profile", "load_peer_context")
-        graph.add_edge("load_peer_context", "classify_intent")
+        graph.add_edge("load_peer_context", "load_memory")
+        graph.add_edge("load_memory", "classify_intent")
         graph.add_edge("classify_intent", "agent")
 
         # The ReAct loop exits three ways:
@@ -133,6 +142,11 @@ class StrategistAgent(BaseAgent):
 
     def _peer_context(self, state: StrategistState) -> dict:
         return (state.get("metadata") or {}).get("peer_context") or {}
+
+    def _memories(self, state: StrategistState) -> list[dict]:
+        """Recalled long-term memories, hydrated by the load_memory node.
+        Empty list in dev mode / without an embedding backend."""
+        return (state.get("metadata") or {}).get("memories") or []
 
     def _last_user_text(self, state: StrategistState) -> str:
         last_human = next(
@@ -174,6 +188,7 @@ class StrategistAgent(BaseAgent):
             profile=profile,
             intent=state.get("intent") or "research",
             peer_context=self._peer_context(state),
+            memories=self._memories(state),
         )
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
         response = await self.llm_with_tools.ainvoke(messages)
@@ -304,6 +319,44 @@ class StrategistAgent(BaseAgent):
             tags=["weekly-brief"],
         )
 
+        # ── Step 1c: polished PDF — archived in Storage + delivered to Dropbox.
+        # Both best-effort and non-blocking: the brief object already streamed
+        # to the frontend and the Markdown copy is already filed. A PDF render
+        # error or a missing Dropbox connection must not fail the run.
+        from packages.agents.core.pdf_export import (
+            deliver_pdf_to_dropbox,
+            render_pdf,
+        )
+        from packages.agents.core.storage_export import export_pdf_to_storage
+
+        brand_name = self._profile(state).brand.name
+        headline = brief.get("headline", "Weekly brief")
+        pdf_filename = f"weekly-brief-{ts}.pdf"
+        try:
+            await export_pdf_to_storage(
+                org_id=org_id,
+                agent_slug=self.slug,
+                kind="brief",
+                filename=pdf_filename,
+                title="Weekly Brief",
+                subtitle=headline,
+                brand_name=brand_name,
+                markdown_body=md_body,
+                source_id=brief_id,
+                tags=["weekly-brief"],
+            )
+            pdf_bytes = render_pdf(
+                "Weekly Brief", md_body, subtitle=headline, brand_name=brand_name
+            )
+            await deliver_pdf_to_dropbox(
+                org_id,
+                filename=pdf_filename,
+                pdf_bytes=pdf_bytes,
+                subfolder="briefs",
+            )
+        except Exception as e:
+            print(f"[strategist] brief PDF export/delivery failed: {e!r}", flush=True)
+
         # ── Step 2: spawn one task per ranked idea ───────────────────────
         # Each idea becomes a To-Do so the user can move it across the
         # /app/tasks Kanban as they work through the week. Body of the
@@ -373,4 +426,8 @@ class StrategistAgent(BaseAgent):
                 None,
             )
             content = (last_ai.content if last_ai else "") or "Done."
+        # Persist a concise summary of this turn to long-term memory so the
+        # next session can build on it. Best-effort — no-ops without Supabase /
+        # an embedding backend (see core/memory.py).
+        await self._persist_turn_memory(state, takeaway=content)
         return {"messages": [AIMessage(content=content)]}

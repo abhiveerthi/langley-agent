@@ -1,0 +1,7 @@
+{% if memories is defined and memories %}
+## What you remember about working with this creator
+Relevant notes from past sessions (most relevant first) — use them for continuity, don't repeat them back verbatim:
+{% for memory in memories %}
+- {{ memory.content }}
+{% endfor %}
+{% endif %}

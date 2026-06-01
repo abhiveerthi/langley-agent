@@ -119,3 +119,57 @@ async def export_to_storage(
         return None
 
     return storage_path
+
+
+async def export_pdf_to_storage(
+    *,
+    org_id: str,
+    agent_slug: str,
+    kind: ExportKind,
+    filename: str,
+    title: str,
+    markdown_body: str,
+    subtitle: str | None = None,
+    brand_name: str | None = None,
+    source_id: str | None = None,
+    tags: list[str] | None = None,
+    notes: str | None = None,
+) -> str | None:
+    """Render `markdown_body` into a polished PDF and archive it in the
+    org-assets bucket — the same `kind` as the Markdown/JSON copy, so the
+    PDF shows up in the Storage Library next to it.
+
+    Thin wrapper over `render_pdf` + `export_to_storage`, kept here so callers
+    don't have to wire the two together. `filename` should carry a `.pdf`
+    extension; one is appended if missing. Best-effort: PDF rendering failure
+    or a missing context returns None and never raises (matches the contract
+    of `export_to_storage`).
+    """
+    if not (markdown_body or "").strip():
+        return None
+
+    safe_name = filename if filename.lower().endswith(".pdf") else f"{filename}.pdf"
+
+    try:
+        # Late import: reportlab is only needed on the PDF path, and importing
+        # it lazily keeps storage_export importable in environments without it.
+        from packages.agents.core.pdf_export import render_pdf
+
+        pdf_bytes = render_pdf(
+            title, markdown_body, subtitle=subtitle, brand_name=brand_name
+        )
+    except Exception as e:
+        print(f"[storage_export] pdf render failed for {safe_name}: {e!r}", flush=True)
+        return None
+
+    return await export_to_storage(
+        org_id=org_id,
+        agent_slug=agent_slug,
+        kind=kind,
+        filename=safe_name,
+        content=pdf_bytes,
+        mime_type="application/pdf",
+        source_id=source_id,
+        tags=tags,
+        notes=notes,
+    )

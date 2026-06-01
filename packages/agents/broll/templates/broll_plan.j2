@@ -1,0 +1,23 @@
+# {{ plan.title or "B-roll plan" }}
+
+{% if plan.summary %}
+{{ plan.summary }}
+
+{% endif %}
+{% if plan.clips %}
+## Clips ({{ plan.clips | length }})
+
+| # | Topic | Aspect | Length | Prompt |
+| --- | --- | --- | --- | --- |
+{% for c in plan.clips %}
+| {{ loop.index }} | {{ (c.topic or "") | replace("|", "\\|") }} | {{ c.aspect_ratio or "16:9" }} | {{ c.duration_seconds or 6 }}s | {{ (c.prompt or "") | replace("|", "\\|") }} |
+{% endfor %}
+
+{% for c in plan.clips %}
+{% if c.rationale %}
+- **{{ loop.index }}.** {{ c.rationale | replace("|", "\\|") }}
+{% endif %}
+{% endfor %}
+{% else %}
+_No clips in this batch yet._
+{% endif %}

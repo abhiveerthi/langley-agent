@@ -4,6 +4,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import httpx
 from supabase import Client
 
 from packages.integrations.youtube.oauth import (
@@ -117,6 +118,48 @@ async def get_fresh_access_token(
         .execute()
     )
     return tokens.access_token
+
+
+async def get_latest_upload(
+    access_token: str, uploads_playlist_id: str
+) -> dict | None:
+    """Return the most-recent upload on a channel's uploads playlist.
+
+    The "uploads" playlist (id from `fetch_channel_info`'s
+    `uploads_playlist_id`) is auto-maintained by YouTube and ordered
+    newest-first, so a single `playlistItems` page of size 1 is the cheapest
+    way to detect a new upload — no `search.list` quota hit (100 units) when
+    a `playlistItems.list` (1 unit) does the job.
+
+    Returns a dict with `video_id`, `video_title`, and `published_at`, or
+    None when the playlist is empty (brand-new channel). Raises on transport
+    / API errors so the caller can record + isolate the failure per-org.
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            "https://www.googleapis.com/youtube/v3/playlistItems",
+            params={
+                "part": "snippet,contentDetails",
+                "playlistId": uploads_playlist_id,
+                "maxResults": 1,
+            },
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"Latest-upload lookup failed: {resp.status_code} {resp.text}"
+        )
+    items = resp.json().get("items") or []
+    if not items:
+        return None
+    item = items[0]
+    snippet = item.get("snippet") or {}
+    content = item.get("contentDetails") or {}
+    return {
+        "video_id": content.get("videoId") or snippet.get("resourceId", {}).get("videoId"),
+        "video_title": snippet.get("title"),
+        "published_at": content.get("videoPublishedAt") or snippet.get("publishedAt"),
+    }
 
 
 async def mark_connection_error(

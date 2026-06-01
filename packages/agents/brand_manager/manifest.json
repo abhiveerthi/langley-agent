@@ -7,13 +7,16 @@
   "tagline": "Gets you paid.",
   "capabilities": ["outreach", "sales", "crm", "writing"],
   "required_integrations": ["gmail"],
-  "optional_integrations": ["youtube"],
+  "optional_integrations": ["youtube", "monday"],
   "tools": [
     "find_sponsor_leads",
     "research_brand",
     "get_channel_stats",
     "send_pitch_email",
-    "list_active_deals_tool"
+    "list_active_deals_tool",
+    "list_monday_boards_tool",
+    "delegate_monday_task",
+    "log_monday_progress"
   ],
   "interrupt_before": ["approval_gate"],
   "writes": [
