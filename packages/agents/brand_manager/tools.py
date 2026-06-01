@@ -3,6 +3,11 @@ import os
 from datetime import datetime
 from langchain_core.tools import tool
 from packages.agents.core.clients import perplexity_search, youtube_api_get
+from packages.agents.core.monday_tasks import (
+    monday_create_item,
+    monday_list_boards,
+    monday_log_progress,
+)
 from packages.integrations.context import current_org_id, current_supabase
 from packages.integrations.gmail.client import (
     get_connection as gmail_get_connection,
@@ -250,6 +255,93 @@ async def list_active_deals_tool(limit: int = 10) -> str:
     return output
 
 
+@tool
+async def list_monday_boards_tool() -> str:
+    """List the creator's monday.com boards so you can pick where to delegate work.
+
+    Use this before delegating a task or logging progress on monday.com — the
+    user has to tell you which board, and you need its id. Returns each board's
+    id, name, and state. Requires the org to have connected monday.com on the
+    Integrations page; if it isn't connected this returns an empty list.
+    """
+    org_id = current_org_id.get()
+    boards = await monday_list_boards(org_id)
+    if not boards:
+        return (
+            "No monday.com boards available. The creator may not have connected "
+            "monday.com yet — they can do that on the Integrations page."
+        )
+    output = "# monday.com Boards\n\n"
+    for b in boards:
+        output += f"- **{b.get('name', '?')}** (id: {b.get('id', '?')}, {b.get('state', '?')})\n"
+    return output
+
+
+@tool
+async def delegate_monday_task(
+    board_id: str,
+    task_name: str,
+    group_id: str | None = None,
+) -> str:
+    """Delegate a task onto the creator's monday.com board.
+
+    Use this when you want to hand off follow-up work — e.g. "follow up with
+    Magpul next Tuesday" or "prep media kit for the Vortex pitch". The task
+    lands as an item on the named board so the creator's team can pick it up.
+    Call list_monday_boards_tool first if you don't know the board id.
+
+    Args:
+        board_id: monday.com board id (from list_monday_boards_tool).
+        task_name: Short task title for the item (the work being delegated).
+        group_id: Optional board group/section id to file the task under.
+    """
+    if not board_id:
+        return "Error: no board_id supplied. Call list_monday_boards_tool to find one."
+    org_id = current_org_id.get()
+    item_id = await monday_create_item(
+        org_id,
+        board_id=board_id,
+        item_name=task_name,
+        group_id=group_id,
+    )
+    if not item_id:
+        return (
+            "Could not create the task. monday.com may not be connected, or the "
+            "board id may be wrong — check the Integrations page and the board id."
+        )
+    return f"Delegated to monday.com. Item id: {item_id}"
+
+
+@tool
+async def log_monday_progress(board_id: str, item_name: str, note: str) -> str:
+    """Log a progress update onto the creator's monday.com board.
+
+    Use this to keep the creator's team in the loop — e.g. after sending a
+    pitch ("Pitched Magpul — awaiting reply") or when a deal advances. Creates
+    a tracking item and attaches your note as an update on it.
+
+    Args:
+        board_id: monday.com board id (from list_monday_boards_tool).
+        item_name: Short title for the progress entry.
+        note: The progress detail to record (posted as an update on the item).
+    """
+    if not board_id:
+        return "Error: no board_id supplied. Call list_monday_boards_tool to find one."
+    org_id = current_org_id.get()
+    item_id = await monday_log_progress(
+        org_id,
+        board_id=board_id,
+        item_name=item_name,
+        note=note,
+    )
+    if not item_id:
+        return (
+            "Could not log progress. monday.com may not be connected, or the "
+            "board id may be wrong — check the Integrations page and the board id."
+        )
+    return f"Logged progress on monday.com. Item id: {item_id}"
+
+
 def get_brand_manager_tools():
     return [
         find_sponsor_leads,
@@ -257,4 +349,7 @@ def get_brand_manager_tools():
         get_channel_stats,
         send_pitch_email,
         list_active_deals_tool,
+        list_monday_boards_tool,
+        delegate_monday_task,
+        log_monday_progress,
     ]
