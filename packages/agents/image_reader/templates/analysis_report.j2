@@ -1,0 +1,29 @@
+# {{ analysis.title or "Image analysis" }}
+
+{% if analysis.summary %}
+{{ analysis.summary }}
+
+{% endif %}
+{% if analysis.data_points %}
+## Extracted data
+
+| Metric | Value |
+| --- | --- |
+{% for d in analysis.data_points %}
+| {{ (d.label or "") | replace("|", "\\|") }} | {{ (d.value or "") | replace("|", "\\|") }} |
+{% endfor %}
+
+{% endif %}
+{% if analysis.analysis %}
+## Analysis
+
+{{ analysis.analysis }}
+
+{% endif %}
+{% if analysis.recommendations %}
+## Recommendations
+
+{% for r in analysis.recommendations %}
+- {{ r }}
+{% endfor %}
+{% endif %}
