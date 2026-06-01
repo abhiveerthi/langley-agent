@@ -1,0 +1,19 @@
+{
+  "slug": "broll",
+  "name": "B-Roll Producer",
+  "description": "Writes original b-roll scripts from your topics and weekly direction, generates short interrupt-style clips with Higgsfield (16:9 landscape + 9:16 Shorts, ~5–10s), and files them in your connected Dropbox organized by date and topic. Scripting works today; clip rendering activates once a Higgsfield key is added.",
+  "version": "0.1.0",
+  "icon": "clapperboard",
+  "tagline": "Drafts and produces your interrupt-style b-roll.",
+  "capabilities": ["scripting", "video-generation", "organization"],
+  "required_integrations": [],
+  "optional_integrations": ["dropbox"],
+  "tools": ["generate_broll_clip"],
+  "interrupt_before": [],
+  "writes": [],
+  "status": "active",
+  "config_schema": {
+    "default_aspect_ratio": { "type": "string", "default": "16:9", "label": "Primary aspect ratio (16:9|9:16)" },
+    "default_duration_seconds": { "type": "number", "default": 6, "label": "Default clip length (seconds)" }
+  }
+}
