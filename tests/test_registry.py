@@ -30,6 +30,8 @@ _LIVE_SLUGS = [
     "community-manager",
     "brand-manager",
     "editor",
+    "image-reader",
+    "broll",
 ]
 
 
@@ -111,6 +113,8 @@ class TestTemplatesRender:
             "community-manager": "community_manager",
             "brand-manager": "brand_manager",
             "editor": "editor",
+            "image-reader": "image_reader",
+            "broll": "broll",
         }
 
         rendered_count = 0

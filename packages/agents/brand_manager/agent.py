@@ -12,6 +12,9 @@ from packages.agents.brand_manager.tools import (
     research_brand,
     get_channel_stats,
     send_pitch_email,
+    list_monday_boards_tool,
+    delegate_monday_task,
+    log_monday_progress,
 )
 
 
@@ -40,6 +43,9 @@ class BrandManagerAgent(BaseAgent):
         "human-in-the-loop approval gate."
     )
     model = "claude-sonnet-4-6"
+    # Long-term memory: BM remembers which brands it pitched, how the creator
+    # framed deals, and outreach outcomes across sessions. See core/memory.py.
+    memory_enabled = True
 
     # Pause for human approval before send_pitch_email actually fires.
     # Same pattern as the legacy comms agent: interrupt at a no-op gate node so
@@ -70,8 +76,18 @@ class BrandManagerAgent(BaseAgent):
     def __init__(self):
         # ToolNode is used by the research/leads branch — it's still a small ReAct
         # loop for those because the LLM picks which of (find_sponsor_leads,
-        # research_brand, get_channel_stats) to call.
-        self.tools = [find_sponsor_leads, research_brand, get_channel_stats]
+        # research_brand, get_channel_stats) to call. The monday.com delegation /
+        # progress-logging tools also live here so the loop can hand off follow-up
+        # work and "keep tabs on responses + log progress on monday.com" per the
+        # roadmap; they no-op gracefully when monday isn't connected.
+        self.tools = [
+            find_sponsor_leads,
+            research_brand,
+            get_channel_stats,
+            list_monday_boards_tool,
+            delegate_monday_task,
+            log_monday_progress,
+        ]
         self.llm_with_tools = ChatAnthropic(model=self.model).bind_tools(self.tools)
         self.tool_node = ToolNode(self.tools)
         # Plain LLM (no bound tools) for the drafting / classify nodes.
@@ -86,6 +102,9 @@ class BrandManagerAgent(BaseAgent):
         # Hydrated once at the top so every downstream node can reference it
         # via state.metadata.peer_context (renders into draft / research prompts).
         graph.add_node("load_peer_context", self._load_peer_context_node)
+        # load_memory: recall relevant past-session notes (brands pitched,
+        # deal framing, outreach outcomes) into state.metadata.memories.
+        graph.add_node("load_memory", self._load_memory_node)
         graph.add_node("classify_intent", self._classify_intent_node)
 
         # research / leads branch (ReAct sub-loop)
@@ -106,7 +125,8 @@ class BrandManagerAgent(BaseAgent):
         # ── Edges ──────────────────────────────────────────────────────────
         graph.add_edge(START, "load_profile")
         graph.add_edge("load_profile", "load_peer_context")
-        graph.add_edge("load_peer_context", "classify_intent")
+        graph.add_edge("load_peer_context", "load_memory")
+        graph.add_edge("load_memory", "classify_intent")
 
         graph.add_conditional_edges(
             "classify_intent",
@@ -162,6 +182,11 @@ class BrandManagerAgent(BaseAgent):
         """Latest peer-agent outputs (Strategist brief, Publisher package, …)
         hydrated by the load_peer_context node. Empty dict in dev mode."""
         return (state.get("metadata") or {}).get("peer_context") or {}
+
+    def _memories(self, state: BrandManagerState) -> list[dict]:
+        """Recalled long-term memories, hydrated by the load_memory node.
+        Empty list in dev mode / without an embedding backend."""
+        return (state.get("metadata") or {}).get("memories") or []
 
     def _last_user_text(self, state: BrandManagerState) -> str:
         last_human = next(
@@ -222,6 +247,7 @@ class BrandManagerAgent(BaseAgent):
             "research_or_leads.j2",
             profile=profile,
             peer_context=self._peer_context(state),
+            memories=self._memories(state),
         )
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
         response = await self.llm_with_tools.ainvoke(messages)
@@ -264,6 +290,7 @@ MEDIA KIT NUMBERS:
             "draft.j2",
             profile=profile,
             peer_context=self._peer_context(state),
+            memories=self._memories(state),
         )
         response = await self.llm.ainvoke([
             SystemMessage(content=prompt),
@@ -378,6 +405,44 @@ USER FEEDBACK:
             tags=[brand_name],
         )
 
+        # Polished PDF of the pitch — archived in Storage + delivered to the
+        # creator's Dropbox. Best-effort and non-blocking: the email already
+        # shipped and the Markdown copy is filed, so a PDF/Dropbox hiccup must
+        # not fail the send path.
+        from packages.agents.core.pdf_export import (
+            deliver_pdf_to_dropbox,
+            render_pdf,
+        )
+        from packages.agents.core.storage_export import export_pdf_to_storage
+
+        org_id = state.get("org_id") or ""
+        sender_brand = profile.brand.name
+        pdf_filename = f"pitch-{brand_name}-{ts}.pdf"
+        try:
+            await export_pdf_to_storage(
+                org_id=org_id,
+                agent_slug=self.slug,
+                kind="pitch",
+                filename=pdf_filename,
+                title=f"Pitch to {brand_name}",
+                subtitle=subject or None,
+                brand_name=sender_brand,
+                markdown_body=pitch_md,
+                tags=[brand_name],
+            )
+            pdf_bytes = render_pdf(
+                f"Pitch to {brand_name}", pitch_md,
+                subtitle=subject or None, brand_name=sender_brand,
+            )
+            await deliver_pdf_to_dropbox(
+                org_id,
+                filename=pdf_filename,
+                pdf_bytes=pdf_bytes,
+                subfolder="pitches",
+            )
+        except Exception as e:
+            print(f"[brand_manager] pitch PDF export/delivery failed: {e!r}", flush=True)
+
         return {"send_result": result, "approval_status": "approved"}
 
     # ── shared terminal ────────────────────────────────────────────────────
@@ -393,4 +458,7 @@ USER FEEDBACK:
                 None,
             )
             content = (last_ai.content if last_ai else "") or "Done."
+        # Persist a concise summary of this turn to long-term memory. Best-
+        # effort — no-ops without Supabase / an embedding backend.
+        await self._persist_turn_memory(state, takeaway=content)
         return {"messages": [AIMessage(content=content)]}
