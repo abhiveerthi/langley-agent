@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
-from app.routers import chat, stream, agents, tasks, projects, runs, approvals, notifications, dashboard, integrations, publisher, profile, strategist, brand_manager, storage, slack_events, slack_interactive, invites, me, slack_meta, channels
+from app.routers import chat, stream, agents, tasks, projects, runs, approvals, notifications, dashboard, integrations, publisher, profile, strategist, brand_manager, storage, slack_events, slack_interactive, invites, me, slack_meta, channels, monday_webhooks
 from app.services.graph_orchestrator import close_checkpointer, init_checkpointer
 from app.services.scheduler import start_scheduler, stop_scheduler
 
@@ -73,3 +73,4 @@ app.include_router(invites.router, prefix="/api")
 app.include_router(me.router, prefix="/api")
 app.include_router(slack_meta.router, prefix="/api")
 app.include_router(channels.router, prefix="/api")
+app.include_router(monday_webhooks.router, prefix="/api")

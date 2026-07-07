@@ -132,6 +132,75 @@ async def create_item(
     return (data.get("create_item") or {}) if data else {}
 
 
+async def create_board(
+    access_token: str, board_name: str, *, board_kind: str = "public"
+) -> dict:
+    """Create a board; returns {id, name}. Used by the Content Agent to
+    provision its dedicated review-queue board."""
+    data = await graphql(
+        access_token,
+        """
+        mutation($name: String!, $kind: BoardKind!) {
+          create_board(board_name: $name, board_kind: $kind) { id name }
+        }
+        """,
+        {"name": board_name, "kind": board_kind},
+    )
+    return data.get("create_board") or {}
+
+
+async def create_status_column(
+    access_token: str,
+    board_id: str,
+    title: str,
+    labels: list[str],
+) -> dict:
+    """Create a status column with custom labels; returns {id, title}.
+
+    Label INDEXES are positional ("0", "1", ...) but consumers must match on
+    label TEXT (webhook payloads carry value.label.text) — indexes are a
+    Monday-internal detail that can shift if labels are edited in the UI.
+    """
+    defaults = {"labels": {str(i): label for i, label in enumerate(labels)}}
+    data = await graphql(
+        access_token,
+        """
+        mutation($board: ID!, $title: String!, $defaults: JSON) {
+          create_column(
+            board_id: $board, title: $title,
+            column_type: status, defaults: $defaults
+          ) { id title }
+        }
+        """,
+        {"board": board_id, "title": title, "defaults": __json_dumps(defaults)},
+    )
+    return data.get("create_column") or {}
+
+
+async def create_webhook(
+    access_token: str,
+    board_id: str,
+    url: str,
+    *,
+    event: str = "change_column_value",
+) -> dict:
+    """Subscribe `url` to a board's column-change events; returns {id}.
+
+    Monday validates the URL with a challenge POST during this call — the
+    receiving endpoint must already be live and echoing {"challenge": ...}.
+    """
+    data = await graphql(
+        access_token,
+        """
+        mutation($board: ID!, $url: String!, $event: WebhookEventType!) {
+          create_webhook(board_id: $board, url: $url, event: $event) { id board_id }
+        }
+        """,
+        {"board": board_id, "url": url, "event": event},
+    )
+    return data.get("create_webhook") or {}
+
+
 def __json_dumps(d: dict) -> str:
     import json as _json
     return _json.dumps(d, separators=(",", ":"))

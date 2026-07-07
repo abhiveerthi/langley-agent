@@ -34,6 +34,7 @@ PIPELINE_STATUSES = (
     "publishing",        # publish fan-out in flight
     "published",         # all approved assets live
     "failed",            # a stage errored, or no assets were produced
+    "rejected",          # the owner killed the drop at final approval
 )
 
 

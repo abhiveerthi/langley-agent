@@ -340,6 +340,26 @@ class ContentAgent(BaseAgent):
             set_pipeline_status(org_id, video_id, "ready_for_review", assets=assets)
             pipeline["status"] = "ready_for_review"
             pipeline["assets"] = assets
+            # Drop the review items onto the org's Monday board (Phase C).
+            # Best-effort: no Monday connection just means the assets wait in
+            # the ledger; the stage detail says which happened.
+            from packages.agents.content.review import queue_for_review
+            from packages.agents.content.stages import record_and_mirror
+
+            try:
+                detail = await queue_for_review(
+                    org_id,
+                    video_id=video_id,
+                    video_title=state.get("video_title"),
+                    assets=assets,
+                )
+                pipeline = record_and_mirror(
+                    {**state, "pipeline": pipeline}, "queue_review", "done", detail
+                )
+            except Exception as e:
+                pipeline = record_and_mirror(
+                    {**state, "pipeline": pipeline}, "queue_review", "failed", repr(e)
+                )
         else:
             stages = pipeline.get("stages") or {}
             reasons = "; ".join(

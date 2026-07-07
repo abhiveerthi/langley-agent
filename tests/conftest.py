@@ -78,7 +78,9 @@ class _MockQuery:
     def update(self, payload):
         self._canned.setdefault("_updates", []).append((self._table, payload))
         return self
-    def delete(self): return self
+    def delete(self):
+        self._canned.setdefault("_deletes", []).append(self._table)
+        return self
 
     def execute(self):
         return _MockResult(self._canned.get(self._table, []))
