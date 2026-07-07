@@ -20,7 +20,7 @@ import pytest
 
 from packages.agents.content.agent import (
     ContentAgent,
-    STUBBED_STAGES,
+    PIPELINE_STAGES,
     VALID_INTENTS,
     _YT_URL_ID,
 )
@@ -147,37 +147,55 @@ class TestPipelineLane:
         assert out["metadata"]["pipeline_ready"] is False
         assert "link" in out["messages"][0].content.lower() or "video" in out["messages"][0].content.lower()
 
-    @pytest.mark.asyncio
-    async def test_stubbed_stages_mark_ledger_skipped(self):
-        """Phase A stages record an honest 'skipped' with the phase that
-        implements them — mirrored onto state.pipeline for the reply."""
+    def test_graph_has_all_pipeline_stage_nodes(self):
+        """The stage tuple is the stable contract between graph node names
+        and the ledger's `stages` keys — the graph must carry every one."""
         agent = ContentAgent()
-        state = {
-            "messages": [],
-            "org_id": "dev",  # non-UUID → ledger writes no-op
-            "video_id": "dQw4w9WgXcQ",
-            "pipeline": {"video_id": "dQw4w9WgXcQ", "stages": {}, "assets": []},
-            "metadata": {"pipeline_ready": True},
-        }
-        for stage in STUBBED_STAGES:
-            out = await getattr(agent, f"_{stage}_node")(state)
-            state["pipeline"] = out["pipeline"]
-        assert set(state["pipeline"]["stages"]) == set(STUBBED_STAGES)
-        assert all(v["status"] == "skipped" for v in state["pipeline"]["stages"].values())
+        for stage in PIPELINE_STAGES:
+            assert stage in agent.graph.nodes
 
     @pytest.mark.asyncio
     async def test_queue_review_fails_honestly_without_assets(self):
+        """Every stage skipped/failed → status=failed with the per-stage
+        reasons rolled into the error, so nothing sits in processing forever."""
         agent = ContentAgent()
         state = {
             "messages": [],
             "org_id": "dev",
             "video_id": "dQw4w9WgXcQ",
-            "pipeline": {"video_id": "dQw4w9WgXcQ", "stages": {}, "assets": []},
+            "pipeline": {
+                "video_id": "dQw4w9WgXcQ",
+                "stages": {"generate_clips": {"status": "skipped", "detail": "no key"}},
+                "assets": [],
+            },
             "metadata": {"pipeline_ready": True},
         }
         out = await agent._queue_review_node(state)
         assert out["pipeline"]["status"] == "failed"
         assert "no assets" in out["pipeline"]["error"]
+        assert "generate_clips" in out["pipeline"]["error"]
+
+    @pytest.mark.asyncio
+    async def test_queue_review_collects_assets_and_marks_ready(self):
+        """Generated assets from every stage roll up into the ledger row and
+        flip the pipeline to ready_for_review (Phase C's entry point)."""
+        agent = ContentAgent()
+        audio = {"kind": "audio", "storage_path": "org/audio/x.m4a"}
+        clip = {"kind": "clip", "url": "https://clips/1.mp4"}
+        episode = {"kind": "podcast_episode", "title": "Ep 1"}
+        state = {
+            "messages": [],
+            "org_id": "dev",
+            "video_id": "dQw4w9WgXcQ",
+            "pipeline": {"video_id": "dQw4w9WgXcQ", "stages": {}, "assets": []},
+            "audio_asset": audio,
+            "clip_assets": [clip],
+            "episode": episode,
+            "metadata": {"pipeline_ready": True},
+        }
+        out = await agent._queue_review_node(state)
+        assert out["pipeline"]["status"] == "ready_for_review"
+        assert out["pipeline"]["assets"] == [audio, clip, episode]
 
 
 # ── Ledger helpers degrade gracefully in dev mode ──────────────────────────

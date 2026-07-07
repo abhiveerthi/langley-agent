@@ -103,8 +103,13 @@ def stub_content_dispatch(monkeypatch):
     omitting) that row on the supabase mock."""
     calls = []
 
-    async def _fake(supabase, org_id, *, video_id, video_title):
-        calls.append({"org_id": org_id, "video_id": video_id, "video_title": video_title})
+    async def _fake(supabase, org_id, *, video_id, video_title, published_at=None):
+        calls.append({
+            "org_id": org_id,
+            "video_id": video_id,
+            "video_title": video_title,
+            "published_at": published_at,
+        })
 
     monkeypatch.setattr(scheduler, "_dispatch_content", _fake)
     return calls
@@ -317,6 +322,8 @@ async def test_poll_org_dispatches_content_agent_when_active(
 
     assert [c["video_id"] for c in stub_dispatch] == ["v2"]
     assert [c["video_id"] for c in stub_content_dispatch] == ["v2"]
+    # published_at rides along — it anchors Riverside recording matching.
+    assert stub_content_dispatch[0]["published_at"] == "now"
 
 
 @pytest.mark.asyncio
@@ -350,6 +357,53 @@ async def test_poll_org_midbatch_failure_resumes_from_failed_video(
     _, payload = upserts[0]
     assert payload["last_seen_video_id"] == "v2"  # NOT v3, NOT v1
     assert "dispatch failed" in (payload["last_error"] or "")
+
+
+# ── Content pipeline task plumbing ──────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_dispatch_content_skips_when_inflight(mock_supabase, monkeypatch):
+    """A pipeline already running for (org, video) → duplicate dispatch is a
+    no-op: no ledger upsert, no second task forked against the same row."""
+    spawned = []
+
+    async def _fake_run(*a, **k):
+        spawned.append(k)
+
+    monkeypatch.setattr(scheduler, "_run_content_pipeline", _fake_run)
+    key = ("org-1", "vidX")
+    scheduler._content_inflight.add(key)
+    try:
+        await scheduler._dispatch_content(
+            mock_supabase, "org-1", video_id="vidX", video_title="t", published_at=None
+        )
+        assert "_upserts" not in mock_supabase._canned
+        assert spawned == []
+    finally:
+        scheduler._content_inflight.discard(key)
+
+
+def test_mark_failed_if_stuck_flips_nonterminal(mock_supabase_factory):
+    """Run ended with the ledger still 'processing' → marked failed with the
+    reason, so the dashboard never shows a silently-stuck pipeline."""
+    sb = mock_supabase_factory({
+        "content_pipelines": [{"org_id": "org-1", "video_id": "v1", "status": "processing"}],
+    })
+    scheduler._mark_failed_if_stuck(sb, "org-1", "v1", reason="run died")
+    updates = sb._canned.get("_updates", [])
+    assert updates and updates[0][0] == "content_pipelines"
+    assert updates[0][1]["status"] == "failed"
+    assert updates[0][1]["error"] == "run died"
+
+
+def test_mark_failed_if_stuck_never_downgrades_reviewable(mock_supabase_factory):
+    """A row that reached ready_for_review keeps its assets even if the run's
+    tail end errored — the check must not regress completed work."""
+    sb = mock_supabase_factory({
+        "content_pipelines": [{"org_id": "org-1", "video_id": "v1", "status": "ready_for_review"}],
+    })
+    scheduler._mark_failed_if_stuck(sb, "org-1", "v1", reason="late error")
+    assert sb._canned.get("_updates", []) == []
 
 
 # ── App import stays hermetic ───────────────────────────────────────────────

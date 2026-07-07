@@ -237,7 +237,10 @@ async def _poll_org(supabase: Any, org_id: str) -> None:
             )
             if content_active:
                 await _dispatch_content(
-                    supabase, org_id, video_id=video_id, video_title=video_title
+                    supabase, org_id,
+                    video_id=video_id,
+                    video_title=video_title,
+                    published_at=item.get("published_at"),
                 )
         except Exception as e:
             # Don't advance past the failed video — the next sweep retries it
@@ -387,24 +390,45 @@ def _content_agent_active(supabase: Any, org_id: str) -> bool:
         return False
 
 
+# Strong refs to in-flight content pipeline tasks (asyncio only keeps weak
+# refs; without this a running pipeline could be garbage-collected mid-run).
+_content_tasks: set[asyncio.Task] = set()
+
+# (org_id, video_id) keys with a pipeline task currently running. Guards the
+# re-sweep race: if the poll-state upsert fails transiently, last_seen never
+# advances and the next sweep re-dispatches the same video while the first
+# pipeline (legitimately minutes-long) is still in flight — without this
+# guard that forks a second concurrent graph run against the same ledger row.
+_content_inflight: set[tuple[str, str]] = set()
+
+
 async def _dispatch_content(
-    supabase: Any, org_id: str, *, video_id: str, video_title: str
+    supabase: Any,
+    org_id: str,
+    *,
+    video_id: str,
+    video_title: str,
+    published_at: str | None = None,
 ) -> None:
     """Kick off the Content Agent repurposing pipeline for a new upload.
 
     Pre-creates the `content_pipelines` ledger row (status=detected) so the
-    dashboard shows the video the moment it's spotted — before the graph's
-    first node runs — then drives a `run_pipeline` run to completion with the
-    org's tenancy ContextVars set, mirroring `_dispatch_publisher`. The row
-    upsert is keyed on (org_id, video_id), so a retried dispatch re-enters
-    the same pipeline instead of forking a duplicate.
+    dashboard shows the video the moment it's spotted — then runs the
+    pipeline as a BACKGROUND task. Unlike the Publisher dispatch (seconds),
+    a content pipeline legitimately runs for many minutes (Opus Clip
+    processing, transcription of a 55-minute stream) and must not stall the
+    poll sweep; failures land in the pipeline ledger, not the poll state.
+    The row upsert is keyed on (org_id, video_id), so a retried dispatch
+    re-enters the same pipeline instead of forking a duplicate. Tasks die
+    with the process on shutdown — the ledger row shows where they stopped.
     """
-    from app.services.graph_orchestrator import stream_new_run
-    from packages.integrations.context import (
-        current_org_id,
-        current_supabase,
-        current_user_id,
-    )
+    key = (org_id, video_id)
+    if key in _content_inflight:
+        log.info(
+            "Content pipeline already in flight for org=%s video=%s — skipping duplicate dispatch",
+            org_id, video_id,
+        )
+        return
 
     thread_id = str(uuid4())
     supabase.table("content_pipelines").upsert(
@@ -418,6 +442,55 @@ async def _dispatch_content(
         on_conflict="org_id,video_id",
     ).execute()
 
+    _content_inflight.add(key)
+    task = asyncio.create_task(
+        _run_content_pipeline(
+            supabase, org_id,
+            video_id=video_id,
+            video_title=video_title,
+            published_at=published_at,
+            thread_id=thread_id,
+        )
+    )
+    _content_tasks.add(task)
+
+    def _done(t: asyncio.Task, key: tuple[str, str] = key) -> None:
+        _content_tasks.discard(t)
+        _content_inflight.discard(key)
+
+    task.add_done_callback(_done)
+
+
+async def _run_content_pipeline(
+    supabase: Any,
+    org_id: str,
+    *,
+    video_id: str,
+    video_title: str,
+    published_at: str | None,
+    thread_id: str,
+) -> None:
+    """Drive one content pipeline run to completion (background task body).
+
+    Mirrors `_dispatch_publisher`'s drain-with-ContextVars pattern.
+
+    Failure surfacing is a POST-DRAIN LEDGER CHECK, not just the except
+    block: the orchestrator converts graph exceptions into SSE "error"
+    events and ends the stream normally, so a crashed node never raises out
+    of the drain loop. Whatever went wrong — raised here or swallowed there —
+    a run that ends without the ledger reaching a terminal/reviewable status
+    gets marked failed, so the dashboard never shows a silently-stuck
+    'detected'/'processing' pipeline. The check never DOWNGRADES: a row
+    already at ready_for_review (or beyond) is left alone even if the run's
+    tail end errored after queue_review.
+    """
+    from app.services.graph_orchestrator import stream_new_run
+    from packages.integrations.context import (
+        current_org_id,
+        current_supabase,
+        current_user_id,
+    )
+
     gen = stream_new_run(
         agent_slug="content",
         message=f"Process new upload {video_id}",
@@ -428,19 +501,53 @@ async def _dispatch_content(
             "intent": "run_pipeline",
             "video_id": video_id,
             "video_title": video_title,
+            "published_at": published_at,
         },
     )
 
     org_tok = current_org_id.set(org_id)
     user_tok = current_user_id.set(None)
     sb_tok = current_supabase.set(supabase)
+    run_error: str | None = None
     try:
         async for _ in gen:
             pass
+    except Exception as e:
+        log.exception("Content pipeline run failed for org=%s video=%s", org_id, video_id)
+        run_error = f"pipeline run error: {e}"
     finally:
         current_org_id.reset(org_tok)
         current_user_id.reset(user_tok)
         current_supabase.reset(sb_tok)
+
+    _mark_failed_if_stuck(
+        supabase, org_id, video_id,
+        reason=run_error or "pipeline run ended without completing its stages",
+    )
+
+
+def _mark_failed_if_stuck(
+    supabase: Any, org_id: str, video_id: str, *, reason: str
+) -> None:
+    """If the pipeline row is still in a non-terminal pre-review status after
+    its run ended, mark it failed. Guarded so a row that legitimately reached
+    ready_for_review (or later) is never regressed by a late error."""
+    try:
+        resp = (
+            supabase.table("content_pipelines")
+            .select("status")
+            .eq("org_id", org_id)
+            .eq("video_id", video_id)
+            .limit(1)
+            .execute()
+        )
+        status = resp.data[0].get("status") if resp.data else None
+        if status in ("detected", "processing"):
+            supabase.table("content_pipelines").update(
+                {"status": "failed", "error": reason[:500]}
+            ).eq("org_id", org_id).eq("video_id", video_id).execute()
+    except Exception:
+        log.exception("Failed stuck-pipeline check for org=%s video=%s", org_id, video_id)
 
 
 # ── Sweep + loop ────────────────────────────────────────────────────────────

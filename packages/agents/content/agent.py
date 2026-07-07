@@ -40,13 +40,26 @@ Graph shape:
               ↓                       ▼           ▼                     ▼
           queue_review ──────────► respond ◄─────────────────────────────
 
-Phase A ships the trigger, the ledger, and this graph skeleton. The three
-generation stages (extract_audio / generate_clips / draft_podcast) are
-recorded-but-stubbed: each writes a "skipped — not yet implemented" stage
-entry so the ledger is honest about what ran. Phase B fills in the media
-work (audio extraction, Opus Clip, podcast drafting); Phase C adds the
-Monday.com review queue + the reviewer→owner approval chain (declared in
-manifest.json already); Phase D adds the publish fan-out behind that gate.
+The generation stages are REAL as of Phase B (bodies in stages.py):
+
+  extract_audio  — Riverside-preferred / YouTube-fallback audio acquisition
+                   (media.py), archived to the org-assets bucket, then
+                   transcribed with timestamps (core/transcription.py).
+  generate_clips — Opus Clip submit + bounded poll, gated on OPUSCLIP_API_KEY
+                   (skipped, not failed, when unconfigured).
+  draft_podcast  — structured episode draft (title, show notes, HH:MM:SS
+                   chapters) from the timed transcript, under the org's
+                   configured `podcast_brand` (agents.config).
+
+Every stage degrades gracefully and writes its outcome to the ledger, so a
+partially-configured org still gets whatever the configured subset can
+produce. Phase C adds the Monday.com review queue + the reviewer→owner
+approval chain (declared in manifest.json already); Phase D adds the
+publish fan-out behind that gate.
+
+Audio bytes never enter this state (the checkpointer would serialize them
+to Postgres every step) — media.py holds them within a single node frame;
+state carries only asset descriptors and the (text) transcript segments.
 """
 from __future__ import annotations
 
@@ -62,21 +75,21 @@ from packages.agents.core.templates import render
 from packages.agents.content.tools import (
     fetch_recent_pipelines,
     get_content_tools,
-    record_stage,
     set_pipeline_status,
     upsert_pipeline_row,
 )
 
+from packages.agents.content.stages import (
+    run_draft_podcast,
+    run_extract_audio,
+    run_generate_clips,
+)
+
 VALID_INTENTS = {"run_pipeline", "pipeline_status", "general"}
 
-# The generation stages, in execution order. Phase A stubs them; each later
-# phase replaces a stub with the real implementation without reshaping the
-# graph (the ledger schema and node names are the stable contract).
-STUBBED_STAGES: dict[str, str] = {
-    "extract_audio": "audio extraction ships in Phase B",
-    "generate_clips": "clip generation (Opus Clip) ships in Phase B",
-    "draft_podcast": "podcast episode drafting ships in Phase B",
-}
+# The generation stages, in execution order — the stable node-name contract
+# shared by the graph, the ledger's `stages` jsonb, and the tests.
+PIPELINE_STAGES = ("extract_audio", "generate_clips", "draft_podcast")
 
 # Matches the 11-char video id out of the common YouTube URL shapes. No bare
 # 11-char fallback on purpose — ordinary words ("consistency") are 11 chars.
@@ -88,7 +101,12 @@ class ContentState(BaseAgentState):
     intent: str | None       # "run_pipeline" | "pipeline_status" | "general"
     video_id: str | None     # preset by the scheduler; parsed from chat otherwise
     video_title: str | None
+    published_at: str | None  # from the upload poll — anchors Riverside matching
     pipeline: dict | None    # mirror of the content_pipelines row, for the FE card
+    audio_asset: dict | None          # {kind: "audio", storage_path, ...}
+    transcript_segments: list | None  # [{start, end, text}] — text only, small
+    clip_assets: list | None          # [{kind: "clip", url, ...}]
+    episode: dict | None              # {kind: "podcast_episode", ...}
 
 
 class ContentAgent(BaseAgent):
@@ -286,53 +304,52 @@ class ContentAgent(BaseAgent):
             "metadata": {**existing_meta, "pipeline_ready": True},
         }
 
-    async def _run_stubbed_stage(self, state: ContentState, stage: str):
-        """Phase A: record the stage as skipped in the ledger — honestly, with
-        the phase that implements it — and mirror it onto state.pipeline."""
-        org_id = state.get("org_id") or ""
-        video_id = state.get("video_id") or ""
-        reason = STUBBED_STAGES[stage]
-        record_stage(org_id, video_id, stage, "skipped", reason)
-        pipeline = dict(state.get("pipeline") or {})
-        stages = dict(pipeline.get("stages") or {})
-        stages[stage] = {"status": "skipped", "detail": reason}
-        pipeline["stages"] = stages
-        return {"pipeline": pipeline}
-
     async def _extract_audio_node(self, state: ContentState):
-        return await self._run_stubbed_stage(state, "extract_audio")
+        return await run_extract_audio(state)
 
     async def _generate_clips_node(self, state: ContentState):
-        return await self._run_stubbed_stage(state, "generate_clips")
+        return await run_generate_clips(state)
 
     async def _draft_podcast_node(self, state: ContentState):
-        return await self._run_stubbed_stage(state, "draft_podcast")
+        return await run_draft_podcast(state, llm=self.llm, profile=self._profile(state))
 
     async def _queue_review_node(self, state: ContentState):
         """Close out the run against the ledger.
 
         With assets: mark ready_for_review (Phase C turns this into Monday.com
-        items + the reviewer→owner approval chain). Without assets — always
-        the case while the generation stages are stubbed — mark failed with a
-        plain-language error, so nothing sits in "processing" forever and the
-        dashboard tells the truth about what happened.
+        items + the reviewer→owner approval chain). Without assets — every
+        generation stage skipped or failed — mark failed with a plain-language
+        error, so nothing sits in "processing" forever and the dashboard tells
+        the truth about what happened.
         """
         org_id = state.get("org_id") or ""
         video_id = state.get("video_id") or ""
         pipeline = dict(state.get("pipeline") or {})
-        assets = list(pipeline.get("assets") or [])
+
+        assets = [
+            a
+            for a in (
+                [state.get("audio_asset")]
+                + list(state.get("clip_assets") or [])
+                + [state.get("episode")]
+            )
+            if a
+        ]
 
         if assets:
             set_pipeline_status(org_id, video_id, "ready_for_review", assets=assets)
             pipeline["status"] = "ready_for_review"
+            pipeline["assets"] = assets
         else:
-            error = (
-                "no assets generated — the generation stages aren't "
-                "implemented yet (Phase B)"
+            stages = pipeline.get("stages") or {}
+            reasons = "; ".join(
+                f"{name}: {(v or {}).get('detail') or (v or {}).get('status')}"
+                for name, v in stages.items()
             )
-            set_pipeline_status(org_id, video_id, "failed", error=error)
+            error = f"no assets generated — {reasons}" if reasons else "no assets generated"
+            set_pipeline_status(org_id, video_id, "failed", error=error[:500])
             pipeline["status"] = "failed"
-            pipeline["error"] = error
+            pipeline["error"] = error[:500]
         return {"pipeline": pipeline}
 
     # ── Chat lanes ─────────────────────────────────────────────────────────

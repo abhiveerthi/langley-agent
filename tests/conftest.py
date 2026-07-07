@@ -37,6 +37,19 @@ def _reset_contextvars():
     yield
 
 
+# ── Live-key hygiene ──────────────────────────────────────────────────────
+# The Content Agent's integrations gate on env keys via is_configured().
+# A dev shell with a real key exported (or loaded into os.environ by
+# app.main's load_dotenv when another test imports it) would flip those
+# gates ON and send tests to the LIVE Riverside/Opus APIs. Scrub them for
+# every test; a test that wants the configured path monkeypatches
+# is_configured (or setenv) explicitly.
+@pytest.fixture(autouse=True)
+def _scrub_content_integration_keys(monkeypatch):
+    monkeypatch.delenv("RIVERSIDE_API_KEY", raising=False)
+    monkeypatch.delenv("OPUSCLIP_API_KEY", raising=False)
+
+
 # ── Mock Supabase client ──────────────────────────────────────────────────
 class _MockResult:
     def __init__(self, data: list[dict]):

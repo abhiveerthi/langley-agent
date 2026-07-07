@@ -7,7 +7,7 @@
   "tagline": "Every upload becomes clips, a podcast, and posts — automatically.",
   "capabilities": ["repurposing", "clip-generation", "podcast-production", "auto-publishing"],
   "required_integrations": ["youtube"],
-  "optional_integrations": ["monday", "x", "dropbox"],
+  "optional_integrations": ["riverside", "opusclip", "monday", "x", "dropbox"],
   "tools": ["get_pipeline_status"],
   "interrupt_before": [],
   "writes": [],

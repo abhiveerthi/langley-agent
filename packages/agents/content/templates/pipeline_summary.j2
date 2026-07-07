@@ -13,6 +13,6 @@
 {% if pipeline.assets %}
 ## Assets
 {% for asset in pipeline.assets %}
-- {{ asset.kind }}{% if asset.title %}: {{ asset.title }}{% endif %}
+- {{ asset.kind }}{% if asset.get("title") %}: {{ asset.get("title") }}{% endif %}
 {% endfor %}
 {% endif %}

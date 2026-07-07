@@ -77,12 +77,16 @@ def upsert_pipeline_row(
         "status": status,
         "updated_at": _now_iso(),
     }
-    resp = (
-        supabase.table("content_pipelines")
-        .upsert(row, on_conflict="org_id,video_id")
-        .execute()
-    )
-    return resp.data[0] if resp.data else None
+    try:
+        resp = (
+            supabase.table("content_pipelines")
+            .upsert(row, on_conflict="org_id,video_id")
+            .execute()
+        )
+        return resp.data[0] if resp.data else None
+    except Exception as e:
+        print(f"[content] pipeline upsert failed for {video_id}: {e!r}", flush=True)
+        return None
 
 
 def record_stage(
@@ -100,23 +104,28 @@ def record_stage(
     supabase = _client_or_none(org_id)
     if supabase is None:
         return
-    resp = (
-        supabase.table("content_pipelines")
-        .select("stages")
-        .eq("org_id", org_id)
-        .eq("video_id", video_id)
-        .limit(1)
-        .execute()
-    )
-    stages = (resp.data[0].get("stages") if resp.data else None) or {}
-    stages[stage] = {"status": stage_status, "detail": detail, "at": _now_iso()}
-    (
-        supabase.table("content_pipelines")
-        .update({"stages": stages, "updated_at": _now_iso()})
-        .eq("org_id", org_id)
-        .eq("video_id", video_id)
-        .execute()
-    )
+    try:
+        resp = (
+            supabase.table("content_pipelines")
+            .select("stages")
+            .eq("org_id", org_id)
+            .eq("video_id", video_id)
+            .limit(1)
+            .execute()
+        )
+        stages = (resp.data[0].get("stages") if resp.data else None) or {}
+        stages[stage] = {"status": stage_status, "detail": detail, "at": _now_iso()}
+        (
+            supabase.table("content_pipelines")
+            .update({"stages": stages, "updated_at": _now_iso()})
+            .eq("org_id", org_id)
+            .eq("video_id", video_id)
+            .execute()
+        )
+    except Exception as e:
+        # Ledger bookkeeping must never sink a pipeline run — a transient
+        # Supabase blip loses one stage annotation, not the whole video.
+        print(f"[content] record_stage({stage}) failed for {video_id}: {e!r}", flush=True)
 
 
 def set_pipeline_status(
@@ -139,13 +148,38 @@ def set_pipeline_status(
         patch["assets"] = assets
     if status == "published":
         patch["published_at"] = _now_iso()
-    (
-        supabase.table("content_pipelines")
-        .update(patch)
-        .eq("org_id", org_id)
-        .eq("video_id", video_id)
-        .execute()
-    )
+    try:
+        (
+            supabase.table("content_pipelines")
+            .update(patch)
+            .eq("org_id", org_id)
+            .eq("video_id", video_id)
+            .execute()
+        )
+    except Exception as e:
+        print(f"[content] set_pipeline_status({status}) failed for {video_id}: {e!r}", flush=True)
+
+
+def load_agent_config(org_id: str, slug: str = "content") -> dict:
+    """The org's per-agent config blob (agents.config jsonb — editable via
+    PATCH /api/agents/{slug}/config). Carries e.g. `podcast_brand`. Empty
+    dict in dev mode or on any failure."""
+    supabase = _client_or_none(org_id)
+    if supabase is None:
+        return {}
+    try:
+        resp = (
+            supabase.table("agents")
+            .select("config")
+            .eq("org_id", org_id)
+            .eq("slug", slug)
+            .limit(1)
+            .execute()
+        )
+        config = resp.data[0].get("config") if resp.data else None
+        return config if isinstance(config, dict) else {}
+    except Exception:
+        return {}
 
 
 def fetch_recent_pipelines(org_id: str, limit: int = 7) -> list[dict]:

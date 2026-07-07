@@ -1,0 +1,13 @@
+# {{ episode.title }}
+
+**Show:** {{ podcast_brand }}
+{% if episode.summary %}*{{ episode.summary }}*{% endif %}
+
+{{ episode.description }}
+
+{% if episode.chapters %}
+## Chapters
+{% for ch in episode.chapters %}
+- **{{ ch.start }}** — {{ ch.title }}
+{% endfor %}
+{% endif %}
