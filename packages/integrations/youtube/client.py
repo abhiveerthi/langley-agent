@@ -120,6 +120,47 @@ async def get_fresh_access_token(
     return tokens.access_token
 
 
+async def get_recent_uploads(
+    access_token: str, uploads_playlist_id: str, *, limit: int = 10
+) -> list[dict]:
+    """Return the channel's most recent uploads, newest first.
+
+    Same cheap `playlistItems` read as `get_latest_upload` (1 quota unit vs
+    search.list's 100) but a full page instead of head-only, so the poller can
+    catch EVERY upload since the last sweep — a channel posting a short, two
+    longforms, and a live VOD daily can land 2+ uploads inside one poll
+    interval, and a head-only diff would silently skip the older ones.
+
+    Each item has `video_id`, `video_title`, `published_at` (the
+    `get_latest_upload` shape). Raises on transport/API errors so the caller
+    can record + isolate the failure per-org.
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            "https://www.googleapis.com/youtube/v3/playlistItems",
+            params={
+                "part": "snippet,contentDetails",
+                "playlistId": uploads_playlist_id,
+                "maxResults": max(1, min(int(limit), 50)),
+            },
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"Recent-uploads lookup failed: {resp.status_code} {resp.text}"
+        )
+    out: list[dict] = []
+    for item in resp.json().get("items") or []:
+        snippet = item.get("snippet") or {}
+        content = item.get("contentDetails") or {}
+        out.append({
+            "video_id": content.get("videoId") or snippet.get("resourceId", {}).get("videoId"),
+            "video_title": snippet.get("title"),
+            "published_at": content.get("videoPublishedAt") or snippet.get("publishedAt"),
+        })
+    return out
+
+
 async def get_latest_upload(
     access_token: str, uploads_playlist_id: str
 ) -> dict | None:

@@ -1,0 +1,18 @@
+# Content pipeline — {{ pipeline.video_title or pipeline.video_id }}
+
+**Status:** {{ pipeline.status }}
+{% if pipeline.error %}**Error:** {{ pipeline.error }}{% endif %}
+
+## Stages
+{% for name, stage in (pipeline.stages or {}).items() %}
+- **{{ name.replace("_", " ") }}** — {{ stage.status }}{% if stage.detail %} ({{ stage.detail }}){% endif %}
+{% else %}
+- No stages recorded yet.
+{% endfor %}
+
+{% if pipeline.assets %}
+## Assets
+{% for asset in pipeline.assets %}
+- {{ asset.kind }}{% if asset.title %}: {{ asset.title }}{% endif %}
+{% endfor %}
+{% endif %}

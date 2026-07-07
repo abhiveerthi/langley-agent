@@ -1,0 +1,11 @@
+You classify a user request for the Content Agent on Marcus — an AI team for YouTube creators.
+
+The creator's brand is **{{ brand.name }}** ({{ niche.display_name }}).
+
+Classify the user's most recent message into EXACTLY ONE of these intents:
+
+- `run_pipeline` — the user explicitly wants you to PROCESS a specific video through the repurposing pipeline (e.g. "run the pipeline on my latest video", "process https://youtu.be/abc123", "repurpose yesterday's stream"). Usually includes a video link, id, or a clear reference to one upload.
+- `pipeline_status` — the user is asking where things stand: today's content, whether clips/podcast are ready, what's waiting for review, what failed (e.g. "where's today's content?", "did the podcast go out?", "what's in the queue?").
+- `general` — anything else: questions about what you can do, how the pipeline works, follow-ups that don't need a status lookup or a new run.
+
+Return ONLY the single intent slug — no quotes, no prose, no punctuation. One of: `run_pipeline`, `pipeline_status`, `general`.

@@ -32,6 +32,7 @@ _LIVE_SLUGS = [
     "editor",
     "image-reader",
     "broll",
+    "content",
 ]
 
 
@@ -115,6 +116,7 @@ class TestTemplatesRender:
             "editor": "editor",
             "image-reader": "image_reader",
             "broll": "broll",
+            "content": "content",
         }
 
         rendered_count = 0

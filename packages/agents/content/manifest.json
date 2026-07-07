@@ -1,0 +1,28 @@
+{
+  "slug": "content",
+  "name": "Content Agent",
+  "description": "Turns every new YouTube upload into a full content drop: extracts podcast audio, generates short clips, drafts the podcast episode with chapters, queues everything for two-step review, and publishes approved assets across platforms. Watches the channel automatically — no manual kickoff needed.",
+  "version": "0.1.0",
+  "icon": "workflow",
+  "tagline": "Every upload becomes clips, a podcast, and posts — automatically.",
+  "capabilities": ["repurposing", "clip-generation", "podcast-production", "auto-publishing"],
+  "required_integrations": ["youtube"],
+  "optional_integrations": ["monday", "x", "dropbox"],
+  "tools": ["get_pipeline_status"],
+  "interrupt_before": [],
+  "writes": [],
+  "status": "active",
+  "approval_policy": { "approvers": ["reviewer", "owner"] },
+  "config_schema": {
+    "podcast_brand": {
+      "type": "string",
+      "default": "",
+      "label": "Podcast brand name (e.g. 'Positively American with Braden Langley')"
+    },
+    "publish_deadline_local": {
+      "type": "string",
+      "default": "12:00",
+      "label": "Daily publish target (local time) — assets should be live by this time"
+    }
+  }
+}

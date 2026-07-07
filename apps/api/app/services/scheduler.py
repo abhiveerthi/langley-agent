@@ -29,22 +29,39 @@ malformed integrations row. So:
 
 ## New-upload decision
 
-`is_new_upload(last_seen_video_id, latest_video_id)` is the pure, unit-tested
-core: a video is "new" iff the API's latest upload id differs from the id we
-last acted on (and is non-empty). First-ever poll of a channel (no
-`last_seen_video_id`) does NOT fire Publisher — it just records the current
-head so we don't blast a package for a back-catalog video on first boot.
-`last_seen_video_id` is advanced after a successful dispatch so each upload
-triggers exactly once.
+`uploads_since(last_seen_video_id, recent_uploads)` is the pure, unit-tested
+core: given a newest-first page of the uploads playlist, it returns every
+upload strictly newer than the id we last acted on, oldest-first, capped at
+`max_dispatch`. A list-diff (not a head-diff) because a channel posting a
+short + two longforms + a live VOD daily can land multiple uploads inside one
+poll interval — head-only comparison would silently skip the older ones.
+First-ever poll of a channel (no `last_seen_video_id`) does NOT fire anything
+— it just records the current head so we don't blast the back catalog on
+first boot. `last_seen_video_id` is advanced per successfully-dispatched
+video so each upload triggers exactly once, and a mid-batch failure resumes
+from the exact video that failed on the next sweep.
+
+(`is_new_upload` is the older head-only predicate, kept because it's still
+the correct primitive for "did the head move at all" checks and its decision
+matrix is locked in by tests.)
 
 ## Dispatch
 
-We reuse the orchestrator's `stream_new_run` with the identical state the
-Publisher router sends for a manual "Package this video" click
-(`intent=create_package`, `video_id`, `video_title`, `package_id`) — the
-poller is just an automated caller of the same path, not a reimplementation
-of agent running. The generator is drained to completion with the org's
-tenancy ContextVars set, mirroring the router's `_run_in_background`.
+Each new upload fires up to two agents:
+
+  1. Publisher — identical state to the manual "Package this video" click
+     (`intent=create_package`, `video_id`, `video_title`, `package_id`).
+  2. Content Agent (Agent #5) — `intent=run_pipeline` + the video id, IF the
+     org's `agents` row for slug `content` is active. This drives the full
+     repurposing pipeline (audio → clips → podcast → review → publish); see
+     packages/agents/content/agent.py. Dispatch is idempotent: the pipeline
+     ledger upserts on (org_id, video_id), so a retried video re-enters the
+     same pipeline row instead of forking a duplicate.
+
+Both reuse the orchestrator's `stream_new_run` — the poller is just an
+automated caller of the same path, not a reimplementation of agent running.
+Generators are drained to completion with the org's tenancy ContextVars set,
+mirroring the router's `_run_in_background`.
 """
 from __future__ import annotations
 
@@ -77,6 +94,39 @@ def is_new_upload(last_seen_video_id: str | None, latest_video_id: str | None) -
     if not last_seen_video_id:
         return False
     return latest_video_id != last_seen_video_id
+
+
+def uploads_since(
+    last_seen_video_id: str | None,
+    recent_uploads: list[dict] | None,
+    *,
+    max_dispatch: int = 5,
+) -> list[dict]:
+    """Return the uploads strictly newer than `last_seen_video_id`,
+    OLDEST-FIRST (dispatch order), capped at `max_dispatch`.
+
+    `recent_uploads` is a newest-first page of the uploads playlist (the
+    `get_recent_uploads` shape). Rules:
+      - Empty/missing page → nothing new.
+      - First-ever poll (`last_seen_video_id` falsy) → nothing new; the
+        caller records the head instead of firing on the back catalog.
+      - Otherwise: everything ahead of `last_seen_video_id` in the page is
+        new. If `last_seen` isn't in the page at all (more uploads than the
+        page size since the last sweep, or the last-seen video was deleted),
+        the whole page counts as new — the cap keeps the dispatch blast
+        bounded, preferring the NEWEST `max_dispatch` uploads.
+    """
+    if not recent_uploads or not last_seen_video_id:
+        return []
+    newer: list[dict] = []
+    for item in recent_uploads:
+        vid = (item or {}).get("video_id")
+        if not vid or vid == last_seen_video_id:
+            break
+        newer.append(item)
+    # newest-first → keep the newest N, then flip to dispatch oldest-first so
+    # last_seen advances chronologically and a mid-batch failure resumes right.
+    return list(reversed(newer[:max_dispatch]))
 
 
 # ── Supabase service-role client ────────────────────────────────────────────
@@ -144,7 +194,7 @@ async def _poll_org(supabase: Any, org_id: str) -> None:
             settings.google_client_id,
             settings.google_client_secret,
         )
-        latest = await yt.get_latest_upload(access_token, uploads_playlist_id)
+        recent = await yt.get_recent_uploads(access_token, uploads_playlist_id)
     except Exception as e:
         log.warning("YouTube poll failed for org=%s: %r", org_id, e)
         _upsert_state(
@@ -155,36 +205,56 @@ async def _poll_org(supabase: Any, org_id: str) -> None:
         )
         return
 
-    latest_video_id = (latest or {}).get("video_id")
+    latest_video_id = (recent[0].get("video_id") if recent else None)
+    new_uploads = uploads_since(last_seen, recent)
 
-    if is_new_upload(last_seen, latest_video_id):
+    if not new_uploads:
+        # First-ever poll records the head without firing; a no-change poll
+        # just touches last_polled_at.
+        _upsert_state(
+            supabase, org_id, channel_id,
+            last_seen_video_id=latest_video_id or last_seen,
+            last_polled_at=now_iso,
+            last_error=None,
+        )
+        return
+
+    # Dispatch oldest-first, advancing last_seen per video so a mid-batch
+    # failure resumes from the exact upload that failed — never re-firing the
+    # ones that already went out, never skipping the ones that didn't.
+    content_active = _content_agent_active(supabase, org_id)
+    processed_head = last_seen
+    for item in new_uploads:
+        video_id = item.get("video_id")
+        video_title = item.get("video_title") or video_id
         log.info(
-            "New upload detected for org=%s: %s (was %s) — dispatching Publisher",
-            org_id, latest_video_id, last_seen,
+            "New upload detected for org=%s: %s — dispatching Publisher%s",
+            org_id, video_id, " + Content Agent" if content_active else "",
         )
         try:
             await _dispatch_publisher(
-                supabase, org_id,
-                video_id=latest_video_id,
-                video_title=(latest or {}).get("video_title") or latest_video_id,
+                supabase, org_id, video_id=video_id, video_title=video_title
             )
+            if content_active:
+                await _dispatch_content(
+                    supabase, org_id, video_id=video_id, video_title=video_title
+                )
         except Exception as e:
-            # Dispatch failed — DON'T advance last_seen, so the next sweep
-            # retries this same upload instead of silently skipping it.
-            log.exception("Publisher dispatch failed for org=%s video=%s", org_id, latest_video_id)
+            # Don't advance past the failed video — the next sweep retries it
+            # (both dispatch targets are idempotent upserts keyed on video).
+            log.exception("Dispatch failed for org=%s video=%s", org_id, video_id)
             _upsert_state(
                 supabase, org_id, channel_id,
-                last_seen_video_id=last_seen,
+                last_seen_video_id=processed_head,
                 last_polled_at=now_iso,
                 last_error=f"dispatch failed: {e}"[:500],
             )
             return
+        processed_head = video_id
 
-    # Advance the head: on a successful dispatch, on a first-ever poll
-    # (records the back-catalog head without firing), and on a no-change poll.
     _upsert_state(
         supabase, org_id, channel_id,
-        last_seen_video_id=latest_video_id or last_seen,
+        last_seen_video_id=processed_head,
         last_polled_at=now_iso,
         last_error=None,
     )
@@ -283,6 +353,84 @@ async def _dispatch_publisher(
     )
 
     # Set tenancy ContextVars for the duration of the drain, then restore.
+    org_tok = current_org_id.set(org_id)
+    user_tok = current_user_id.set(None)
+    sb_tok = current_supabase.set(supabase)
+    try:
+        async for _ in gen:
+            pass
+    finally:
+        current_org_id.reset(org_tok)
+        current_user_id.reset(user_tok)
+        current_supabase.reset(sb_tok)
+
+
+def _content_agent_active(supabase: Any, org_id: str) -> bool:
+    """Is the Content Agent (Agent #5) enabled for this org?
+
+    Reads the org's `agents` row for slug `content` — the same active flag
+    that gates @mention autocomplete. Off (or query failure) → the poller
+    only fires Publisher, exactly the pre-Agent-#5 behaviour.
+    """
+    try:
+        resp = (
+            supabase.table("agents")
+            .select("active")
+            .eq("org_id", org_id)
+            .eq("slug", "content")
+            .limit(1)
+            .execute()
+        )
+        return bool(resp.data and resp.data[0].get("active"))
+    except Exception as e:
+        log.warning("content-agent active check failed for org=%s: %r", org_id, e)
+        return False
+
+
+async def _dispatch_content(
+    supabase: Any, org_id: str, *, video_id: str, video_title: str
+) -> None:
+    """Kick off the Content Agent repurposing pipeline for a new upload.
+
+    Pre-creates the `content_pipelines` ledger row (status=detected) so the
+    dashboard shows the video the moment it's spotted — before the graph's
+    first node runs — then drives a `run_pipeline` run to completion with the
+    org's tenancy ContextVars set, mirroring `_dispatch_publisher`. The row
+    upsert is keyed on (org_id, video_id), so a retried dispatch re-enters
+    the same pipeline instead of forking a duplicate.
+    """
+    from app.services.graph_orchestrator import stream_new_run
+    from packages.integrations.context import (
+        current_org_id,
+        current_supabase,
+        current_user_id,
+    )
+
+    thread_id = str(uuid4())
+    supabase.table("content_pipelines").upsert(
+        {
+            "org_id": org_id,
+            "video_id": video_id,
+            "video_title": video_title,
+            "thread_id": thread_id,
+            "status": "detected",
+        },
+        on_conflict="org_id,video_id",
+    ).execute()
+
+    gen = stream_new_run(
+        agent_slug="content",
+        message=f"Process new upload {video_id}",
+        thread_id=thread_id,
+        org_id=org_id,
+        user_id=None,  # auto-poll has no human actor
+        extra_state={
+            "intent": "run_pipeline",
+            "video_id": video_id,
+            "video_title": video_title,
+        },
+    )
+
     org_tok = current_org_id.set(org_id)
     user_tok = current_user_id.set(None)
     sb_tok = current_supabase.set(supabase)
