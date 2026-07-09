@@ -132,6 +132,22 @@ async def create_item(
     return (data.get("create_item") or {}) if data else {}
 
 
+async def add_update(access_token: str, item_id: str, body: str) -> dict:
+    """Post an update (comment) onto an item. The Content Agent uses this to
+    put the AI-drafted copy INSIDE each review item so the reviewer QAs tone
+    right on the board — no other tool, no copying text around."""
+    data = await graphql(
+        access_token,
+        """
+        mutation($item: ID!, $body: String!) {
+          create_update(item_id: $item, body: $body) { id }
+        }
+        """,
+        {"item": item_id, "body": body[:20000]},
+    )
+    return data.get("create_update") or {}
+
+
 async def create_board(
     access_token: str, board_name: str, *, board_kind: str = "public"
 ) -> dict:

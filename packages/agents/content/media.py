@@ -52,6 +52,18 @@ def max_audio_bytes() -> int:
     return max(1, mb) * 1024 * 1024
 
 
+def max_clip_bytes() -> int:
+    """Byte budget for a single clip download at publish time. Separate
+    (smaller) knob than the audio budget: Shorts-length clips are tens of
+    MB, and publish runs several concurrently — per-buffer size is what
+    bounds peak process memory."""
+    try:
+        mb = int(os.environ.get("CONTENT_MAX_CLIP_MB", "200"))
+    except ValueError:
+        mb = 200
+    return max(1, mb) * 1024 * 1024
+
+
 def _watch_url(video_id: str) -> str:
     return f"https://www.youtube.com/watch?v={video_id}"
 
@@ -160,6 +172,30 @@ async def acquire_audio(
             "; ".join(notes + [f"youtube: {e}"])
         ) from e
     return {"bytes": audio_bytes, "content_type": content_type, "source": "youtube"}
+
+
+async def fetch_video_details(org_id: str, video_id: str) -> dict | None:
+    """Duration + live flag for routing (routing.py). Best-effort: any
+    failure returns None and the router classifies conservatively (clips
+    yes, podcast no) — a mis-routed public podcast is the worse error."""
+    from packages.agents.content.tools import settings_value
+    from packages.agents.core.peer_context import _is_real_uuid
+    from packages.integrations.context import current_supabase
+    from packages.integrations.youtube import client as yt
+
+    supabase = current_supabase.get()
+    if supabase is None or not _is_real_uuid(org_id):
+        return None
+    try:
+        token = await yt.get_fresh_access_token(
+            supabase, org_id,
+            settings_value("google_client_id", "GOOGLE_CLIENT_ID"),
+            settings_value("google_client_secret", "GOOGLE_CLIENT_SECRET"),
+        )
+        return await yt.get_video_details(token, video_id)
+    except Exception as e:
+        log.warning("video details lookup failed for %s: %r", video_id, e)
+        return None
 
 
 _EXT_FOR_TYPE = {

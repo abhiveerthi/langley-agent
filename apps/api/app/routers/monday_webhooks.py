@@ -120,4 +120,31 @@ async def monday_webhook(org_id: str, secret: str, request: Request):
             "Monday review decision org=%s video=%s role=%s decision=%s",
             org_id, result["video_id"], result["role"], result["decision"],
         )
+        # The owner's FINAL approval IS the publish trigger — fan out
+        # immediately (noon CST target) rather than waiting for the next
+        # scheduler sweep. run_publish CAS-claims approved → publishing, so
+        # the sweep's catch-up pass can never double-publish.
+        if result["role"] == "final" and result["decision"] == "approved":
+            _spawn_publish(supabase, org_id, result["video_id"])
     return {"ok": True, "applied": bool(result)}
+
+
+# Strong refs to in-flight publish tasks (mirrors scheduler._content_tasks).
+_publish_tasks: set = set()
+
+
+def _spawn_publish(supabase, org_id: str, video_id: str) -> None:
+    import asyncio
+
+    from packages.agents.content.publish import run_publish
+
+    async def _run():
+        try:
+            summary = await run_publish(supabase, org_id, video_id)
+            log.info("Publish run for org=%s video=%s: %s", org_id, video_id, summary)
+        except Exception:
+            log.exception("Publish run crashed for org=%s video=%s", org_id, video_id)
+
+    task = asyncio.create_task(_run())
+    _publish_tasks.add(task)
+    task.add_done_callback(_publish_tasks.discard)

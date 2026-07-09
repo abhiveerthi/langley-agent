@@ -43,6 +43,19 @@ from packages.agents.content.tools import load_agent_config, record_stage
 
 log = logging.getLogger("content.stages")
 
+
+async def _escalate_failure(state: dict, stage: str, detail: str) -> None:
+    """Route a stage FAILURE (not a routing skip) to the owner's Slack —
+    he monitors Slack and fixes outages himself; the reviewer's Monday
+    board stays free of operational noise. Best-effort."""
+    from packages.agents.content.alerts import escalate
+
+    title = state.get("video_title") or state.get("video_id") or "?"
+    try:
+        await escalate(state.get("org_id") or "", f"{stage} failed for '{title}': {detail}")
+    except Exception:  # pragma: no cover — alerts must never cascade
+        log.warning("escalation attempt itself failed for %s", stage)
+
 # Bounded wait for Opus Clip's server-side processing. The pipeline runs in
 # a background task (see scheduler._dispatch_content), so a long wait only
 # occupies that task — never the poll sweep.
@@ -80,6 +93,14 @@ async def run_extract_audio(state: dict) -> dict:
     and draft_podcast will skip itself for lack of a transcript.
     """
     video_id = state.get("video_id") or ""
+
+    routing = state.get("routing") or {}
+    if not routing.get("podcast_eligible", True):
+        return {"pipeline": record_and_mirror(
+            state, "extract_audio", "skipped",
+            f"routing: {routing.get('reason') or 'not podcast-eligible'}",
+        )}
+
     try:
         audio = await acquire_audio(
             video_id,
@@ -90,7 +111,9 @@ async def run_extract_audio(state: dict) -> dict:
         return {"pipeline": record_and_mirror(state, "extract_audio", "skipped", str(e))}
     except Exception as e:
         log.exception("extract_audio failed for %s", video_id)
-        return {"pipeline": record_and_mirror(state, "extract_audio", "failed", repr(e))}
+        detail = repr(e)
+        await _escalate_failure(state, "extract_audio", detail)
+        return {"pipeline": record_and_mirror(state, "extract_audio", "failed", detail)}
 
     asset = await store_audio_asset(
         state.get("org_id") or "",
@@ -141,6 +164,13 @@ async def run_generate_clips(state: dict) -> dict:
 
     video_id = state.get("video_id") or ""
 
+    routing = state.get("routing") or {}
+    if not routing.get("clips_eligible", True):
+        return {"pipeline": record_and_mirror(
+            state, "generate_clips", "skipped",
+            f"routing: {routing.get('reason') or 'not clip-eligible'}",
+        )}
+
     if not opusclip.is_configured():
         return {"pipeline": record_and_mirror(
             state, "generate_clips", "skipped",
@@ -156,6 +186,7 @@ async def run_generate_clips(state: dict) -> dict:
     except opusclip.OpusClipUnavailable as e:
         return {"pipeline": record_and_mirror(state, "generate_clips", "skipped", str(e))}
     except opusclip.OpusClipError as e:  # includes OpusClipTimeout
+        await _escalate_failure(state, "generate_clips (Opus Clip)", str(e))
         return {"pipeline": record_and_mirror(state, "generate_clips", "failed", str(e))}
 
     clips = [
@@ -188,6 +219,14 @@ async def run_draft_podcast(state: dict, *, llm, profile) -> dict:
     """Draft the episode (title, show notes, chapters) from the timestamped
     transcript, under the org's configured podcast brand."""
     video_id = state.get("video_id") or ""
+
+    routing = state.get("routing") or {}
+    if not routing.get("podcast_eligible", True):
+        return {"pipeline": record_and_mirror(
+            state, "draft_podcast", "skipped",
+            f"routing: {routing.get('reason') or 'not podcast-eligible'}",
+        )}
+
     segments = state.get("transcript_segments")
     if not segments:
         return {"pipeline": record_and_mirror(
@@ -207,6 +246,8 @@ async def run_draft_podcast(state: dict, *, llm, profile) -> dict:
         profile=profile,
         podcast_brand=podcast_brand,
         video_title=state.get("video_title") or video_id,
+        copy_style_guide=(config.get("copy_style_guide") or "").strip(),
+        creative_direction=(state.get("creative_direction") or "").strip(),
     )
     try:
         structured = llm.with_structured_output(PodcastEpisode)
@@ -216,9 +257,9 @@ async def run_draft_podcast(state: dict, *, llm, profile) -> dict:
         ])
     except Exception as e:
         log.exception("draft_podcast LLM call failed for %s", video_id)
-        return {"pipeline": record_and_mirror(
-            state, "draft_podcast", "failed", f"episode drafting failed: {e!r}"
-        )}
+        detail = f"episode drafting failed: {e!r}"
+        await _escalate_failure(state, "draft_podcast", detail)
+        return {"pipeline": record_and_mirror(state, "draft_podcast", "failed", detail)}
 
     asset = episode_asset(
         episode,
@@ -255,4 +296,79 @@ async def run_draft_podcast(state: dict, *, llm, profile) -> dict:
     return {
         "pipeline": record_and_mirror(state, "draft_podcast", "done", detail),
         "episode": asset,
+    }
+
+
+# ── Stage: draft_copy ───────────────────────────────────────────────────────
+
+async def run_draft_copy(state: dict, *, llm, profile) -> dict:
+    """AI-drafted SEO/social copy for everything the run produced: an SEO
+    title + caption + hashtags per clip, and the drop's X post. The
+    reviewer tone-QAs this text on the Monday board — she never writes
+    metadata herself (product clarification #1/#2).
+
+    Honors the org's `copy_style_guide` config and the run's
+    `creative_direction` (the creator's free-form steer when he re-runs a
+    video whose tone came out wrong)."""
+    from packages.agents.content.copy import CopyPack
+
+    video_id = state.get("video_id") or ""
+    clips = [dict(c) for c in (state.get("clip_assets") or [])]
+    episode = state.get("episode")
+
+    if not clips and not episode:
+        return {"pipeline": record_and_mirror(
+            state, "draft_copy", "skipped", "no assets produced — nothing to write copy for",
+        )}
+
+    config = load_agent_config(state.get("org_id") or "")
+    video_title = state.get("video_title") or video_id
+    system_prompt = render(
+        "content",
+        "draft_copy.j2",
+        profile=profile,
+        video_title=video_title,
+        has_transcript=bool(state.get("transcript_segments")),
+        copy_style_guide=(config.get("copy_style_guide") or "").strip(),
+        creative_direction=(state.get("creative_direction") or "").strip(),
+    )
+    clip_lines = "\n".join(
+        f"Clip {i + 1}: {c.get('title') or 'untitled'}"
+        f" ({int(c.get('duration_seconds') or 0)}s)"
+        for i, c in enumerate(clips)
+    ) or "(no clips this run)"
+    human = (
+        f"Video: {video_title}\n\nClips to write copy for, in order:\n{clip_lines}"
+    )
+
+    try:
+        structured = llm.with_structured_output(CopyPack)
+        pack: CopyPack = await structured.ainvoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=human),
+        ])
+    except Exception as e:
+        log.exception("draft_copy LLM call failed for %s", video_id)
+        detail = f"copy drafting failed: {e!r}"
+        await _escalate_failure(state, "draft_copy", detail)
+        return {"pipeline": record_and_mirror(state, "draft_copy", "failed", detail)}
+
+    # Positional attach; a short model response leaves trailing clips
+    # without copy (publisher falls back to the clip title).
+    for i, clip in enumerate(clips):
+        if i < len(pack.clips):
+            clip["copy"] = pack.clips[i].model_dump()
+
+    post_copy = {
+        "kind": "post_copy",
+        "x_post": pack.x_post,
+        "video_seo_title": pack.video_seo_title,
+        "video_id": video_id,
+    }
+
+    detail = f"copy for {min(len(clips), len(pack.clips))} clip(s) + announcement post"
+    return {
+        "pipeline": record_and_mirror(state, "draft_copy", "done", detail),
+        "clip_assets": clips,
+        "post_copy": post_copy,
     }

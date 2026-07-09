@@ -161,6 +161,20 @@ def set_pipeline_status(
         print(f"[content] set_pipeline_status({status}) failed for {video_id}: {e!r}", flush=True)
 
 
+def settings_value(attr: str, env: str, default: str = "") -> str:
+    """A config value from the API's Settings when running inside the
+    FastAPI process, else the raw env var (agents also run under the
+    standalone LangGraph server, which has no `app` package)."""
+    try:
+        from app.config import get_settings
+
+        return getattr(get_settings(), attr, "") or default
+    except Exception:
+        import os
+
+        return os.environ.get(env, default)
+
+
 def load_agent_config(org_id: str, slug: str = "content") -> dict:
     """The org's per-agent config blob (agents.config jsonb — editable via
     PATCH /api/agents/{slug}/config). Carries e.g. `podcast_brand`. Empty

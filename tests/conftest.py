@@ -48,6 +48,8 @@ def _reset_contextvars():
 def _scrub_content_integration_keys(monkeypatch):
     monkeypatch.delenv("RIVERSIDE_API_KEY", raising=False)
     monkeypatch.delenv("OPUSCLIP_API_KEY", raising=False)
+    monkeypatch.delenv("INSTAGRAM_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("INSTAGRAM_BUSINESS_ACCOUNT_ID", raising=False)
 
 
 # ── Mock Supabase client ──────────────────────────────────────────────────
@@ -67,6 +69,8 @@ class _MockQuery:
 
     def select(self, *_a, **_k): return self
     def eq(self, *_a, **_k): return self
+    def in_(self, *_a, **_k): return self
+    def lt(self, *_a, **_k): return self
     def order(self, *_a, **_k): return self
     def limit(self, *_a, **_k): return self
     def insert(self, payload):

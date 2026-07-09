@@ -51,6 +51,7 @@ _KIND_PREFIX = {
     "audio": "[Audio]",
     "clip": "[Clip]",
     "podcast_episode": "[Podcast]",
+    "post_copy": "[Post]",
 }
 
 
@@ -90,8 +91,35 @@ def decision_for_label(label: str | None) -> str | None:
 def item_name_for_asset(asset: dict, index: int) -> str:
     """Human-scannable Monday item name for one asset."""
     prefix = _KIND_PREFIX.get(asset.get("kind") or "", "[Asset]")
-    title = asset.get("title") or asset.get("url") or asset.get("storage_path") or f"#{index + 1}"
+    title = (
+        asset.get("title")
+        or asset.get("video_seo_title")
+        or asset.get("url")
+        or asset.get("storage_path")
+        or f"#{index + 1}"
+    )
     return f"{prefix} {title}"[:255]
+
+
+def review_body_for_asset(asset: dict) -> str | None:
+    """The update posted INSIDE the Monday item — the AI-drafted copy the
+    reviewer tone-QAs in place. None means no update (nothing to QA)."""
+    from packages.agents.content.copy import (
+        clip_copy_markdown,
+        episode_copy_markdown,
+        post_copy_markdown,
+    )
+
+    kind = asset.get("kind")
+    if kind == "clip":
+        return clip_copy_markdown(asset.get("copy") or {}) if asset.get("copy") else None
+    if kind == "podcast_episode":
+        return episode_copy_markdown(asset)
+    if kind == "post_copy":
+        return post_copy_markdown(asset)
+    if kind == "audio":
+        return "Source audio for the podcast episode — approve to include it in the drop."
+    return None
 
 
 # ── Board provisioning ──────────────────────────────────────────────────────
@@ -271,6 +299,14 @@ async def queue_for_review(
         if not item.get("id"):
             continue
         created += 1
+        # Post the AI-drafted copy into the item so tone-QA happens on the
+        # board itself. Best-effort — a missing update never blocks review.
+        body = review_body_for_asset(asset)
+        if body:
+            try:
+                await monday_client.add_update(token, str(item["id"]), body)
+            except Exception as e:
+                log.warning("Monday update post failed for item %s: %r", item.get("id"), e)
         rows.append({
             "org_id": org_id,
             "pipeline_id": pipeline_id,
@@ -378,7 +414,9 @@ def apply_status_change(
 # that's already publishing/published (double-publish hazard) or stamp
 # 'approved' over a re-run that's still mid-processing.
 _FINAL_TRANSITIONS: dict[str, tuple[tuple[str, ...], str]] = {
-    "approved": (("ready_for_review", "rejected"), "approved"),
+    # approved-from-failed is the RETRY path: a total publish failure parks
+    # the row at failed; the owner re-flips FINAL to Approved to try again.
+    "approved": (("ready_for_review", "rejected", "failed"), "approved"),
     "rejected": (("ready_for_review", "approved"), "rejected"),
     "pending": (("approved", "rejected"), "ready_for_review"),
 }
@@ -412,9 +450,18 @@ def _advance_final_gate(supabase: Any, org_id: str, video_id: str, decision: str
             # Re-approval / reopening clears the prior rejection note.
             "error": "rejected at final approval" if decision == "rejected" else None,
         }
-        supabase.table("content_pipelines").update(patch).eq("org_id", org_id).eq(
-            "video_id", video_id
-        ).execute()
+        # CAS, not just check-then-write: the WHERE re-asserts an allowed
+        # current status so a concurrent transition (e.g. run_publish's
+        # approved→publishing claim between our select and this update)
+        # makes this a no-op instead of stamping over a live publish.
+        (
+            supabase.table("content_pipelines")
+            .update(patch)
+            .eq("org_id", org_id)
+            .eq("video_id", video_id)
+            .in_("status", list(allowed))
+            .execute()
+        )
     except Exception as e:
         log.warning("FINAL gate write failed for %s → %s: %r", video_id, decision, e)
 

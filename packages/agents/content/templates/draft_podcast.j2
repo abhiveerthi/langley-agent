@@ -10,5 +10,15 @@ You will receive the episode's TIMESTAMPED transcript — lines of the form `[HH
 - **chapters** — 6–12 markers spanning the WHOLE episode, chronological, first at 00:00:00. Anchor every `start` to a `[HH:MM:SS]` marker you actually saw near that topic shift — never invent times.
 
 Ground everything in the transcript. If a name/claim is unclear in the audio, phrase around it rather than guessing.
+{% if copy_style_guide %}
+
+## Creator's style guide (follow this over everything else)
+{{ copy_style_guide }}
+{% endif %}
+{% if creative_direction %}
+
+## Direction for THIS run (from the creator — overrides defaults)
+{{ creative_direction }}
+{% endif %}
 
 {% include "_brand_voice.j2" %}

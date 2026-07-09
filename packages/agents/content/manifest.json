@@ -7,7 +7,7 @@
   "tagline": "Every upload becomes clips, a podcast, and posts — automatically.",
   "capabilities": ["repurposing", "clip-generation", "podcast-production", "auto-publishing"],
   "required_integrations": ["youtube"],
-  "optional_integrations": ["riverside", "opusclip", "monday", "x", "dropbox"],
+  "optional_integrations": ["riverside", "opusclip", "monday", "x", "instagram", "dropbox"],
   "tools": ["get_pipeline_status"],
   "interrupt_before": [],
   "writes": [],
@@ -23,6 +23,21 @@
       "type": "string",
       "default": "12:00",
       "label": "Daily publish target (local time) — assets should be live by this time"
+    },
+    "podcast_min_minutes": {
+      "type": "number",
+      "default": 30,
+      "label": "Minimum live-stream length (minutes) that becomes a podcast episode"
+    },
+    "copy_style_guide": {
+      "type": "string",
+      "default": "",
+      "label": "Style guide for AI-drafted titles/captions/hashtags (tone, phrases to use/avoid)"
+    },
+    "escalation_slack_channel_id": {
+      "type": "string",
+      "default": "",
+      "label": "Slack channel ID for failure alerts (goes to the owner, not the reviewer)"
     }
   }
 }

@@ -240,6 +240,7 @@ class TestFinalGateGuards:
     @pytest.mark.parametrize("current, label, expect_status", [
         ("ready_for_review", "Approved", "approved"),
         ("rejected", "Approved", "approved"),        # owner changed his mind
+        ("failed", "Approved", "approved"),           # retry after failed publish
         ("approved", "Rejected", "rejected"),         # pre-publish kill
         ("approved", "Pending Review", "ready_for_review"),
     ])
@@ -253,7 +254,7 @@ class TestFinalGateGuards:
         ("published", "Pending Review"),   # never rewind a live drop
         ("publishing", "Rejected"),        # too late — fan-out in flight
         ("processing", "Approved"),        # re-run mid-flight
-        ("failed", "Approved"),            # nothing to approve
+        ("detected", "Approved"),          # nothing generated yet
     ])
     def test_blocked_transitions_leave_pipeline_untouched(self, mock_supabase_factory, current, label):
         sb = self._sb(mock_supabase_factory, current)

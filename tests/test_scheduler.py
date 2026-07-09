@@ -370,7 +370,12 @@ async def test_dispatch_content_skips_when_inflight(mock_supabase, monkeypatch):
     async def _fake_run(*a, **k):
         spawned.append(k)
 
-    monkeypatch.setattr(scheduler, "_run_content_pipeline", _fake_run)
+    # Patch where the function actually LIVES (content_dispatch) — the
+    # scheduler name is a re-export and _dispatch_content resolves the
+    # runner from its own module globals.
+    from app.services import content_dispatch
+
+    monkeypatch.setattr(content_dispatch, "_run_content_pipeline", _fake_run)
     key = ("org-1", "vidX")
     scheduler._content_inflight.add(key)
     try:

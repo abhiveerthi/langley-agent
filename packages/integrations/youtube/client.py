@@ -203,6 +203,126 @@ async def get_latest_upload(
     }
 
 
+def _parse_iso8601_duration(value: str | None) -> int:
+    """PT1H2M3S → seconds. 0 on anything unparseable (caller treats unknown
+    duration as 'route conservatively')."""
+    import re as _re
+
+    if not value:
+        return 0
+    m = _re.fullmatch(
+        r"P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", value.strip()
+    )
+    if not m:
+        return 0
+    d, h, mnt, s = (int(g) if g else 0 for g in m.groups())
+    return d * 86400 + h * 3600 + mnt * 60 + s
+
+
+async def get_video_details(access_token: str, video_id: str) -> dict | None:
+    """Duration + live-stream flag for one video — the Content Agent's
+    routing inputs (podcast lane iff live and long enough; Shorts skip
+    clipping). One videos.list call (1 quota unit).
+
+    Returns {"duration_seconds": int, "is_live": bool, "title": str} or
+    None when the video isn't visible. `is_live` is true for anything that
+    was (or is) a live broadcast — liveStreamingDetails is present on live
+    VODs after the stream ends, which is exactly the nightly-stream case.
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={
+                "part": "contentDetails,liveStreamingDetails,snippet",
+                "id": video_id,
+            },
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"Video details lookup failed: {resp.status_code} {resp.text[:200]}"
+        )
+    items = resp.json().get("items") or []
+    if not items:
+        return None
+    item = items[0]
+    duration = _parse_iso8601_duration(
+        (item.get("contentDetails") or {}).get("duration")
+    )
+    return {
+        "duration_seconds": duration,
+        "is_live": "liveStreamingDetails" in item,
+        "title": (item.get("snippet") or {}).get("title") or "",
+    }
+
+
+async def upload_video(
+    access_token: str,
+    *,
+    video_bytes: bytes,
+    title: str,
+    description: str = "",
+    tags: list[str] | None = None,
+    privacy_status: str = "public",
+) -> dict:
+    """Upload a video (Content Agent: approved Shorts clips) via the
+    resumable protocol: initiate with metadata, then PUT the bytes to the
+    session URL Google returns. Requires the youtube.upload scope (already
+    in YOUTUBE_SCOPES; connections created before it shipped need a
+    reconnect — surfaced by the 403 message below).
+
+    Returns {"video_id", "url"}. Raises RuntimeError with an actionable
+    message on failure; callers record it per-asset and move on.
+    """
+    metadata = {
+        "snippet": {
+            "title": (title or "Untitled")[:100],
+            "description": description[:4900],
+            "tags": (tags or [])[:30],
+            "categoryId": "22",  # People & Blogs — safe default
+        },
+        "status": {
+            "privacyStatus": privacy_status,
+            "selfDeclaredMadeForKids": False,
+        },
+    }
+    async with httpx.AsyncClient(timeout=600) as client:
+        init = await client.post(
+            "https://www.googleapis.com/upload/youtube/v3/videos",
+            params={"uploadType": "resumable", "part": "snippet,status"},
+            json=metadata,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "X-Upload-Content-Type": "video/mp4",
+                "X-Upload-Content-Length": str(len(video_bytes)),
+            },
+        )
+        if init.status_code >= 400:
+            hint = (
+                " (missing youtube.upload scope? Reconnect YouTube to grant it)"
+                if init.status_code == 403
+                else ""
+            )
+            raise RuntimeError(
+                f"YouTube upload init failed: {init.status_code}{hint} {init.text[:300]}"
+            )
+        session_url = init.headers.get("location")
+        if not session_url:
+            raise RuntimeError("YouTube upload init returned no session URL")
+
+        put = await client.put(
+            session_url,
+            content=video_bytes,
+            headers={"Content-Type": "video/mp4"},
+        )
+    if put.status_code >= 400:
+        raise RuntimeError(f"YouTube upload failed: {put.status_code} {put.text[:300]}")
+    video_id = (put.json() or {}).get("id")
+    if not video_id:
+        raise RuntimeError(f"YouTube upload returned no video id: {put.text[:200]}")
+    return {"video_id": video_id, "url": f"https://www.youtube.com/shorts/{video_id}"}
+
+
 async def mark_connection_error(
     supabase: Client, org_id: str, error: str
 ) -> None:

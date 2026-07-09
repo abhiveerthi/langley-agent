@@ -80,6 +80,7 @@ from packages.agents.content.tools import (
 )
 
 from packages.agents.content.stages import (
+    run_draft_copy,
     run_draft_podcast,
     run_extract_audio,
     run_generate_clips,
@@ -89,7 +90,7 @@ VALID_INTENTS = {"run_pipeline", "pipeline_status", "general"}
 
 # The generation stages, in execution order — the stable node-name contract
 # shared by the graph, the ledger's `stages` jsonb, and the tests.
-PIPELINE_STAGES = ("extract_audio", "generate_clips", "draft_podcast")
+PIPELINE_STAGES = ("extract_audio", "generate_clips", "draft_podcast", "draft_copy")
 
 # Matches the 11-char video id out of the common YouTube URL shapes. No bare
 # 11-char fallback on purpose — ordinary words ("consistency") are 11 chars.
@@ -103,10 +104,13 @@ class ContentState(BaseAgentState):
     video_title: str | None
     published_at: str | None  # from the upload poll — anchors Riverside matching
     pipeline: dict | None    # mirror of the content_pipelines row, for the FE card
+    routing: dict | None     # classify_video() output — lane eligibility flags
+    creative_direction: str | None  # creator's free-form steer for re-runs
     audio_asset: dict | None          # {kind: "audio", storage_path, ...}
     transcript_segments: list | None  # [{start, end, text}] — text only, small
     clip_assets: list | None          # [{kind: "clip", url, ...}]
     episode: dict | None              # {kind: "podcast_episode", ...}
+    post_copy: dict | None            # {kind: "post_copy", x_post, ...}
 
 
 class ContentAgent(BaseAgent):
@@ -145,6 +149,7 @@ class ContentAgent(BaseAgent):
         graph.add_node("extract_audio", self._extract_audio_node)
         graph.add_node("generate_clips", self._generate_clips_node)
         graph.add_node("draft_podcast", self._draft_podcast_node)
+        graph.add_node("draft_copy", self._draft_copy_node)
         graph.add_node("queue_review", self._queue_review_node)
 
         graph.add_node("status_answer", self._status_answer_node)
@@ -173,7 +178,8 @@ class ContentAgent(BaseAgent):
         )
         graph.add_edge("extract_audio", "generate_clips")
         graph.add_edge("generate_clips", "draft_podcast")
-        graph.add_edge("draft_podcast", "queue_review")
+        graph.add_edge("draft_podcast", "draft_copy")
+        graph.add_edge("draft_copy", "queue_review")
         graph.add_edge("queue_review", "respond")
 
         graph.add_edge("status_answer", "respond")
@@ -298,9 +304,47 @@ class ContentAgent(BaseAgent):
             "assets": [],
             "error": None,
         }
+
+        # Length/type routing (product rule: nightly live ≥30min → podcast;
+        # long-forms → Opus only; Shorts → neither). Details lookup is
+        # best-effort; classify_video routes conservatively on None.
+        from packages.agents.content.media import fetch_video_details
+        from packages.agents.content.routing import classify_video
+        from packages.agents.content.tools import load_agent_config
+
+        details = await fetch_video_details(org_id, video_id)
+        routing = classify_video(
+            duration_seconds=(details or {}).get("duration_seconds") if details else None,
+            is_live=bool((details or {}).get("is_live")),
+            config=load_agent_config(org_id),
+        )
+        pipeline["video_kind"] = routing["video_kind"]
+        try:
+            from packages.integrations.context import current_supabase
+
+            sb = current_supabase.get()
+            if sb is not None:
+                sb.table("content_pipelines").update(
+                    {"video_kind": routing["video_kind"]}
+                ).eq("org_id", org_id).eq("video_id", video_id).execute()
+        except Exception:
+            pass
+
+        # Creative direction: a human-initiated run carries the creator's
+        # free-form steer ("redo it more aggressive on X") — scheduler runs
+        # (user_id None) have none.
+        direction = ""
+        if state.get("user_id"):
+            direction = re.sub(
+                r"\S*(?:youtu\.be|youtube\.com)\S*", " ", self._last_user_text(state)
+            ).strip()
+
         return {
             "video_id": video_id,
+            "video_title": state.get("video_title") or (details or {}).get("title"),
             "pipeline": pipeline,
+            "routing": routing,
+            "creative_direction": direction,
             "metadata": {**existing_meta, "pipeline_ready": True},
         }
 
@@ -312,6 +356,9 @@ class ContentAgent(BaseAgent):
 
     async def _draft_podcast_node(self, state: ContentState):
         return await run_draft_podcast(state, llm=self.llm, profile=self._profile(state))
+
+    async def _draft_copy_node(self, state: ContentState):
+        return await run_draft_copy(state, llm=self.llm, profile=self._profile(state))
 
     async def _queue_review_node(self, state: ContentState):
         """Close out the run against the ledger.
@@ -332,6 +379,7 @@ class ContentAgent(BaseAgent):
                 [state.get("audio_asset")]
                 + list(state.get("clip_assets") or [])
                 + [state.get("episode")]
+                + [state.get("post_copy")]
             )
             if a
         ]
