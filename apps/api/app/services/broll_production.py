@@ -36,6 +36,9 @@ DEFAULT_DAILY_TARGET = 100
 MAX_DAILY_TARGET = 150
 DRAFT_BATCH_SIZE = 12
 GENERATION_CONCURRENCY = 3
+# Abort the day after this many consecutive render/deposit failures — a
+# systemic outage must not burn the whole batch one paid failure at a time.
+CIRCUIT_BREAKER_FAILURES = 8
 # Escalate when more than this fraction of the day's clips failed.
 FAILURE_ESCALATION_RATIO = 0.5
 
@@ -57,7 +60,11 @@ def is_due(last_run_at: str | None, *, now: datetime | None = None) -> bool:
     return last.date() < now.date()
 
 
-def _load_broll_config(supabase: Any, org_id: str) -> dict:
+def _load_broll_config(supabase: Any, org_id: str) -> dict | None:
+    """The org's b-roll config, or None when it CANNOT be read (query
+    failure / inactive agent). None is deliberately distinct from {} — a
+    transient DB error must abort the run, not silently fall back to
+    defaults and render 100 clips with the wrong direction and volume."""
     try:
         resp = (
             supabase.table("agents")
@@ -68,11 +75,105 @@ def _load_broll_config(supabase: Any, org_id: str) -> dict:
             .execute()
         )
         if not resp.data or not resp.data[0].get("active"):
-            return {}
+            return None
         config = resp.data[0].get("config")
         return config if isinstance(config, dict) else {}
     except Exception:
-        return {}
+        return None
+
+
+def _dropbox_ready(supabase: Any, org_id: str) -> bool:
+    """Preflight: rendering costs real money, and deposit_clip_to_dropbox is
+    best-effort (returns None, never raises) — without this check an org
+    with production enabled but no Dropbox connection would burn a full
+    day of renders into the void, every day."""
+    import os
+
+    if not (os.environ.get("DROPBOX_CLIENT_ID") and os.environ.get("DROPBOX_CLIENT_SECRET")):
+        return False
+    try:
+        resp = (
+            supabase.table("integrations")
+            .select("status")
+            .eq("org_id", org_id)
+            .eq("provider", "dropbox")
+            .limit(1)
+            .execute()
+        )
+        return bool(resp.data and resp.data[0].get("status") == "active")
+    except Exception:
+        return False
+
+
+def _claim_day(supabase: Any, org_id: str, *, now: datetime | None = None) -> bool:
+    """Atomically claim today's run — safe across PROCESSES, not just tasks.
+
+    Two API replicas (deploy overlap, scaled instances, staging+prod on one
+    DB) can sweep concurrently; a read-then-upsert would let both claim and
+    double-render ~100 paid clips. So the claim is a compare-and-swap:
+
+      1. Conditional UPDATE where last_run_at < start-of-today — only ONE
+         racer's update matches the stale row (PostgREST returns the
+         updated rows; empty data = lost the race or already claimed).
+      2. If no row matched and none exists, INSERT — the unique index on
+         (org_id, kind) makes the second racer's insert fail.
+    """
+    now = now or datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    today_start = f"{now.date().isoformat()}T00:00:00+00:00"
+
+    try:
+        resp = (
+            supabase.table("scheduled_jobs")
+            .update({"last_run_at": now_iso, "last_status": "running", "updated_at": now_iso})
+            .eq("org_id", org_id)
+            .eq("kind", JOB_KIND)
+            .lt("last_run_at", today_start)
+            .execute()
+        )
+        if resp.data:
+            return True
+    except Exception:
+        log.exception("broll claim update failed for org=%s", org_id)
+        return False
+
+    # No stale row updated: either already claimed today, or no row yet.
+    try:
+        existing = (
+            supabase.table("scheduled_jobs")
+            .select("id")
+            .eq("org_id", org_id)
+            .eq("kind", JOB_KIND)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
+            return False  # row exists and wasn't stale → claimed today
+        supabase.table("scheduled_jobs").insert({
+            "org_id": org_id,
+            "kind": JOB_KIND,
+            "enabled": True,
+            "interval_seconds": 86400,
+            "last_run_at": now_iso,
+            "last_status": "running",
+        }).execute()
+        return True
+    except Exception:
+        # Insert lost the unique-index race, or the DB blipped — either way
+        # this process must not render.
+        log.warning("broll claim insert lost/failed for org=%s", org_id)
+        return False
+
+
+def _mark_run_result(supabase: Any, org_id: str, status: str, detail: str = "") -> None:
+    try:
+        supabase.table("scheduled_jobs").update({
+            "last_status": status,
+            "last_error": detail[:500] or None,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("org_id", org_id).eq("kind", JOB_KIND).execute()
+    except Exception:
+        log.warning("broll run-result write failed for org=%s", org_id)
 
 
 async def broll_daily_sweep(supabase: Any) -> None:
@@ -104,44 +205,58 @@ async def broll_daily_sweep(supabase: Any) -> None:
         if org_id in _inflight:
             continue
 
+        # Spend gates BEFORE claiming: no weekly direction means nothing to
+        # draft against (and the old hardcoded fallback was one tenant's
+        # politics baked into a multi-tenant service); no Dropbox means the
+        # renders would be paid for and then discarded.
+        if not (config.get("weekly_direction") or "").strip():
+            log.info("broll sweep: org=%s has no weekly_direction — skipping", org_id)
+            continue
+        if not _dropbox_ready(supabase, org_id):
+            log.info("broll sweep: org=%s has no active Dropbox — skipping", org_id)
+            continue
+
         try:
             job = (
                 supabase.table("scheduled_jobs")
-                .select("last_run_at")
+                .select("last_run_at, enabled, last_status")
                 .eq("org_id", org_id)
                 .eq("kind", JOB_KIND)
                 .limit(1)
                 .execute()
             )
-            last_run_at = job.data[0].get("last_run_at") if job.data else None
+            job_row = job.data[0] if job.data else None
         except Exception:
             log.exception("broll sweep: job lookup failed for org=%s", org_id)
             continue
-        if not is_due(last_run_at):
+
+        if job_row is not None and job_row.get("enabled") is False:
+            continue  # the migration-017 pause switch — respect it
+
+        last_run_at = job_row.get("last_run_at") if job_row else None
+        if job_row is not None and not is_due(last_run_at):
+            # Claimed today. If the claim says "running" but is hours old,
+            # the process died mid-run — surface it once (the documented
+            # escalate-don't-retry recovery path must cover crashes too).
+            if job_row.get("last_status") == "running" and _claim_is_stale(last_run_at):
+                _mark_run_result(supabase, org_id, "died", "process died mid-run")
+                from packages.agents.content.alerts import escalate
+
+                await escalate(
+                    org_id,
+                    "B-roll daily production died mid-run (process restart?) — "
+                    "today's batch is incomplete; rerun from chat if needed",
+                    supabase=supabase,
+                )
             continue
 
-        # Claim the day BEFORE the (long) run so the next sweep doesn't
-        # double-fire; a failed run escalates rather than silently retrying
-        # all day (rendering costs real money).
-        now_iso = datetime.now(timezone.utc).isoformat()
-        try:
-            supabase.table("scheduled_jobs").upsert(
-                {
-                    "org_id": org_id,
-                    "kind": JOB_KIND,
-                    "enabled": True,
-                    "interval_seconds": 86400,
-                    "last_run_at": now_iso,
-                    "updated_at": now_iso,
-                },
-                on_conflict="org_id,kind",
-            ).execute()
-        except Exception:
-            log.exception("broll sweep: claim failed for org=%s", org_id)
+        # Atomic claim BEFORE the (long) run — see _claim_day for why this
+        # must be a CAS and not an upsert.
+        if not _claim_day(supabase, org_id):
             continue
 
         _inflight.add(org_id)
-        task = asyncio.create_task(_run_wrapper(supabase, org_id))
+        task = asyncio.create_task(_run_wrapper(supabase, org_id, config))
         _tasks.add(task)
 
         def _done(t: asyncio.Task, org_id: str = org_id) -> None:
@@ -151,12 +266,31 @@ async def broll_daily_sweep(supabase: Any) -> None:
         task.add_done_callback(_done)
 
 
-async def _run_wrapper(supabase: Any, org_id: str) -> None:
+STALE_RUN_HOURS = 3
+
+
+def _claim_is_stale(last_run_at: str | None) -> bool:
+    from datetime import timedelta
+
+    if not last_run_at:
+        return False
     try:
-        summary = await run_daily_production(supabase, org_id)
+        started = datetime.fromisoformat(str(last_run_at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - started > timedelta(hours=STALE_RUN_HOURS)
+
+
+async def _run_wrapper(supabase: Any, org_id: str, config: dict) -> None:
+    try:
+        summary = await run_daily_production(supabase, org_id, config)
         log.info("broll daily production org=%s: %s", org_id, summary)
-    except Exception:
+        _mark_run_result(supabase, org_id, "ok", summary)
+    except Exception as e:
         log.exception("broll daily production crashed for org=%s", org_id)
+        _mark_run_result(supabase, org_id, "failed", repr(e))
         try:
             from packages.agents.content.alerts import escalate
 
@@ -189,16 +323,23 @@ async def _draft_all(
     specs: list[dict] = []
     while len(specs) < target:
         want = min(DRAFT_BATCH_SIZE, target - len(specs))
-        plan: BRollPlan = await structured.ainvoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=(
-                f"This week's direction: {direction}{insight_block}\n\n"
-                f"Write exactly {want} clips. Default aspect ratio "
-                f"{default_aspect}. Today is batch part "
-                f"{len(specs) // DRAFT_BATCH_SIZE + 1}; avoid repeating "
-                f"beats you'd expect in earlier parts — push variety."
-            )),
-        ])
+        try:
+            plan: BRollPlan = await structured.ainvoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=(
+                    f"This week's direction: {direction}{insight_block}\n\n"
+                    f"Write exactly {want} clips. Default aspect ratio "
+                    f"{default_aspect}. Today is batch part "
+                    f"{len(specs) // DRAFT_BATCH_SIZE + 1}; avoid repeating "
+                    f"beats you'd expect in earlier parts — push variety."
+                )),
+            ])
+        except Exception as e:
+            # One transient LLM failure must not silently kill the whole
+            # day — keep whatever was already drafted; the caller reports
+            # the shortfall.
+            log.warning("broll draft batch failed for org=%s: %r", org_id, e)
+            break
         batch = [c.model_dump() for c in (plan.clips or [])]
         if not batch:
             break
@@ -217,10 +358,18 @@ async def _render_and_deposit(
     sem = asyncio.Semaphore(GENERATION_CONCURRENCY)
     deposited = 0
     failures = 0
+    consecutive_failures = 0
+    aborted = False
 
     async def _produce(i: int, spec: dict) -> None:
-        nonlocal deposited, failures
+        nonlocal deposited, failures, consecutive_failures, aborted
         async with sem:
+            # Circuit breaker: a systemic outage (Higgsfield down, Dropbox
+            # token revoked) must not burn the remaining ~90 paid renders
+            # one failure at a time.
+            if aborted:
+                failures += 1
+                return
             try:
                 clip = await higgsfield.generate_clip(
                     spec.get("prompt", ""),
@@ -239,18 +388,32 @@ async def _render_and_deposit(
                 )
                 if path:
                     deposited += 1
+                    consecutive_failures = 0
                 else:
                     failures += 1
+                    consecutive_failures += 1
             except Exception as e:
                 failures += 1
+                consecutive_failures += 1
                 log.warning("broll clip %d failed for org=%s: %r", i, org_id, e)
+            if consecutive_failures >= CIRCUIT_BREAKER_FAILURES:
+                aborted = True
 
     await asyncio.gather(*(_produce(i, s) for i, s in enumerate(specs)))
+    if aborted:
+        log.warning(
+            "broll production aborted early for org=%s after %d consecutive failures",
+            org_id, CIRCUIT_BREAKER_FAILURES,
+        )
     return deposited, failures
 
 
-async def run_daily_production(supabase: Any, org_id: str) -> str:
-    """Draft → render → deposit one day's b-roll batch for one org."""
+async def run_daily_production(supabase: Any, org_id: str, config: dict) -> str:
+    """Draft → render → deposit one day's b-roll batch for one org.
+
+    `config` comes from the SWEEP's read (the same one that decided this
+    org was eligible) — no second read here, so a transient DB blip between
+    sweep and run can't swap the org's direction/target for defaults."""
     from packages.agents.broll.tools import fetch_recent_image_insights
     from packages.agents.core.tasks import create_task_from_agent
     from packages.integrations.context import (
@@ -263,11 +426,13 @@ async def run_daily_production(supabase: Any, org_id: str) -> str:
     user_tok = current_user_id.set(None)
     sb_tok = current_supabase.set(supabase)
     try:
-        config = _load_broll_config(supabase, org_id)
-        direction = (config.get("weekly_direction") or "").strip() or (
-            "Pro-America angles, sarcasm, and humor — varied interrupt-style "
-            "beats: slapstick, sports misses, funny interruptions, dramatic stings."
-        )
+        # The sweep guarantees a direction exists; re-check defensively.
+        # There is deliberately NO fallback direction — a generic default
+        # would render 100 clips of content nobody asked for.
+        direction = (config.get("weekly_direction") or "").strip()
+        if not direction:
+            return "no weekly_direction configured — nothing rendered"
+
         try:
             target = int(config.get("daily_clip_target") or DEFAULT_DAILY_TARGET)
         except (TypeError, ValueError):
@@ -276,8 +441,12 @@ async def run_daily_production(supabase: Any, org_id: str) -> str:
         default_aspect = str(config.get("default_aspect_ratio") or "16:9")
 
         # Cross-agent handoff: the Image Reader's recent filed analyses feed
-        # the drafting prompt as inspiration.
-        insights = await fetch_recent_image_insights(org_id)
+        # the drafting prompt as inspiration. Optional — never fatal.
+        try:
+            insights = await fetch_recent_image_insights(org_id)
+        except Exception as e:
+            log.warning("broll insight feed failed for org=%s: %r", org_id, e)
+            insights = []
         insight_block = (
             "\n\nRecent visual research from the Image Reader (use as inspiration "
             "where it fits):\n" + "\n".join(f"- {i}" for i in insights)
@@ -289,6 +458,17 @@ async def run_daily_production(supabase: Any, org_id: str) -> str:
             target=target, default_aspect=default_aspect,
         )
         if not specs:
+            # Zero drafted specs is a broken day, not a quiet no-op — the
+            # owner expects ~target clips waiting in Dropbox.
+            from packages.agents.content.alerts import escalate
+
+            await escalate(
+                org_id,
+                "B-roll daily production drafted zero clips (LLM failure or "
+                "refused direction) — no batch today; check the weekly "
+                "direction or rerun from chat",
+                supabase=supabase,
+            )
             return "drafting produced no clip specs — nothing rendered"
 
         deposited, failures = await _render_and_deposit(

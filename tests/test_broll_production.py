@@ -39,8 +39,11 @@ class TestIsDue:
 
 # ── Sweep gating ───────────────────────────────────────────────────────────
 class TestSweep:
-    def _agents_row(self, org, enabled=True):
-        return {"org_id": org, "config": {"daily_production_enabled": enabled}}
+    def _agents_row(self, org, enabled=True, direction="pro-America, sarcasm"):
+        return {"org_id": org, "config": {
+            "daily_production_enabled": enabled,
+            "weekly_direction": direction,
+        }}
 
     @pytest.mark.asyncio
     async def test_skips_entirely_without_higgsfield(self, mock_supabase_factory, monkeypatch):
@@ -57,13 +60,14 @@ class TestSweep:
         import packages.integrations.higgsfield as hf
 
         monkeypatch.setattr(hf, "is_configured", lambda: True)
+        monkeypatch.setattr(bp, "_dropbox_ready", lambda sb, org: True)
         sb = mock_supabase_factory({
             "agents": [self._agents_row("org-1")],
             "scheduled_jobs": [],  # never ran → due
         })
         ran = []
 
-        async def fake_run(supabase, org_id):
+        async def fake_run(supabase, org_id, config):
             ran.append(org_id)
 
         monkeypatch.setattr(bp, "_run_wrapper", fake_run)
@@ -71,9 +75,38 @@ class TestSweep:
         await asyncio.sleep(0)  # let the spawned task tick
 
         assert ran == ["org-1"]
-        claims = [p for t, p in sb._canned.get("_upserts", []) if t == "scheduled_jobs"]
+        # Atomic claim: no stale row existed → the claim lands as an INSERT
+        # with the day started and status=running.
+        claims = [p for t, p in sb._canned.get("_inserts", []) if t == "scheduled_jobs"]
         assert claims and claims[0]["kind"] == bp.JOB_KIND
-        assert claims[0]["last_run_at"]  # day claimed BEFORE the run
+        assert claims[0]["last_run_at"] and claims[0]["last_status"] == "running"
+
+    @pytest.mark.asyncio
+    async def test_sweep_skips_without_direction_or_dropbox(self, mock_supabase_factory, monkeypatch):
+        """Spend gates: no weekly_direction, or no Dropbox, must skip BEFORE
+        any claim — rendering into the void costs real money."""
+        import packages.integrations.higgsfield as hf
+
+        monkeypatch.setattr(hf, "is_configured", lambda: True)
+        ran = []
+
+        async def fake_run(supabase, org_id, config):
+            ran.append(org_id)
+
+        monkeypatch.setattr(bp, "_run_wrapper", fake_run)
+
+        # No direction (dropbox fine)
+        monkeypatch.setattr(bp, "_dropbox_ready", lambda sb, org: True)
+        sb = mock_supabase_factory({"agents": [self._agents_row("org-1", direction="")]})
+        await bp.broll_daily_sweep(sb)
+        # Direction fine, no dropbox
+        monkeypatch.setattr(bp, "_dropbox_ready", lambda sb, org: False)
+        sb2 = mock_supabase_factory({"agents": [self._agents_row("org-2")]})
+        await bp.broll_daily_sweep(sb2)
+        await asyncio.sleep(0)
+
+        assert ran == []
+        assert "_inserts" not in sb._canned and "_inserts" not in sb2._canned
 
     @pytest.mark.asyncio
     async def test_opted_out_and_already_ran_orgs_skipped(self, mock_supabase_factory, monkeypatch):
@@ -118,11 +151,10 @@ class TestSweep:
 
 # ── run_daily_production orchestration ─────────────────────────────────────
 class TestRunDailyProduction:
-    def _sb(self, mock_supabase_factory, config=None):
-        return mock_supabase_factory({
-            "agents": [{"org_id": "o", "active": True,
-                        "config": config or {"daily_clip_target": 5}}],
-        })
+    DEFAULT_CONFIG = {"daily_clip_target": 5, "weekly_direction": "debate fallout, keep it light"}
+
+    def _sb(self, mock_supabase_factory):
+        return mock_supabase_factory({})
 
     @pytest.fixture
     def seams(self, monkeypatch):
@@ -161,10 +193,8 @@ class TestRunDailyProduction:
 
     @pytest.mark.asyncio
     async def test_happy_path_files_summary_task(self, mock_supabase_factory, seams):
-        sb = self._sb(mock_supabase_factory,
-                      config={"daily_clip_target": 5,
-                              "weekly_direction": "debate fallout, keep it light"})
-        summary = await bp.run_daily_production(sb, "o")
+        sb = self._sb(mock_supabase_factory)
+        summary = await bp.run_daily_production(sb, "o", dict(self.DEFAULT_CONFIG))
         assert "5/5 clips deposited" in summary
         assert seams["draft"][0]["target"] == 5
         assert "debate fallout" in seams["draft"][0]["direction"]
@@ -173,8 +203,8 @@ class TestRunDailyProduction:
 
     @pytest.mark.asyncio
     async def test_target_clamped_to_max(self, mock_supabase_factory, seams):
-        sb = self._sb(mock_supabase_factory, config={"daily_clip_target": 5000})
-        await bp.run_daily_production(sb, "o")
+        sb = self._sb(mock_supabase_factory)
+        await bp.run_daily_production(sb, "o", {"daily_clip_target": 5000, "weekly_direction": "d"})
         assert seams["draft"][0]["target"] == bp.MAX_DAILY_TARGET
 
     @pytest.mark.asyncio
@@ -184,7 +214,7 @@ class TestRunDailyProduction:
 
         monkeypatch.setattr(bp, "_render_and_deposit", bad_render)
         sb = self._sb(mock_supabase_factory)
-        summary = await bp.run_daily_production(sb, "o")
+        summary = await bp.run_daily_production(sb, "o", dict(self.DEFAULT_CONFIG))
         assert "failed" in summary
         assert seams["alerts"] and "mostly failed" in seams["alerts"][0]
 

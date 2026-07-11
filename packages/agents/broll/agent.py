@@ -437,10 +437,14 @@ class BRollAgent(BaseAgent):
                 config = (resp.data[0].get("config") if resp.data else None) or {}
                 config["weekly_direction"] = direction[:2000]
                 config["direction_updated_at"] = datetime.now(timezone.utc).isoformat()
-                supabase.table("agents").update({"config": config}).eq(
+                resp = supabase.table("agents").update({"config": config}).eq(
                     "org_id", org_id
                 ).eq("slug", self.slug).execute()
-                saved = True
+                # A zero-row update (agent row missing) must not report
+                # success. Note: this is a whole-column write, so it can
+                # race a concurrent PATCH /agents/broll/config — last
+                # writer wins; acceptable for a weekly, human-paced value.
+                saved = bool(resp.data)
             except Exception as e:
                 print(f"[broll] weekly_direction save failed: {e!r}", flush=True)
 
