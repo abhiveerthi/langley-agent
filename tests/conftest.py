@@ -71,6 +71,7 @@ class _MockQuery:
     def eq(self, *_a, **_k): return self
     def in_(self, *_a, **_k): return self
     def lt(self, *_a, **_k): return self
+    def gte(self, *_a, **_k): return self
     def order(self, *_a, **_k): return self
     def limit(self, *_a, **_k): return self
     def insert(self, payload):

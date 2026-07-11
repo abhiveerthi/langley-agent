@@ -306,3 +306,57 @@ async def lookup_user_email(access_token: str, user_id: str) -> str | None:
     body = await _slack_get(access_token, "users.info", {"user": user_id})
     profile = (body.get("user") or {}).get("profile") or {}
     return profile.get("email") or None
+
+
+# ── Files (Agent #6: screenshots + voice notes in Slack) ───────────────────
+
+# Hosts Slack actually serves files from. The bot token rides in the
+# Authorization header on these downloads — sending it anywhere else is
+# credential exfiltration, so the host is allowlisted, not trusted.
+_SLACK_FILE_HOSTS = (".slack.com", ".slack-edge.com", ".slack-files.com")
+
+
+def _is_slack_file_host(url: str) -> bool:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url or "")
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    return any(host == h.lstrip(".") or host.endswith(h) for h in _SLACK_FILE_HOSTS)
+
+
+async def download_file(access_token: str, url: str, *, max_bytes: int) -> bytes:
+    """Download a Slack-hosted file (url_private_download) with the bot
+    token. Streamed with a byte cap — Slack file sizes are user-controlled
+    and these bytes land in memory for vision/transcription.
+
+    Refuses non-Slack hosts: the URL rides in on an event payload, and the
+    bearer token must never be sent to a host we don't recognize."""
+    import httpx
+
+    if not _is_slack_file_host(url):
+        raise RuntimeError(f"refusing non-Slack file host: {url!r}")
+
+    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+        async with client.stream(
+            "GET", url, headers={"Authorization": f"Bearer {access_token}"}
+        ) as resp:
+            if resp.status_code >= 400:
+                raise RuntimeError(f"Slack file download failed: {resp.status_code}")
+            chunks, total = [], 0
+            async for chunk in resp.aiter_bytes():
+                total += len(chunk)
+                if total > max_bytes:
+                    raise RuntimeError(
+                        f"Slack file exceeds {max_bytes // (1024 * 1024)}MB cap"
+                    )
+                chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def get_file_info(access_token: str, file_id: str) -> dict:
+    """files.info — used to fetch a voice clip's Slack-native transcription
+    when the event payload didn't carry it (it appears asynchronously)."""
+    body = await _slack_get(access_token, "files.info", {"file": file_id})
+    return body.get("file") or {}

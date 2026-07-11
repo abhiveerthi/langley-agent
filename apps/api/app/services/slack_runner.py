@@ -45,6 +45,145 @@ LINK_ACCOUNT_FALLBACK = (
     "the same email you use on Slack and try again."
 )
 
+# ── Attachment handling (Agent #6: screenshots + voice, natively in Slack) ──
+# Claude's vision API rejects images over ~5MB; voice notes are short but
+# users can share arbitrary audio files.
+MAX_IMAGES_PER_MESSAGE = 4
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_AUDIO_BYTES = 25 * 1024 * 1024
+
+# Anthropic's vision API accepts exactly these; Slack will happily deliver
+# HEIC (default iPhone shares), TIFF, BMP, SVG — attaching those would fail
+# the whole model call, so they're skipped with a note instead.
+SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+
+# Global cap on concurrent Slack file downloads across all in-flight events
+# — each can hold up to ~25MB in memory, and event dispatch is unbounded.
+import asyncio as _asyncio
+
+_download_sem = _asyncio.Semaphore(4)
+
+
+async def _bounded_download(bot_token: str, url: str, *, max_bytes: int) -> bytes:
+    async with _download_sem:
+        return await slack_client.download_file(bot_token, url, max_bytes=max_bytes)
+
+
+def _split_files(files: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(images, audios) from a Slack files[] payload, by mimetype. Slack
+    voice clips carry subtype slack_audio; regular uploads audio/*."""
+    images = [
+        f for f in (files or [])
+        if (f.get("mimetype") or "").startswith("image/")
+    ]
+    audios = [
+        f for f in (files or [])
+        if (f.get("mimetype") or "").startswith("audio/")
+        or f.get("subtype") == "slack_audio"
+    ]
+    return images, audios
+
+
+async def _transcribe_slack_audio(bot_token: str, file: dict) -> tuple[str | None, str]:
+    """Voice note → text, accuracy-first. Returns (transcript|None, note).
+
+    Order of preference:
+      1. Our transcription seam (core/transcription.py — full-fidelity
+         whisper, local or hosted) over the downloaded bytes. Accuracy is a
+         hard requirement ("must be extremely accurate"), and Slack's
+         built-in transcript is a truncated preview.
+      2. Slack's native transcription as fallback when no whisper backend
+         is configured — from the event payload, or files.info if it
+         hadn't been attached yet (Slack fills it in asynchronously).
+    """
+    from packages.agents.core.transcription import (
+        TranscriptionUnavailable,
+        transcribe_audio,
+    )
+
+    note = ""
+    try:
+        url = file.get("url_private_download") or file.get("url_private")
+        if url:
+            audio_bytes = await _bounded_download(
+                bot_token, url, max_bytes=MAX_AUDIO_BYTES
+            )
+            transcript = await transcribe_audio(
+                audio_bytes, content_type=file.get("mimetype")
+            )
+            if transcript:
+                return transcript, "whisper"
+            note = "transcription produced no text"
+        else:
+            note = "file had no download URL"
+    except TranscriptionUnavailable as e:
+        note = str(e)
+    except Exception as e:
+        note = f"transcription failed: {e!r}"
+
+    # Fallback: Slack's own (preview) transcript.
+    transcription = file.get("transcription") or {}
+    if transcription.get("status") != "complete" and file.get("id"):
+        try:
+            info = await slack_client.get_file_info(bot_token, file["id"])
+            transcription = info.get("transcription") or {}
+        except Exception:
+            pass
+    preview = ((transcription.get("preview") or {}).get("content") or "").strip()
+    if preview:
+        return preview, "slack-native preview"
+    return None, note or "no transcript available"
+
+
+async def _image_content_blocks(
+    bot_token: str, images: list[dict], text: str
+) -> tuple[list[dict], list[str]]:
+    """Download Slack images and build the Anthropic content-block message
+    the Image Reader's vision path expects. Returns (blocks, skipped_notes);
+    blocks is empty when no image survived the caps."""
+    import base64
+
+    blocks: list[dict] = [{
+        "type": "text",
+        "text": text or "Read and analyze the attached screenshot(s).",
+    }]
+    skipped: list[str] = []
+    attached = 0
+    for f in images:
+        if attached >= MAX_IMAGES_PER_MESSAGE:
+            skipped.append(f"{f.get('name') or 'image'}: over the {MAX_IMAGES_PER_MESSAGE}-image limit")
+            continue
+        mimetype = (f.get("mimetype") or "").lower()
+        if mimetype not in SUPPORTED_IMAGE_TYPES:
+            skipped.append(
+                f"{f.get('name') or 'image'}: {mimetype or 'unknown type'} isn't "
+                f"readable — send PNG/JPEG/WebP (or screenshot it)"
+            )
+            continue
+        url = f.get("url_private_download") or f.get("url_private")
+        if not url:
+            skipped.append(f"{f.get('name') or 'image'}: no download URL")
+            continue
+        try:
+            img_bytes = await _bounded_download(
+                bot_token, url, max_bytes=MAX_IMAGE_BYTES
+            )
+        except Exception as e:
+            skipped.append(f"{f.get('name') or 'image'}: {e}")
+            continue
+        blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": f.get("mimetype") or "image/png",
+                "data": base64.b64encode(img_bytes).decode(),
+            },
+        })
+        attached += 1
+    if attached == 0:
+        return [], skipped
+    return blocks, skipped
+
 
 async def handle_message(
     *,
@@ -55,12 +194,19 @@ async def handle_message(
     slack_thread_ts: str | None,
     slack_message_ts: str,
     text: str,
+    files: list[dict] | None = None,
 ) -> None:
     """Run the agent for one inbound Slack message and post a reply.
 
     Caller (the events webhook) is expected to dispatch this in a
     background task — the orchestrator can take 30+ seconds and Slack
     times the webhook out at 3.
+
+    Attachments (Agent #6, everything natively in Slack):
+      - a VOICE NOTE is transcribed and then handled exactly as if the
+        transcript had been typed — same channel agent, same flow;
+      - IMAGES route the run to the Image Reader (the only agent with the
+        vision/report lane) with the pixels as Anthropic content blocks.
     """
     chan = _lookup_channel_mapping(supabase, slack_channel_id)
     if chan is None:
@@ -75,6 +221,79 @@ async def handle_message(
         return
     bot_token = install["access_token"]
     persona = persona_for(agent_slug, install.get("scopes") or [])
+
+    images, audios = _split_files(files or [])
+    voice_prefix = ""
+
+    if audios:
+        transcript, note = await _transcribe_slack_audio(bot_token, audios[0])
+        if transcript:
+            # "Proceed as if he had typed it manually."
+            text = f"{text}\n\n{transcript}".strip() if text.strip() else transcript
+            voice_prefix = "🎙️ "
+        else:
+            # NEVER silently drop voice input — even when a caption or
+            # screenshot rides along, the voice note usually carried the
+            # actual ask ("context in the voice note: ...").
+            await slack_client.post_message_in_thread(
+                bot_token,
+                slack_channel_id,
+                f"I couldn't transcribe that voice note ({note}). "
+                f"Try again, or type it out.",
+                thread_ts=slack_thread_ts or slack_message_ts,
+                **persona,
+            )
+            if not images and not text.strip():
+                return  # voice was the whole message — nothing left to run
+        if len(audios) > 1:
+            await slack_client.post_message_in_thread(
+                bot_token,
+                slack_channel_id,
+                f"Heads up: I only transcribe the first voice note per "
+                f"message — {len(audios) - 1} other audio file(s) ignored.",
+                thread_ts=slack_thread_ts or slack_message_ts,
+                **persona,
+            )
+
+    extra_state: dict | None = None
+    if images:
+        blocks, skipped = await _image_content_blocks(bot_token, images, text)
+        if blocks:
+            from langchain_core.messages import HumanMessage
+
+            # Vision lives in the Image Reader — override the channel's
+            # mapped agent for this one message (it's the suite's designated
+            # reader/delegator for visual input).
+            agent_slug = "image-reader"
+            persona = persona_for(agent_slug, install.get("scopes") or [])
+            extra_state = {"messages": [HumanMessage(content=blocks)]}
+            if not text.strip():
+                text = "Read and analyze the attached screenshot(s)."
+        if skipped:
+            await slack_client.post_message_in_thread(
+                bot_token,
+                slack_channel_id,
+                "Note: I skipped " + "; ".join(skipped),
+                thread_ts=slack_thread_ts or slack_message_ts,
+                **persona,
+            )
+
+    # Nothing runnable — file_share admits any file type, so a PDF/video
+    # with no caption (or images that all failed the caps) can land here
+    # with empty text and no attachments. Running would send Anthropic an
+    # empty HumanMessage (a 400) and persist a blank user turn. Say what
+    # happened instead.
+    if not text.strip() and extra_state is None:
+        await slack_client.post_message_in_thread(
+            bot_token,
+            slack_channel_id,
+            "I can read images (PNG/JPEG/WebP screenshots) and voice notes — "
+            "I couldn't process that upload. Add a caption telling me what "
+            "you need, or send it as a screenshot.",
+            thread_ts=slack_thread_ts or slack_message_ts,
+            **persona,
+        )
+        return
 
     ident = await resolve_marcus_user(
         supabase=supabase,
@@ -116,12 +335,14 @@ async def handle_message(
         supabase,
         thread_id=marcus_thread_id,
         role="user",
-        content=text,
+        content=f"{voice_prefix}{text}",
         metadata={
             "source": "slack",
             "slack_user_id": slack_user_id,
             "slack_message_ts": slack_message_ts,
             "slack_channel_id": slack_channel_id,
+            "had_images": bool(extra_state),
+            "was_voice": bool(voice_prefix),
         },
     )
 
@@ -132,6 +353,7 @@ async def handle_message(
             thread_id=marcus_thread_id,
             org_id=org_id,
             user_id=ident["user_id"],
+            extra_state=extra_state,
         ),
         org_id=org_id,
         user_id=ident["user_id"],
@@ -399,17 +621,27 @@ def _resolve_marcus_thread(
     slack_channel_id: str,
     slack_thread_root_ts: str,
 ) -> str:
-    """Find or create the Marcus thread for this Slack thread.
+    """Find or create the Marcus thread for this Slack thread + agent.
 
-    First time we see a given (channel, root_ts) we mint a fresh Marcus
-    thread UUID and persist the mapping; reply messages on the same Slack
-    thread reuse it.
+    First time we see a given (channel, root_ts, agent) we mint a fresh
+    Marcus thread UUID and persist the mapping; reply messages on the same
+    Slack thread reuse it.
+
+    agent_slug is PART OF THE KEY: a Marcus thread id is also the LangGraph
+    checkpointer key, and every agent has a different graph — running two
+    graphs over one checkpoint lineage corrupts state (an image posted into
+    a Publisher thread would otherwise hand the Publisher's paused approval
+    checkpoint to the Image Reader's graph, and later Publisher turns would
+    inherit megabytes of base64 image blocks into every LLM call). One
+    Slack thread can therefore map to two Marcus threads — one per graph
+    that participated — which is the safe shape.
     """
     existing = (
         supabase.table("slack_channels")
         .select("marcus_thread_id")
         .eq("slack_channel_id", slack_channel_id)
         .eq("slack_thread_root_ts", slack_thread_root_ts)
+        .eq("agent_slug", agent_slug)
         .limit(1)
         .execute()
     )

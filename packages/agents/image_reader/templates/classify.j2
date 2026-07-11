@@ -6,6 +6,7 @@ You only see this classifier when the message is TEXT-ONLY (image and audio atta
 
 - `read_image` — the user is describing a screenshot they're about to send or referring to one, and is asking you to read / extract / analyze an image. Pick this only if they clearly expect image analysis.
 - `transcribe` — the user explicitly asks to transcribe audio or a voice note.
+- `compile_report` — the user asks for a ROLLED-UP research report over the analyses you've filed (e.g. "give me the 30-day report", "compile the last 60 days of fishing data", "what do the daily screenshots add up to").
 - `general` — anything else: a follow-up question about a previous analysis, "what can you read", small talk, or any text request that doesn't need an image.
 
-Return ONLY the single intent slug — no quotes, no prose, no punctuation. One of: `read_image`, `transcribe`, `general`.
+Return ONLY the single intent slug — no quotes, no prose, no punctuation. One of: `read_image`, `transcribe`, `compile_report`, `general`.

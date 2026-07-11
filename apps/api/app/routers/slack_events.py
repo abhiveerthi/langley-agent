@@ -72,12 +72,19 @@ def _is_user_message(event: dict) -> bool:
       - bot-authored messages (avoid feedback loops)
       - subtypes like message_changed / channel_join / message_deleted
         which deliver via the same `message` event but aren't human input
+
+    EXCEPTION: `file_share` IS human input — screenshots and voice notes
+    arrive as message events with that subtype (and often no text at all).
+    Agent #6's whole Slack surface lives on this branch.
     """
     if event.get("type") != "message":
         return False
     if event.get("bot_id"):
         return False
-    if event.get("subtype"):
+    subtype = event.get("subtype")
+    if subtype == "file_share":
+        return bool(event.get("user") and event.get("files"))
+    if subtype:
         return False
     if not event.get("user") or not event.get("text"):
         return False
@@ -107,7 +114,8 @@ async def _dispatch(body: dict, event: dict) -> None:
             slack_user_id=event["user"],
             slack_thread_ts=event.get("thread_ts"),
             slack_message_ts=event["ts"],
-            text=event["text"],
+            text=event.get("text") or "",
+            files=event.get("files") or [],
         )
     except Exception:
         log.exception("slack_events: dispatch failed")

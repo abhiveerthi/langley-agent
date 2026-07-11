@@ -50,9 +50,10 @@ class TestAgentInterface:
         # Reading and transcribing are read-only — no HITL.
         assert ImageReaderAgent().interrupt_before_nodes == []
 
-    def test_no_llm_tools(self):
-        # Vision is native; transcription is a node. No LLM-callable tools.
-        assert get_image_reader_tools() == []
+    def test_tools_roster(self):
+        # Vision is native and transcription is a node; the one LLM tool is
+        # the middle-man delegation to other agents.
+        assert {t.name for t in get_image_reader_tools()} == {"delegate_task"}
 
 
 # ── Manifest truth ─────────────────────────────────────────────────────────
