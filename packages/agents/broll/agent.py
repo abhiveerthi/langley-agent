@@ -138,6 +138,7 @@ class BRollAgent(BaseAgent):
         graph.add_node("persist_script", self._persist_script_node)
         graph.add_node("generate_clips", self._generate_clips_node)
         graph.add_node("organize_dropbox", self._organize_dropbox_node)
+        graph.add_node("set_direction", self._set_direction_node)
         graph.add_node("general_answer", self._general_answer_node)
         graph.add_node("respond", self._respond_node)
 
@@ -151,9 +152,11 @@ class BRollAgent(BaseAgent):
             {
                 "draft_broll": "draft_scripts",
                 "generate_broll": "generate_clips",
+                "set_direction": "set_direction",
                 "general": "general_answer",
             },
         )
+        graph.add_edge("set_direction", "respond")
 
         # Drafting path: write the plan, file it, reply.
         graph.add_edge("draft_scripts", "persist_script")
@@ -202,7 +205,7 @@ class BRollAgent(BaseAgent):
     # ── Routers ────────────────────────────────────────────────────────────
     def _route_by_intent(self, state: BRollState) -> str:
         intent = (state.get("intent") or "general").lower()
-        if intent not in {"draft_broll", "generate_broll", "general"}:
+        if intent not in {"draft_broll", "generate_broll", "set_direction", "general"}:
             return "general"
         return intent
 
@@ -226,7 +229,7 @@ class BRollAgent(BaseAgent):
             HumanMessage(content=self._last_user_text(state)),
         ])
         raw = response.content.strip().strip("`").lower()
-        intent = raw if raw in {"draft_broll", "generate_broll", "general"} else "general"
+        intent = raw if raw in {"draft_broll", "generate_broll", "set_direction", "general"} else "general"
         return {"intent": intent}
 
     async def _draft_scripts_node(self, state: BRollState):
@@ -395,6 +398,65 @@ class BRollAgent(BaseAgent):
                 f"Rendered {n} clip(s). Dropbox isn't connected (or the upload "
                 "didn't go through), so they weren't filed — connect Dropbox to "
                 "auto-organize them by date and topic."
+            )
+        return {"messages": [AIMessage(content=msg)]}
+
+    async def _set_direction_node(self, state: BRollState):
+        """Save the week's creative direction for the automated daily batches.
+
+        The message text IS the direction ("this week's direction: pro-America
+        angles, sarcasm..."). Stored on agents.config (broll row) under
+        `weekly_direction`, which the daily production run
+        (apps/api/app/services/broll_production.py) reads every morning.
+        Read-modify-write so sibling config keys (daily_clip_target, aspect
+        ratio, daily_production_enabled) survive."""
+        import re
+        from datetime import datetime, timezone
+
+        raw = self._last_user_text(state)
+        # Strip a leading "this week's direction:"-style preamble if present.
+        direction = re.sub(
+            r"^\s*(?:this week'?s?|the|update(?:\s+the)?|set(?:\s+the)?)?\s*"
+            r"(?:b-?roll\s+)?direction(?:\s+(?:is|to|:))?\s*[:\-]?\s*",
+            "", raw, flags=re.IGNORECASE,
+        ).strip() or raw.strip()
+
+        org_id = state.get("org_id") or ""
+        supabase = current_supabase.get()
+        saved = False
+        if supabase is not None and _is_real_uuid(org_id) and direction:
+            try:
+                resp = (
+                    supabase.table("agents")
+                    .select("config")
+                    .eq("org_id", org_id)
+                    .eq("slug", self.slug)
+                    .limit(1)
+                    .execute()
+                )
+                config = (resp.data[0].get("config") if resp.data else None) or {}
+                config["weekly_direction"] = direction[:2000]
+                config["direction_updated_at"] = datetime.now(timezone.utc).isoformat()
+                supabase.table("agents").update({"config": config}).eq(
+                    "org_id", org_id
+                ).eq("slug", self.slug).execute()
+                saved = True
+            except Exception as e:
+                print(f"[broll] weekly_direction save failed: {e!r}", flush=True)
+
+        if saved:
+            msg = (
+                f"Locked in for the week: **{direction[:400]}**\n\n"
+                "Every daily batch will draft against this until you update it. "
+                "You can still steer any single batch in chat ('draft b-roll "
+                "about X, lighter tone') without changing the weekly direction."
+            )
+        else:
+            msg = (
+                f"Got the direction — **{direction[:400]}** — but I couldn't "
+                "persist it (no workspace connection), so the daily batches "
+                "won't pick it up yet. I'll still use it for anything you ask "
+                "me to draft right now."
             )
         return {"messages": [AIMessage(content=msg)]}
 

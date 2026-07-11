@@ -29,6 +29,11 @@ async def escalate(org_id: str, message: str, *, supabase: Any = None) -> bool:
     `supabase` may be passed explicitly by callers running outside a
     request/run context (the scheduler's stuck-check); defaults to the
     ContextVar client. Returns True iff the Slack post went out.
+
+    The channel config lives on the CONTENT agent's config
+    (escalation_slack_channel_id) but the alert surface is shared — other
+    background producers (b-roll daily production) escalate here too, so
+    the owner has ONE operational channel to watch.
     """
     supabase = supabase if supabase is not None else current_supabase.get()
     if supabase is None or not _is_real_uuid(org_id):

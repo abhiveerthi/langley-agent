@@ -14,6 +14,9 @@
   "status": "active",
   "config_schema": {
     "default_aspect_ratio": { "type": "string", "default": "16:9", "label": "Primary aspect ratio (16:9|9:16)" },
-    "default_duration_seconds": { "type": "number", "default": 6, "label": "Default clip length (seconds)" }
+    "default_duration_seconds": { "type": "number", "default": 6, "label": "Default clip length (seconds)" },
+    "daily_production_enabled": { "type": "boolean", "default": false, "label": "Run the automated daily batch (needs Higgsfield + Dropbox)" },
+    "daily_clip_target": { "type": "number", "default": 100, "label": "Clips per daily batch (max 150)" },
+    "weekly_direction": { "type": "string", "default": "", "label": "This week's creative direction (also settable in chat)" }
   }
 }

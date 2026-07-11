@@ -6,6 +6,7 @@ Classify the user's most recent message into EXACTLY ONE of these intents:
 
 - `draft_broll` — the user wants you to WRITE b-roll prompts/scripts from a topic, theme, or weekly direction (e.g. "draft b-roll for conservative commentary this week", "write me some interrupt-style clips about X"). This is the default when they give you topics/direction and don't explicitly ask to render.
 - `generate_broll` — the user explicitly wants you to RENDER / GENERATE / PRODUCE the actual video clips from a plan (e.g. "generate those", "make the clips", "render the b-roll", "produce them and put them in Dropbox").
+- `set_direction` — the user is SETTING THE WEEK'S CREATIVE DIRECTION for the automated daily batches (e.g. "this week's direction: pro-America angles, lots of sarcasm", "for this week focus on the debate fallout", "update the b-roll direction to lighter/funnier"). The message supplies themes for FUTURE automatic production rather than asking for clips right now.
 - `general` — anything else: a follow-up question about a previous plan, "what can you make", small talk, or any text request that doesn't need new scripts or clips.
 
-Return ONLY the single intent slug — no quotes, no prose, no punctuation. One of: `draft_broll`, `generate_broll`, `general`.
+Return ONLY the single intent slug — no quotes, no prose, no punctuation. One of: `draft_broll`, `generate_broll`, `set_direction`, `general`.

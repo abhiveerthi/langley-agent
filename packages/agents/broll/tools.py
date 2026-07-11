@@ -160,3 +160,33 @@ def get_broll_tools():
     file clips on its own.
     """
     return [generate_broll_clip]
+
+
+# ── Cross-agent handoff (Agent #6 → #7) ─────────────────────────────────────
+
+async def fetch_recent_image_insights(org_id: str, limit: int = 5) -> list[str]:
+    """Short excerpts of the Image Reader's most recent filed analyses —
+    the product's cross-agent handoff: screenshot insights (news reads,
+    competitor scans, trend data) become creative fuel for b-roll drafting.
+
+    Reuses the reader's own archive helpers (last 7 days, compiled research
+    reports excluded). Each excerpt is truncated hard — this is inspiration
+    for prompts, not a data feed. Empty in dev / when nothing is filed.
+    """
+    from packages.agents.image_reader.tools import (
+        download_report_texts,
+        fetch_recent_image_reports,
+    )
+
+    rows = fetch_recent_image_reports(org_id, days=7)
+    if not rows:
+        return []
+    texts = await download_report_texts(rows[-limit:])
+    excerpts: list[str] = []
+    for t in texts:
+        # Drop the "--- report filed ... ---" header line, keep the opening.
+        body = t.split("\n", 1)[1] if "\n" in t else t
+        excerpt = " ".join(body.split())[:300]
+        if excerpt:
+            excerpts.append(excerpt)
+    return excerpts
