@@ -425,6 +425,13 @@ async def poll_once(supabase: Any | None = None) -> None:
     except Exception:
         log.exception("Publish catch-up pass failed; continuing")
 
+    try:
+        from app.services.broll_production import broll_daily_sweep
+
+        await broll_daily_sweep(supabase)
+    except Exception:
+        log.exception("B-roll daily sweep failed; continuing")
+
 
 
 
