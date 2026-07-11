@@ -86,7 +86,14 @@ async def export_to_storage(
     storage_path = f"{org_id}/{kind}/{ts}-{safe_name}"
 
     try:
-        supabase.storage.from_(_BUCKET).upload(
+        # The supabase storage client is synchronous — a blocking HTTP POST.
+        # Offload to a thread: small markdown artifacts barely noticed, but
+        # the Content Agent ships multi-MB podcast audio through here from a
+        # task that shares the event loop with the whole API.
+        import asyncio
+
+        await asyncio.to_thread(
+            supabase.storage.from_(_BUCKET).upload,
             storage_path,
             raw,
             {"content-type": mime_type, "cache-control": "3600"},

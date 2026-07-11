@@ -9,6 +9,7 @@ from packages.agents.brand_manager.agent import BrandManagerAgent
 from packages.agents.editor.agent import EditorAgent
 from packages.agents.image_reader.agent import ImageReaderAgent
 from packages.agents.broll.agent import BRollAgent
+from packages.agents.content.agent import ContentAgent
 
 
 AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
@@ -19,6 +20,7 @@ AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
     "editor": EditorAgent,
     "image-reader": ImageReaderAgent,
     "broll": BRollAgent,
+    "content": ContentAgent,
 }
 
 
@@ -34,6 +36,7 @@ _AGENT_DIRS: dict[str, str] = {
     "editor": "editor",
     "image-reader": "image_reader",
     "broll": "broll",
+    "content": "content",
 }
 
 

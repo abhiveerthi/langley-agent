@@ -22,6 +22,9 @@ dependencies = [
     "jinja2>=3.1.0",
     "pyyaml>=6.0",
     "reportlab>=4.0.0",
+    # Content Agent (Agent #5): YouTube audio extraction for the podcast
+    # pipeline. Pure-Python; bestaudio-m4a download needs no ffmpeg.
+    "yt-dlp>=2024.10.0",
 ]
 
 [dependency-groups]
