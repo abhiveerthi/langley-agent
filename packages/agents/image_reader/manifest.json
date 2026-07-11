@@ -1,16 +1,22 @@
 {
   "slug": "image-reader",
   "name": "Image Reader",
-  "description": "Reads screenshots with native vision — YouTube analytics, competitor channels, news articles, social posts, bills/lawsuits, infographics — extracts the figures, summarizes, analyzes (including trends across multiple shots), and files a Markdown report to the Storage Library. Also transcribes voice notes into text so you can talk instead of type.",
-  "version": "0.1.0",
+  "description": "Reads screenshots with native vision — YouTube analytics, competitor channels, news articles, social posts, bills/lawsuits, infographics, industry/tracking data — extracts the figures, judges the trends, reads competitive positioning, and files Markdown + PDF reports to the Storage Library. Compiles 30–60 day research reports from the filed archive, transcribes voice notes so you can talk instead of type (natively in Slack), and delegates follow-up work to the other agents.",
+  "version": "0.2.0",
   "icon": "scan-eye",
-  "tagline": "Reads your screenshots and listens to your voice notes.",
-  "capabilities": ["vision", "ocr", "analysis", "transcription"],
+  "tagline": "Reads your screenshots, hears your voice notes, briefs the team.",
+  "capabilities": ["vision", "ocr", "analysis", "trend-analysis", "research-reports", "transcription", "delegation"],
   "required_integrations": [],
   "optional_integrations": ["slack"],
-  "tools": [],
+  "tools": ["delegate_task"],
   "interrupt_before": [],
-  "writes": [],
+  "writes": [
+    {
+      "tool": "delegate_task",
+      "description": "Creates a workspace task assigned to another agent (the reader's middle-man role). Internal task board only — nothing external is sent.",
+      "requires_approval": false
+    }
+  ],
   "config_schema": {
     "transcription_provider": { "type": "string", "default": "local", "label": "Voice transcription backend (local|openai)" }
   }

@@ -61,6 +61,15 @@ class ExtractedDatum(BaseModel):
     value: str = Field(description="The value exactly as shown, including units / % / currency.")
 
 
+class TrendInsight(BaseModel):
+    metric: str = Field(description="The metric trending — 'Monthly views', 'Subscribers', 'Water temp'.")
+    direction: str = Field(description="'up' | 'down' | 'flat' — as shown by the data, never inferred.")
+    assessment: str = Field(
+        description="What this trend is WORTH: is it meaningful or noise, how "
+        "long has it run, and what it implies for the creator's positioning."
+    )
+
+
 class ImageAnalysis(BaseModel):
     title: str = Field(description="Short title for the report, e.g. 'YouTube analytics — last 28 days'.")
     summary: str = Field(description="2–4 sentence plain-language summary of what the image(s) show.")
@@ -71,6 +80,17 @@ class ImageAnalysis(BaseModel):
     analysis: str = Field(
         description="The interpretation — what the data means, notable patterns, and (for "
         "multiple screenshots) the trend across them.",
+    )
+    trends: list[TrendInsight] = Field(
+        default_factory=list,
+        description="Long-term trends visible in the data, each with a value "
+        "judgment — not just direction. Empty when the image has no time axis.",
+    )
+    competitor_position: str = Field(
+        default="",
+        description="When the image(s) show peer/competitor channels: how the "
+        "creator stacks up (subs, monthly views, momentum) and the positioning "
+        "takeaway. Empty when not a competitor comparison.",
     )
     recommendations: list[str] = Field(
         default_factory=list,
@@ -109,10 +129,14 @@ class ImageReaderAgent(BaseAgent):
         return out
 
     def __init__(self):
-        # Plain LLM only — no tools to bind. Vision content rides in on the
-        # HumanMessage content blocks, so a single ChatAnthropic instance
-        # handles classification, vision analysis, and free-form answers.
+        # Vision content rides in on HumanMessage content blocks; one
+        # ChatAnthropic instance handles classification, vision analysis,
+        # and free-form answers. The general lane additionally binds
+        # `delegate_task` so the reader can act as the suite's middle man.
         self.llm = ChatAnthropic(model=self.model)
+        from packages.agents.image_reader.tools import get_image_reader_tools
+
+        self.tools = get_image_reader_tools()
         super().__init__()
 
     def build_graph(self) -> StateGraph:
@@ -127,6 +151,7 @@ class ImageReaderAgent(BaseAgent):
         graph.add_node("analyze_image", self._analyze_image_node)
         graph.add_node("persist_report", self._persist_report_node)
         graph.add_node("transcribe_audio", self._transcribe_audio_node)
+        graph.add_node("compile_report", self._compile_report_node)
         graph.add_node("general_answer", self._general_answer_node)
         graph.add_node("respond", self._respond_node)
 
@@ -140,10 +165,12 @@ class ImageReaderAgent(BaseAgent):
             {
                 "read_image": "analyze_image",
                 "transcribe": "transcribe_audio",
+                "compile_report": "compile_report",
                 "general": "general_answer",
             },
         )
 
+        graph.add_edge("compile_report", "respond")
         graph.add_edge("analyze_image", "persist_report")
         graph.add_edge("persist_report", "respond")
         # A transcribed voice note becomes a normal text question — answer it.
@@ -202,7 +229,7 @@ class ImageReaderAgent(BaseAgent):
     # ── Routers ────────────────────────────────────────────────────────────
     def _route_by_intent(self, state: ImageReaderState) -> str:
         intent = (state.get("intent") or "general").lower()
-        if intent not in {"read_image", "transcribe", "general"}:
+        if intent not in {"read_image", "transcribe", "compile_report", "general"}:
             return "general"
         return intent
 
@@ -237,7 +264,7 @@ class ImageReaderAgent(BaseAgent):
             HumanMessage(content=self._last_user_text(state)),
         ])
         raw = response.content.strip().strip("`").lower()
-        intent = raw if raw in {"read_image", "transcribe", "general"} else "general"
+        intent = raw if raw in {"read_image", "transcribe", "compile_report", "general"} else "general"
         return {"intent": intent}
 
     async def _analyze_image_node(self, state: ImageReaderState):
@@ -308,6 +335,21 @@ class ImageReaderAgent(BaseAgent):
             mime_type="text/markdown",
             tags=["image-analysis"],
         )
+        # PDF sibling (product clarification: "PDF-style outputs are
+        # valuable" — bills, lawsuits, infographics become analyzable,
+        # shareable documents he can reference in videos / email blasts).
+        from packages.agents.core.storage_export import export_pdf_to_storage
+
+        await export_pdf_to_storage(
+            org_id=org_id,
+            agent_slug=self.slug,
+            kind="report",
+            filename=f"image-analysis-{ts}.pdf",
+            title=analysis.get("title") or "Image analysis",
+            markdown_body=md_body,
+            brand_name=self._profile(state).brand.name,
+            tags=["image-analysis"],
+        )
         return {}
 
     async def _transcribe_audio_node(self, state: ImageReaderState):
@@ -365,6 +407,79 @@ class ImageReaderAgent(BaseAgent):
             "messages": [HumanMessage(content=transcript)],
         }
 
+    async def _compile_report_node(self, state: ImageReaderState):
+        """Roll the window's filed analyses into one research report.
+
+        The product loop: Braden feeds daily screenshots (channel stats,
+        competitor pages, fish-tracking data); each becomes a filed report;
+        this intent compiles a 30–60 day window of them into a single
+        detailed document, exported as Markdown + PDF for reuse in videos
+        or email blasts."""
+        from datetime import datetime, timezone
+
+        from packages.agents.image_reader.tools import (
+            download_report_texts,
+            fetch_recent_image_reports,
+            parse_window_days,
+        )
+
+        org_id = state.get("org_id") or ""
+        last = self._last_human_message(state)
+        days = parse_window_days(_text_from_content(last.content) if last else "")
+
+        rows = fetch_recent_image_reports(org_id, days)
+        texts = await download_report_texts(rows) if rows else []
+        if not texts:
+            return {"messages": [AIMessage(content=(
+                f"I don't have any filed image analyses from the last {days} "
+                f"days to compile. Send me the daily screenshots as they come "
+                f"in — each one gets filed, and the research report builds "
+                f"itself from the archive."
+            ))]}
+
+        profile = self._profile(state)
+        system_prompt = render(
+            "image_reader",
+            "research_report.j2",
+            profile=profile,
+            days=days,
+            report_count=len(texts),
+        )
+        corpus = "\n\n".join(texts)
+        response = await self.llm.ainvoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=(
+                f"Compile the {days}-day research report from these "
+                f"{len(texts)} filed analyses:\n\n{corpus}"
+            )),
+        ])
+        md_body = response.content if isinstance(response.content, str) else str(response.content)
+
+        # Best-effort archive (Markdown + PDF), same posture as persist_report.
+        supabase = current_supabase.get()
+        if supabase is not None and _is_real_uuid(org_id):
+            from packages.agents.core.storage_export import (
+                export_pdf_to_storage,
+                export_to_storage,
+            )
+
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+            await export_to_storage(
+                org_id=org_id, agent_slug=self.slug, kind="report",
+                filename=f"research-report-{days}d-{ts}.md",
+                content=md_body, mime_type="text/markdown",
+                tags=["research-report", f"{days}d"],
+            )
+            await export_pdf_to_storage(
+                org_id=org_id, agent_slug=self.slug, kind="report",
+                filename=f"research-report-{days}d-{ts}.pdf",
+                title=f"{profile.brand.name} — {days}-day research report",
+                markdown_body=md_body, brand_name=profile.brand.name,
+                tags=["research-report", f"{days}d"],
+            )
+
+        return {"messages": [response]}
+
     async def _general_answer_node(self, state: ImageReaderState):
         """Free-form text answer — used for the general intent and as the
         continuation after a voice note is transcribed."""
@@ -383,19 +498,61 @@ class ImageReaderAgent(BaseAgent):
             peer_context=self._peer_context(state),
         )
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
-        response = await self.llm.ainvoke(messages)
-        return {"messages": [response]}
+
+        # One bounded tool round: the reader can delegate follow-up work to
+        # another agent (its "middle man" role), then finishes its answer.
+        llm_with_tools = self.llm.bind_tools(self.tools) if self.tools else self.llm
+        response = await llm_with_tools.ainvoke(messages)
+        if not getattr(response, "tool_calls", None):
+            return {"messages": [response]}
+
+        from langchain_core.messages import ToolMessage
+
+        # Cap executions per round: the transcript/screenshot content that
+        # reaches this node is external input, and delegate_task writes to
+        # other agents' boards — an injected "delegate 50 tasks" must not
+        # fan out unbounded.
+        MAX_TOOL_CALLS = 3
+        tool_by_name = {t.name: t for t in self.tools}
+        tool_msgs: list[ToolMessage] = []
+        for i, call in enumerate(response.tool_calls):
+            if i >= MAX_TOOL_CALLS:
+                result = f"Skipped: at most {MAX_TOOL_CALLS} delegations per message."
+            else:
+                impl = tool_by_name.get(call["name"])
+                if impl is None:
+                    result = f"Unknown tool {call['name']!r}."
+                else:
+                    try:
+                        result = await impl.ainvoke(call["args"])
+                    except Exception as e:  # noqa: BLE001 — surface, don't crash
+                        result = f"Tool failed: {e}"
+            tool_msgs.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
+
+        # Final pass with the PLAIN llm (tools unbound): the closing message
+        # can't emit new tool_calls — an unexecuted tool_call stored on the
+        # thread would 400 the next turn's Anthropic request.
+        followup = await self.llm.ainvoke(messages + [response, *tool_msgs])
+        return {"messages": [response, *tool_msgs, followup]}
 
     async def _respond_node(self, state: ImageReaderState):
+        # If THIS run already produced an assistant message (general answer,
+        # compiled research report, transcription apology), surface it and
+        # stop. This check comes FIRST because `analysis` is a LastValue
+        # channel that persists across turns on the checkpointer thread — an
+        # unconditional analysis render here would re-emit turn 1's image
+        # report after every later turn in the same thread.
+        last = state["messages"][-1] if state["messages"] else None
+        if isinstance(last, AIMessage) and last.content:
+            return {"messages": [AIMessage(content=last.content)]}
+
         analysis = state.get("analysis")
         if analysis:
-            # Render the structured analysis as Markdown for chat. Same render
-            # as the Storage export, so what the creator sees in chat matches
-            # the filed report. The structured object stays on
-            # state["analysis"] for the frontend card.
+            # Fresh analyze_image path (its nodes emit no AIMessage — the
+            # last message is still the user's). Render the structured
+            # analysis as Markdown; same render as the Storage export.
             return {"messages": [AIMessage(content=self._render_report(state, analysis))]}
 
-        # general / transcribe paths — surface the last assistant message.
         last_ai = next(
             (m for m in reversed(state["messages"]) if isinstance(m, AIMessage) and m.content),
             None,
