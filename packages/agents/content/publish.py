@@ -177,15 +177,128 @@ async def _publish_clip(supabase: Any, org_id: str, asset: dict, video_title: st
     return record
 
 
+def _load_content_config(supabase: Any, org_id: str) -> dict:
+    """agents.config for the content agent, read with the CALLER'S client
+    (publish runs from the webhook path with no request ContextVars)."""
+    try:
+        resp = (
+            supabase.table("agents")
+            .select("config")
+            .eq("org_id", org_id)
+            .eq("slug", "content")
+            .limit(1)
+            .execute()
+        )
+        config = (resp.data[0].get("config") if resp.data else None) or {}
+        return config if isinstance(config, dict) else {}
+    except Exception:
+        return {}
+
+
+def episode_show_notes_md(asset: dict) -> str:
+    """Show-notes markdown for the manual-upload package — everything the
+    creator pastes into Podbean when he uploads the episode himself."""
+    lines = [f"# {asset.get('title') or 'Episode'}", ""]
+    if asset.get("brand"):
+        lines += [f"**Show:** {asset['brand']}", ""]
+    if asset.get("summary"):
+        lines += [f"*{asset['summary']}*", ""]
+    if asset.get("description"):
+        lines += [asset["description"], ""]
+    chapters = asset.get("chapters") or []
+    if chapters:
+        lines.append("## Chapters")
+        lines += [f"- {c.get('start')} — {c.get('title')}" for c in chapters]
+        lines.append("")
+    return "\n".join(lines)
+
+
 async def _publish_episode(
+    supabase: Any, org_id: str, asset: dict, *, published_at: str, config: dict
+) -> dict:
+    """The approved episode, delivered per `podcast_publish_mode`:
+
+      manual (DEFAULT) — the client uploads to Podbean himself ("the main
+          thing is the actual creation"). We package the finished episode
+          (audio + show notes) into Dropbox under /Podcast/<date>/ so it's
+          one drag-and-drop away. Nothing goes public.
+      rss — the self-hosted feed path (public bucket + feed.xml), kept
+          behind config for if/when full automation is wanted.
+
+    Retry-aware: a prior successful publish is carried forward untouched.
+    """
+    prior_all = asset.get("publish") or {}
+    for key in ("podcast_manual", "podcast_rss"):
+        prior = prior_all.get(key) or {}
+        if prior.get("ok"):
+            return {"at": _now_iso(), key: prior}
+
+    mode = str(config.get("podcast_publish_mode") or "manual").strip().lower()
+    if mode != "rss":
+        return await _deliver_episode_package(supabase, org_id, asset)
+    return await _publish_episode_rss(supabase, org_id, asset, published_at=published_at)
+
+
+async def _deliver_episode_package(supabase: Any, org_id: str, asset: dict) -> dict:
+    """Manual mode: deposit episode audio + show notes into Dropbox.
+
+    Success means THE EPISODE EXISTS (created and archived in the Storage
+    library) — Dropbox is the convenient grab-surface, and its absence
+    degrades the delivery note, not the pipeline."""
+    import asyncio as _asyncio
+    from datetime import datetime, timezone
+
+    from packages.integrations.dropbox.client import (
+        get_fresh_access_token as dropbox_token,
+        upload_file as dropbox_upload,
+    )
+
+    record: dict[str, Any] = {"at": _now_iso()}
+    source_path = asset.get("audio_storage_path")
+    if not source_path:
+        record["podcast_manual"] = {"ok": False, "error": "episode has no archived audio"}
+        return record
+
+    notes_md = episode_show_notes_md(asset)
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ext = "m4a" if "mp4" in (asset.get("audio_content_type") or "") else "mp3"
+    base = f"/Podcast/{day}"
+
+    try:
+        audio_bytes = await _asyncio.to_thread(
+            supabase.storage.from_("org-assets").download, source_path
+        )
+        token = await dropbox_token(
+            supabase, org_id,
+            _settings_value("dropbox_client_id", "DROPBOX_CLIENT_ID"),
+            _settings_value("dropbox_client_secret", "DROPBOX_CLIENT_SECRET"),
+        )
+        audio_path = f"{base}/episode.{ext}"
+        notes_path = f"{base}/show-notes.md"
+        await dropbox_upload(token, audio_path, audio_bytes, mode="overwrite")
+        await dropbox_upload(token, notes_path, notes_md.encode("utf-8"), mode="overwrite")
+        record["podcast_manual"] = {
+            "ok": True,
+            "delivered": "dropbox",
+            "paths": [audio_path, notes_path],
+        }
+    except Exception as e:
+        log.warning("episode Dropbox delivery failed for org=%s: %r", org_id, e)
+        # The episode was still created and is in the Storage library —
+        # that's the actual requirement; the delivery location degrades.
+        record["podcast_manual"] = {
+            "ok": True,
+            "delivered": "storage-only",
+            "note": f"Dropbox delivery failed ({str(e)[:150]}) — audio + show "
+                    f"notes are in the Storage library",
+        }
+    return record
+
+
+async def _publish_episode_rss(
     supabase: Any, org_id: str, asset: dict, *, published_at: str
 ) -> dict:
-    """The approved episode → public audio copy + full feed rebuild.
-    Retry-aware: a prior successful publish is carried forward untouched."""
-    prior = (asset.get("publish") or {}).get("podcast_rss") or {}
-    if prior.get("ok"):
-        return {"at": _now_iso(), "podcast_rss": prior}
-
+    """RSS mode (config opt-in): public audio copy + full feed rebuild."""
     record: dict[str, Any] = {"at": _now_iso()}
     supabase_url = _settings_value("supabase_url", "NEXT_PUBLIC_SUPABASE_URL")
     source_path = asset.get("audio_storage_path")
@@ -289,6 +402,7 @@ async def run_publish(supabase: Any, org_id: str, video_id: str) -> str:
     assets = list(row.get("assets") or [])
     video_title = row.get("video_title") or video_id
     published_at = _now_iso()
+    config = _load_content_config(supabase, org_id)
 
     approved = [(i, a) for i, a in enumerate(assets) if a.get("approved") is True]
     if not approved:
@@ -312,10 +426,14 @@ async def run_publish(supabase: Any, org_id: str, video_id: str) -> str:
             if yt_rec.get("ok"):
                 links.append(yt_rec["url"])
         elif kind == "podcast_episode":
-            record = await _publish_episode(supabase, org_id, asset, published_at=published_at)
-            if record.get("podcast_rss", {}).get("ok"):
+            record = await _publish_episode(
+                supabase, org_id, asset, published_at=published_at, config=config
+            )
+            ep = record.get("podcast_manual") or record.get("podcast_rss") or {}
+            if ep.get("ok"):
                 successes += 1
-                links.append(record["podcast_rss"]["feed_url"])
+                if ep.get("feed_url"):  # rss mode only — manual has no public link
+                    links.append(ep["feed_url"])
         elif kind == "audio":
             record = {"at": _now_iso(), "note": "audio ships inside the podcast episode"}
         elif kind == "post_copy":

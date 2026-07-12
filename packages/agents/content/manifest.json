@@ -19,6 +19,11 @@
       "default": "",
       "label": "Podcast brand name (e.g. 'Positively American with Braden Langley')"
     },
+    "podcast_publish_mode": {
+      "type": "string",
+      "default": "manual",
+      "label": "Episode delivery: 'manual' (package to Dropbox; creator uploads to Podbean) or 'rss' (self-hosted public feed)"
+    },
     "publish_deadline_local": {
       "type": "string",
       "default": "12:00",

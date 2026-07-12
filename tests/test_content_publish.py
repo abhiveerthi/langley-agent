@@ -92,7 +92,7 @@ def quiet_targets(monkeypatch):
         calls["clip"].append(asset)
         return {"youtube_shorts": {"ok": True, "url": "https://youtube.com/shorts/abc"}}
 
-    async def fake_episode(supabase, org_id, asset, *, published_at):
+    async def fake_episode(supabase, org_id, asset, *, published_at, config=None):
         calls["episode"].append(asset)
         return {"podcast_rss": {"ok": True, "feed_url": "https://x/feed.xml"}}
 
@@ -304,6 +304,91 @@ class TestWebhookPublishTrigger:
 
         await mw.monday_webhook(ORG, "s3cret", _Req())
         assert spawned == []
+
+
+# ── Episode delivery modes (Podbean pivot: manual is the default) ──────────
+class TestEpisodeDeliveryModes:
+    EP = {
+        "kind": "podcast_episode", "approved": True, "title": "Ep 9",
+        "summary": "One line.", "description": "Notes.",
+        "brand": "Positively American with Braden Langley",
+        "chapters": [{"start": "00:00:00", "title": "Open"}],
+        "audio_storage_path": "org/audio/v1.m4a", "audio_content_type": "audio/mp4",
+        "video_id": "v1",
+    }
+
+    @pytest.mark.asyncio
+    async def test_default_mode_is_manual_package(self, monkeypatch):
+        async def fake_manual(supabase, org_id, asset):
+            return {"podcast_manual": {"ok": True, "delivered": "dropbox"}}
+
+        async def boom_rss(*a, **k):
+            raise AssertionError("rss path must not run in default (manual) mode")
+
+        monkeypatch.setattr(publish, "_deliver_episode_package", fake_manual)
+        monkeypatch.setattr(publish, "_publish_episode_rss", boom_rss)
+        record = await publish._publish_episode(
+            None, "org-1", dict(self.EP), published_at="now", config={}
+        )
+        assert record["podcast_manual"]["ok"] is True
+
+    @pytest.mark.asyncio
+    async def test_rss_mode_opt_in(self, monkeypatch):
+        async def fake_rss(supabase, org_id, asset, *, published_at):
+            return {"podcast_rss": {"ok": True, "feed_url": "https://x/feed.xml"}}
+
+        async def boom_manual(*a, **k):
+            raise AssertionError("manual path must not run in rss mode")
+
+        monkeypatch.setattr(publish, "_publish_episode_rss", fake_rss)
+        monkeypatch.setattr(publish, "_deliver_episode_package", boom_manual)
+        record = await publish._publish_episode(
+            None, "org-1", dict(self.EP), published_at="now",
+            config={"podcast_publish_mode": "rss"},
+        )
+        assert record["podcast_rss"]["feed_url"]
+
+    @pytest.mark.asyncio
+    async def test_prior_manual_success_carried_forward(self, monkeypatch):
+        async def boom(*a, **k):
+            raise AssertionError("no re-delivery of an already-delivered episode")
+
+        monkeypatch.setattr(publish, "_deliver_episode_package", boom)
+        asset = dict(self.EP)
+        asset["publish"] = {"podcast_manual": {"ok": True, "delivered": "dropbox"}}
+        record = await publish._publish_episode(
+            None, "org-1", asset, published_at="now", config={}
+        )
+        assert record["podcast_manual"]["delivered"] == "dropbox"
+
+    def test_show_notes_markdown(self):
+        md = publish.episode_show_notes_md(self.EP)
+        assert md.startswith("# Ep 9")
+        assert "**Show:** Positively American" in md
+        assert "- 00:00:00 — Open" in md
+
+    @pytest.mark.asyncio
+    async def test_dropbox_failure_degrades_to_storage_only_success(self, monkeypatch, mock_supabase_factory):
+        """The requirement is CREATION — a Dropbox hiccup must not park the
+        pipeline at failed when the episode exists in the Storage library."""
+        import packages.integrations.dropbox.client as dbx
+
+        async def no_token(*a, **k):
+            raise RuntimeError("dropbox not connected")
+
+        monkeypatch.setattr(dbx, "get_fresh_access_token", no_token)
+
+        class _Storage:
+            def from_(self, bucket):
+                return self
+            def download(self, path):
+                return b"audio-bytes"
+
+        sb = mock_supabase_factory({})
+        sb.storage = _Storage()
+        record = await publish._deliver_episode_package(sb, "org-1", dict(self.EP))
+        assert record["podcast_manual"]["ok"] is True
+        assert record["podcast_manual"]["delivered"] == "storage-only"
 
 
 # ── Stale-publishing rescue + SSRF guard ───────────────────────────────────
