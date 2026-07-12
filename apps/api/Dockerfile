@@ -6,6 +6,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# ffmpeg: the Content Agent's audio path (faster-whisper local decode of the
+# podcast source, and any yt-dlp remux) needs it. Harmless when the hosted
+# OpenAI transcription backend is used instead.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # uv: fast resolver/installer for the lockfile in apps/api/.
 RUN pip install --no-cache-dir uv
 

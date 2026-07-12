@@ -1,0 +1,106 @@
+# Render blueprint for the Langley Agent backend.
+#
+# Apply from the Render dashboard: New → Blueprint → point at this repo.
+# The web frontend (apps/web, Next.js) deploys separately — on Render as a
+# second service or on Vercel; it is NOT in this blueprint because the
+# always-on backend is the piece the client's automation depends on.
+#
+# ── CRITICAL: the API runs as a SINGLE INSTANCE ────────────────────────────
+# The background scheduler (YouTube upload poller + B-Roll daily sweep) runs
+# IN-PROCESS, started from the FastAPI lifespan when SCHEDULER_ENABLED=true.
+# Two instances = two poll loops = duplicate agent runs and duplicate paid
+# renders. The B-Roll day-claim is multi-process-safe, but the upload→content
+# dispatch is not. Keep numInstances at 1 and the Dockerfile's single uvicorn
+# worker. To scale HTTP horizontally later, move the scheduler into its own
+# dedicated single-instance worker service first (see ops/go-live-checklist.md).
+
+services:
+  - type: web
+    name: langley-api
+    runtime: docker
+    dockerfilePath: apps/api/Dockerfile
+    dockerContext: .            # repo root — the image needs apps/api + packages
+    plan: starter              # always-on (free tier sleeps → scheduler dies)
+    numInstances: 1            # see the single-instance note above — do NOT raise
+    healthCheckPath: /api/health
+    # Migrations run after build, before traffic swap. A failed migration
+    # holds the deploy (see ops/render-deploy.md).
+    preDeployCommand: python /app/scripts/migrate.py
+    envVars:
+      # ── Master switch: nothing automated runs without this ──────────────
+      - key: SCHEDULER_ENABLED
+        value: "true"
+      - key: SCHEDULER_POLL_INTERVAL_SECONDS
+        value: "300"
+      - key: ENVIRONMENT
+        value: production
+
+      # ── Core platform (set the secret values in the dashboard) ──────────
+      - key: DATABASE_URL          # prod Postgres, session mode (5432, not 6543)
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: API_URL              # this service's public URL (webhook base)
+        sync: false
+      - key: NEXT_PUBLIC_APP_URL   # the web frontend URL (CORS + OAuth redirects)
+        sync: false
+
+      # ── OAuth providers (client id/secret + redirect URIs point at the web app) ──
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: SLACK_CLIENT_ID
+        sync: false
+      - key: SLACK_CLIENT_SECRET
+        sync: false
+      - key: SLACK_SIGNING_SECRET   # authenticates Slack → us event webhooks
+        sync: false
+      - key: MONDAY_CLIENT_ID
+        sync: false
+      - key: MONDAY_CLIENT_SECRET
+        sync: false
+      - key: DROPBOX_CLIENT_ID
+        sync: false
+      - key: DROPBOX_CLIENT_SECRET
+        sync: false
+      - key: TWITTER_CLIENT_ID
+        sync: false
+      - key: TWITTER_CLIENT_SECRET
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+
+      # ── Agent integration keys (each feature lights up when its key lands) ──
+      - key: TRANSCRIPTION_PROVIDER  # "openai" for accuracy; "local" is the fallback
+        value: openai
+      - key: OPENAI_API_KEY          # Whisper transcription (voice + podcast chapters)
+        sync: false
+      - key: HIGGSFIELD_API_KEY      # B-Roll clip generation
+        sync: false
+      - key: OPUSCLIP_API_KEY        # Content Agent auto-clipping
+        sync: false
+      - key: RIVERSIDE_API_KEY       # optional — studio podcast audio (YouTube fallback works without it)
+        sync: false
+      - key: INSTAGRAM_ACCESS_TOKEN  # Reels publishing (dormant until Meta review clears)
+        sync: false
+      - key: INSTAGRAM_BUSINESS_ACCOUNT_ID
+        sync: false
+
+      # ── Cost/volume knobs (defaults are sensible; override only to tune) ──
+      - key: CONTENT_MAX_AUDIO_MB
+        value: "512"
+      - key: CONTENT_MAX_CLIP_MB
+        value: "200"
+      - key: CONTENT_CLIP_WAIT_SECONDS
+        value: "1800"
