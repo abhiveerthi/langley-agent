@@ -52,6 +52,28 @@ MAX_IMAGES_PER_MESSAGE = 4
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
 
+# DMs have no per-agent channel mapping — they route to the Image Reader,
+# the suite's designated front door: it answers general questions, reads
+# screenshots, transcribes voice, and can delegate_task() to the right
+# specialist. This is the on-the-go surface (phone/watch DMs to the bot).
+DM_AGENT_SLUG = "image-reader"
+
+
+def resolve_route(
+    chan: dict | None, channel_type: str | None, install: dict | None
+) -> tuple[str, str] | None:
+    """(org_id, agent_slug) for an inbound message, or None to ignore.
+
+    Provisioned channel → its mapped agent. Unmapped DM → the DM front-door
+    agent, org resolved from the workspace's Slack install. Anything else
+    unmapped (random channels the bot was invited to) stays ignored.
+    """
+    if chan is not None:
+        return chan["org_id"], chan["agent_slug"]
+    if channel_type == "im" and install and install.get("org_id"):
+        return install["org_id"], DM_AGENT_SLUG
+    return None
+
 # Anthropic's vision API accepts exactly these; Slack will happily deliver
 # HEIC (default iPhone shares), TIFF, BMP, SVG — attaching those would fail
 # the whole model call, so they're skipped with a note instead.
@@ -195,6 +217,7 @@ async def handle_message(
     slack_message_ts: str,
     text: str,
     files: list[dict] | None = None,
+    channel_type: str | None = None,
 ) -> None:
     """Run the agent for one inbound Slack message and post a reply.
 
@@ -207,18 +230,20 @@ async def handle_message(
         transcript had been typed — same channel agent, same flow;
       - IMAGES route the run to the Image Reader (the only agent with the
         vision/report lane) with the pixels as Anthropic content blocks.
+    DMs (`channel_type == "im"`) have no channel mapping and route to the
+    Image Reader front door — see resolve_route().
     """
     chan = _lookup_channel_mapping(supabase, slack_channel_id)
-    if chan is None:
-        # Channel isn't provisioned for any agent; ignore quietly.
-        return
-    org_id = chan["org_id"]
-    agent_slug = chan["agent_slug"]
-
     install = _lookup_install(supabase, slack_team_id)
     if install is None:
         # Workspace's Slack install was deleted; nothing to do.
         return
+
+    route = resolve_route(chan, channel_type, install)
+    if route is None:
+        # Not a provisioned channel and not a DM; ignore quietly.
+        return
+    org_id, agent_slug = route
     bot_token = install["access_token"]
     persona = persona_for(agent_slug, install.get("scopes") or [])
 
@@ -603,7 +628,7 @@ def _lookup_install(supabase: Any, slack_team_id: str) -> dict | None:
     icon_emoji) gets sent to chat.postMessage."""
     resp = (
         supabase.table("integrations")
-        .select("access_token, scopes")
+        .select("access_token, scopes, org_id")
         .eq("provider", "slack")
         .filter("metadata->>team_id", "eq", slack_team_id)
         .limit(1)

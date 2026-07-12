@@ -5,9 +5,11 @@ signing secret) and dispatches qualifying message events to the Slack
 runner. It must respond within 3 seconds — Slack retries otherwise — so
 the actual agent run happens in a background task.
 
-Phase A subscribes only to `message.groups` (private channel messages),
-which is the surface needed to wire the per-agent channels created by
-the OAuth callback. `app_mention`, `message.im`, etc. are deferred.
+Subscribed event types: `message.groups` (private per-agent channels) and
+`message.im` (DMs — the on-the-go surface; routed to the Image Reader
+front door by the runner). The Slack app must have the `message.im` event
+subscription and the `im:history` scope enabled for DMs to arrive.
+`app_mention` remains deferred.
 """
 from __future__ import annotations
 
@@ -116,6 +118,7 @@ async def _dispatch(body: dict, event: dict) -> None:
             slack_message_ts=event["ts"],
             text=event.get("text") or "",
             files=event.get("files") or [],
+            channel_type=event.get("channel_type"),
         )
     except Exception:
         log.exception("slack_events: dispatch failed")

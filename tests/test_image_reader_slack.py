@@ -45,6 +45,27 @@ class TestEventsFilter:
         assert not _is_user_message(event)
 
 
+# ── DM routing (front door) ────────────────────────────────────────────────
+class TestDmRouting:
+    def test_mapped_channel_wins(self):
+        route = slack_runner.resolve_route(
+            {"org_id": "o1", "agent_slug": "publisher"}, "im", {"org_id": "o1"}
+        )
+        assert route == ("o1", "publisher")
+
+    def test_unmapped_dm_routes_to_image_reader(self):
+        route = slack_runner.resolve_route(None, "im", {"org_id": "o1", "access_token": "x"})
+        assert route == ("o1", slack_runner.DM_AGENT_SLUG)
+
+    def test_unmapped_non_dm_ignored(self):
+        assert slack_runner.resolve_route(None, "group", {"org_id": "o1"}) is None
+        assert slack_runner.resolve_route(None, None, {"org_id": "o1"}) is None
+
+    def test_dm_without_install_org_ignored(self):
+        assert slack_runner.resolve_route(None, "im", {"access_token": "x"}) is None
+        assert slack_runner.resolve_route(None, "im", None) is None
+
+
 # ── File splitting + image blocks ──────────────────────────────────────────
 class TestFileHandling:
     def test_split_files(self):

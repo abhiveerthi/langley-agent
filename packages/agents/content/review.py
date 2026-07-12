@@ -101,9 +101,16 @@ def item_name_for_asset(asset: dict, index: int) -> str:
     return f"{prefix} {title}"[:255]
 
 
-def review_body_for_asset(asset: dict) -> str | None:
-    """The update posted INSIDE the Monday item — the AI-drafted copy the
-    reviewer tone-QAs in place. None means no update (nothing to QA)."""
+# Signed-URL lifetime for private audio linked from Monday items. A week
+# comfortably covers the review cycle (same-morning by design).
+SIGNED_MEDIA_URL_TTL_SECONDS = 7 * 24 * 3600
+
+
+def review_body_for_asset(asset: dict, media_url: str | None = None) -> str | None:
+    """The update posted INSIDE the Monday item — the media to review plus
+    the AI-drafted copy to tone-QA, all in place. The reviewer must be able
+    to WATCH/LISTEN from the board ("no manual logins"): a clip she can't
+    play isn't reviewable. None means no update (nothing to show)."""
     from packages.agents.content.copy import (
         clip_copy_markdown,
         episode_copy_markdown,
@@ -112,13 +119,52 @@ def review_body_for_asset(asset: dict) -> str | None:
 
     kind = asset.get("kind")
     if kind == "clip":
-        return clip_copy_markdown(asset.get("copy") or {}) if asset.get("copy") else None
+        link = media_url or asset.get("url")
+        parts = []
+        if link:
+            parts.append(f"▶️ **Watch the clip:** {link}")
+        if asset.get("copy"):
+            parts.append(clip_copy_markdown(asset["copy"]))
+        return "\n\n".join(parts) or None
     if kind == "podcast_episode":
-        return episode_copy_markdown(asset)
+        header = f"🎧 **Listen to the episode:** {media_url}\n\n" if media_url else ""
+        return header + episode_copy_markdown(asset)
     if kind == "post_copy":
         return post_copy_markdown(asset)
     if kind == "audio":
-        return "Source audio for the podcast episode — approve to include it in the drop."
+        header = f"🎧 **Listen:** {media_url}\n\n" if media_url else ""
+        return header + (
+            "Source audio for the podcast episode — approve to include it in the drop."
+        )
+    return None
+
+
+async def media_link_for_asset(supabase: Any, asset: dict) -> str | None:
+    """A playable link for the asset: clips carry their (public CDN) URL;
+    audio lives in the private org-assets bucket, so it gets a time-limited
+    signed URL. Best-effort — a missing link degrades the item body, not
+    the review."""
+    kind = asset.get("kind")
+    if kind == "clip":
+        return asset.get("url")
+    if kind in ("audio", "podcast_episode"):
+        path = asset.get("storage_path") or asset.get("audio_storage_path")
+        if not path:
+            return None
+        import asyncio as _asyncio
+
+        try:
+            resp = await _asyncio.to_thread(
+                supabase.storage.from_("org-assets").create_signed_url,
+                path,
+                SIGNED_MEDIA_URL_TTL_SECONDS,
+            )
+            if isinstance(resp, dict):
+                return resp.get("signedURL") or resp.get("signed_url")
+            return None
+        except Exception as e:
+            log.warning("signed URL failed for %s: %r", path, e)
+            return None
     return None
 
 
@@ -299,9 +345,11 @@ async def queue_for_review(
         if not item.get("id"):
             continue
         created += 1
-        # Post the AI-drafted copy into the item so tone-QA happens on the
-        # board itself. Best-effort — a missing update never blocks review.
-        body = review_body_for_asset(asset)
+        # Post the playable media + AI-drafted copy into the item so the
+        # whole review happens on the board itself. Best-effort — a missing
+        # update never blocks review.
+        media_url = await media_link_for_asset(supabase, asset)
+        body = review_body_for_asset(asset, media_url=media_url)
         if body:
             try:
                 await monday_client.add_update(token, str(item["id"]), body)

@@ -37,6 +37,52 @@ class TestLabelMapping:
         assert review.item_name_for_asset({"kind": "mystery"}, 3) == "[Asset] #4"
 
 
+# ── Review item bodies: playable media + copy ──────────────────────────────
+class TestReviewBodies:
+    def test_clip_body_has_watch_link_and_copy(self):
+        asset = {"kind": "clip", "url": "https://cdn/c.mp4",
+                 "copy": {"seo_title": "T", "caption": "C", "hashtags": ["x"]}}
+        body = review.review_body_for_asset(asset)
+        assert "▶️ **Watch the clip:** https://cdn/c.mp4" in body
+        assert "SEO title" in body
+
+    def test_clip_without_copy_still_gets_the_link(self):
+        """A clip the reviewer can't play isn't reviewable — the link posts
+        even when copy drafting produced nothing for it."""
+        body = review.review_body_for_asset({"kind": "clip", "url": "https://cdn/c.mp4"})
+        assert body == "▶️ **Watch the clip:** https://cdn/c.mp4"
+
+    def test_episode_body_has_listen_link(self):
+        asset = {"kind": "podcast_episode", "title": "Ep", "summary": "s",
+                 "description": "d", "chapters": []}
+        body = review.review_body_for_asset(asset, media_url="https://signed/audio")
+        assert body.startswith("🎧 **Listen to the episode:** https://signed/audio")
+        assert "Episode title" in body
+
+    @pytest.mark.asyncio
+    async def test_media_link_clip_passthrough_and_signed_audio(self):
+        class _Storage:
+            def from_(self, bucket):
+                assert bucket == "org-assets"
+                return self
+
+            def create_signed_url(self, path, ttl):
+                assert ttl == review.SIGNED_MEDIA_URL_TTL_SECONDS
+                return {"signedURL": f"https://signed/{path}"}
+
+        class _SB:
+            storage = _Storage()
+
+        assert await review.media_link_for_asset(
+            _SB(), {"kind": "clip", "url": "https://cdn/c.mp4"}
+        ) == "https://cdn/c.mp4"
+        assert await review.media_link_for_asset(
+            _SB(), {"kind": "podcast_episode", "audio_storage_path": "org/a.m4a"}
+        ) == "https://signed/org/a.m4a"
+        # Missing path / failing storage degrade to None, never raise.
+        assert await review.media_link_for_asset(_SB(), {"kind": "audio"}) is None
+
+
 # ── Decision engine ────────────────────────────────────────────────────────
 def _canned(role="asset", asset_index=0, decision="pending"):
     return {
