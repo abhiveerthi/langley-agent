@@ -171,6 +171,65 @@ class TestPlanRender:
         assert "{{" not in out and "{%" not in out
 
 
+# ── Higgsfield verified API contract (docs.higgsfield.ai, July 2026) ────────
+class TestHiggsfieldContract:
+    def test_requires_the_full_credential_pair(self, monkeypatch):
+        from packages.integrations.higgsfield import client as h
+
+        assert h.is_configured() is False  # conftest scrubs both
+        monkeypatch.setenv("HIGGSFIELD_API_KEY", "uuid-key")
+        assert h.is_configured() is False  # key alone is NOT configured
+        monkeypatch.setenv("HIGGSFIELD_API_SECRET", "hexsecret")
+        assert h.is_configured() is True
+
+    def test_auth_header_is_key_colon_secret(self, monkeypatch):
+        """The verified scheme: `Authorization: Key {key}:{secret}` — one
+        header, the literal word Key. NOT Bearer."""
+        from packages.integrations.higgsfield import client as h
+
+        monkeypatch.setenv("HIGGSFIELD_API_KEY", "uuid-key")
+        monkeypatch.setenv("HIGGSFIELD_API_SECRET", "hexsecret")
+        headers = h._headers()
+        assert headers["Authorization"] == "Key uuid-key:hexsecret"
+
+    def test_missing_secret_names_what_is_missing(self, monkeypatch):
+        from packages.integrations.higgsfield import client as h
+
+        monkeypatch.setenv("HIGGSFIELD_API_KEY", "uuid-key")
+        with pytest.raises(h.HiggsfieldUnavailable) as exc:
+            h._credentials()
+        assert "HIGGSFIELD_API_SECRET" in str(exc.value)
+
+    @pytest.mark.parametrize("status, outcome", [
+        ("completed", "success"),
+        ("failed", "failure"),
+        ("nsfw", "failure"),
+        ("canceled", "failure"),
+        ("queued", "pending"),
+        ("in_progress", "pending"),
+        ("some_future_status", "pending"),  # unknown = keep polling
+        ("", "pending"),
+    ])
+    def test_status_classification(self, status, outcome):
+        from packages.integrations.higgsfield import client as h
+
+        assert h.classify_status(status) == outcome
+
+    def test_result_extraction_video_then_images(self):
+        from packages.integrations.higgsfield import client as h
+
+        assert h.extract_result_url({"video": {"url": "https://v.mp4"}}) == "https://v.mp4"
+        assert h.extract_result_url({"images": [{"url": "https://i.png"}]}) == "https://i.png"
+        assert h.extract_result_url({"status": "completed"}) is None
+
+    def test_error_mapping_actionable(self):
+        from packages.integrations.higgsfield import client as h
+
+        assert "credits" in str(h._error_for_response(403, "", what="submit"))
+        assert "credentials" in str(h._error_for_response(401, "", what="submit"))
+        assert "422" in str(h._error_for_response(422, "detail", what="submit"))
+
+
 # ── Higgsfield graceful degradation (no network) ───────────────────────────
 class TestHiggsfieldDegradation:
     def test_not_configured_without_key(self, monkeypatch):

@@ -1,31 +1,43 @@
 """
-Higgsfield video-generation client.
+Higgsfield video-generation client (platform.higgsfield.ai).
 
-Submits a text prompt to Higgsfield, polls the job to completion, and returns
-the rendered b-roll clip (URL + bytes). Used by the B-Roll Producer agent to
+Submits a text prompt, polls the request to completion, and returns the
+rendered b-roll clip (URL + bytes). Used by the B-Roll Producer agent to
 turn AI-written b-roll scripts into short interrupt-style clips.
 
-KEY-GATED + GRACEFUL DEGRADATION
---------------------------------
-Activates only when HIGGSFIELD_API_KEY is set. With no key, every entry point
-raises `HiggsfieldUnavailable` — a clear, catchable signal the agent turns into
-a "video generation isn't configured yet" status message. This mirrors how the
-rest of the codebase signals "not connected" (clients.py raises ValueError /
-the integrations layer raises RuntimeError) rather than silently no-op'ing, so
-the caller can surface an honest status. The SCRIPT-DRAFTING half of the agent
-never touches this module, so prompt-writing works with no key at all.
+VERIFIED API CONTRACT (docs.higgsfield.ai + both official SDKs, July 2026)
+--------------------------------------------------------------------------
+  Auth:    ONE header — `Authorization: Key {api_key}:{api_secret}` (the
+           literal word "Key"). Keys are issued as a PAIR at
+           cloud.higgsfield.ai/api-keys; both parts are required.
+  Submit:  POST https://platform.higgsfield.ai/{model_id}   (model_id is a
+           slash path, e.g. bytedance/seedance/v1/lite/text-to-video) with
+           a FLAT JSON body: {"prompt", "aspect_ratio", "duration", ...}.
+           200 → {"status": "queued", "request_id": ..., "status_url": ...}
+  Poll:    GET /requests/{request_id}/status
+           Statuses: queued | in_progress | completed | failed | nsfw |
+           canceled. Anything unrecognized is treated as NON-terminal
+           (poll on until timeout) — the vocabulary has grown before.
+           completed → result under "video": {"url": ...} (image models
+           use "images": [{"url": ...}] — extractor tries both).
+  Errors:  401 bad credentials · 403 = OUT OF API CREDITS (separate pool
+           from the web subscription; top up at cloud.higgsfield.ai/credits)
+           · 422 validation (Pydantic-style `detail`).
 
-ENDPOINT SHAPE (may need adjustment once we have API docs)
-----------------------------------------------------------
-We don't have confirmed Higgsfield REST docs yet, so this implements against a
-sensible generic job-submit + poll shape, with every endpoint/path isolated as
-a constant below. When the real docs land, adjust the constants and the small
-response-field accessors (`_extract_job_id`, `_extract_status`,
-`_extract_clip_url`) — the agent-facing contract (generate_clip ->
-GeneratedClip) stays stable.
+Operational notes for the daily batch:
+  - Result URLs are only guaranteed ~7 days — callers must download and
+    archive immediately (generate_clip(download=True) does).
+  - `nsfw` is a moderation terminal state, auto-refunded — surfaced with
+    its own message; retrying the SAME prompt is pointless.
+  - failed/timeout are auto-refunded by Higgsfield.
+  - Text-to-video model IDs aren't first-party-documented; the default
+    below came from the platform OpenAPI capture and is env-overridable
+    (HIGGSFIELD_T2V_MODEL) — verify with one real call before a full batch.
 
-    POST {BASE}/v1/generations      {prompt, aspect_ratio, duration}  -> {id}
-    GET  {BASE}/v1/generations/{id}                                   -> {status, output:{video_url}}
+KEY-GATED + GRACEFUL DEGRADATION: activates only when BOTH
+HIGGSFIELD_API_KEY and HIGGSFIELD_API_SECRET are set; otherwise every
+entry point raises HiggsfieldUnavailable and the agent reports "not
+configured" instead of failing. Script drafting never touches this module.
 """
 from __future__ import annotations
 
@@ -35,22 +47,30 @@ from dataclasses import dataclass
 
 import httpx
 
-# ── Endpoint constants (ADJUST when real Higgsfield API docs are available) ──
-HIGGSFIELD_API_BASE = os.environ.get("HIGGSFIELD_API_BASE", "https://api.higgsfield.ai")
-_SUBMIT_PATH = "/v1/generations"
-_STATUS_PATH = "/v1/generations/{job_id}"
+HIGGSFIELD_API_BASE = os.environ.get(
+    "HIGGSFIELD_API_BASE", "https://platform.higgsfield.ai"
+)
 
-# Terminal status strings we treat as success / failure. The real API may use
-# different vocabulary — keep these as the single place to remap.
-_SUCCESS_STATES = {"completed", "succeeded", "success", "done", "ready"}
-_FAILURE_STATES = {"failed", "error", "cancelled", "canceled"}
+# Default text-to-video model. Env-overridable because Higgsfield's t2v
+# roster is plan-dependent and not first-party-documented; seedance lite
+# supports integer durations 2–12s and both 16:9 / 9:16 — exactly the
+# product's 5–10s landscape+portrait envelope — at the volume-friendly tier.
+DEFAULT_T2V_MODEL = os.environ.get(
+    "HIGGSFIELD_T2V_MODEL", "bytedance/seedance/v1/lite/text-to-video"
+)
 
-# Supported output aspect ratios. 16:9 is primary (landscape), 9:16 is for
-# YouTube Shorts (portrait).
+_STATUS_PATH = "/requests/{request_id}/status"
+
+# Terminal states per docs + official SDK enums. An UNRECOGNIZED status is
+# deliberately non-terminal: keep polling until the timeout.
+_SUCCESS_STATES = {"completed"}
+_FAILURE_STATES = {"failed", "nsfw", "canceled", "cancelled"}
+
 ASPECT_RATIOS = ("16:9", "9:16")
 
-_DEFAULT_POLL_INTERVAL = 5.0   # seconds between status polls
+_DEFAULT_POLL_INTERVAL = 5.0   # seconds between status polls (SDK default is 2)
 _DEFAULT_TIMEOUT = 600.0       # max seconds to wait for a single clip
+_MAX_TRANSIENT_POLL_FAILURES = 3
 
 
 class HiggsfieldError(RuntimeError):
@@ -58,10 +78,10 @@ class HiggsfieldError(RuntimeError):
 
 
 class HiggsfieldUnavailable(HiggsfieldError):
-    """Higgsfield is not configured (no HIGGSFIELD_API_KEY).
+    """Higgsfield is not configured (key/secret pair missing).
 
-    Distinct subclass so the agent can catch "not configured" specifically and
-    degrade gracefully — distinct from a real generation failure.
+    Distinct subclass so the agent can catch "not configured" specifically
+    and degrade gracefully — distinct from a real generation failure.
     """
 
 
@@ -77,50 +97,80 @@ class GeneratedClip:
 
 
 def is_configured() -> bool:
-    """True when an API key is present so generation can be attempted."""
-    return bool(os.environ.get("HIGGSFIELD_API_KEY"))
+    """True when the full credential PAIR is present."""
+    return bool(
+        os.environ.get("HIGGSFIELD_API_KEY")
+        and os.environ.get("HIGGSFIELD_API_SECRET")
+    )
 
 
-def _api_key() -> str:
+def _credentials() -> tuple[str, str]:
     key = os.environ.get("HIGGSFIELD_API_KEY")
-    if not key:
-        raise HiggsfieldUnavailable(
-            "HIGGSFIELD_API_KEY is not set — video generation is not configured. "
-            "Add the key to .env to enable Higgsfield b-roll rendering."
+    secret = os.environ.get("HIGGSFIELD_API_SECRET")
+    if not key or not secret:
+        missing = " and ".join(
+            name for name, val in (
+                ("HIGGSFIELD_API_KEY", key), ("HIGGSFIELD_API_SECRET", secret),
+            ) if not val
         )
-    return key
+        raise HiggsfieldUnavailable(
+            f"{missing} not set — video generation is not configured. "
+            f"Higgsfield issues a key+secret pair (cloud.higgsfield.ai/api-keys); "
+            f"add both to the environment to enable b-roll rendering."
+        )
+    return key, secret
 
 
 def _headers() -> dict[str, str]:
+    key, secret = _credentials()
     return {
-        "Authorization": f"Bearer {_api_key()}",
+        "Authorization": f"Key {key}:{secret}",
         "Content-Type": "application/json",
     }
 
 
-# ── Response-field accessors (ADJUST to match the real API response shape) ───
-def _extract_job_id(payload: dict) -> str:
-    job_id = payload.get("id") or payload.get("job_id") or payload.get("generation_id")
-    if not job_id:
-        raise HiggsfieldError(f"Higgsfield submit response had no job id: {payload!r}")
-    return str(job_id)
+def _error_for_response(status_code: int, text: str, *, what: str) -> HiggsfieldError:
+    """Map an HTTP error to an actionable message. 403 gets special
+    treatment: it means the API credit pool (separate from the web-UI
+    subscription) is empty — ops can fix that without touching code."""
+    snippet = (text or "")[:300]
+    if status_code == 401:
+        return HiggsfieldError(
+            f"Higgsfield {what} failed: 401 — credentials rejected. Check the "
+            f"HIGGSFIELD_API_KEY / HIGGSFIELD_API_SECRET pair."
+        )
+    if status_code == 403:
+        return HiggsfieldError(
+            f"Higgsfield {what} failed: 403 — API credits exhausted (the API "
+            f"pool is separate from the web subscription; top up at "
+            f"cloud.higgsfield.ai/credits)."
+        )
+    return HiggsfieldError(f"Higgsfield {what} failed: {status_code} {snippet}")
 
 
-def _extract_status(payload: dict) -> str:
-    return str(payload.get("status") or payload.get("state") or "").lower()
+def classify_status(status: str) -> str:
+    """'success' | 'failure' | 'pending'. Unknown statuses are pending —
+    the vocabulary has grown before (canceled arrived via SDK enums)."""
+    s = (status or "").lower()
+    if s in _SUCCESS_STATES:
+        return "success"
+    if s in _FAILURE_STATES:
+        return "failure"
+    return "pending"
 
 
-def _extract_clip_url(payload: dict) -> str | None:
-    output = payload.get("output") or payload.get("result") or {}
-    if isinstance(output, dict):
-        return output.get("video_url") or output.get("url") or output.get("clip_url")
-    if isinstance(output, list) and output:
-        first = output[0]
-        if isinstance(first, dict):
-            return first.get("video_url") or first.get("url")
-        if isinstance(first, str):
-            return first
-    return payload.get("video_url") or payload.get("url")
+def extract_result_url(payload: dict) -> str | None:
+    """Video models: payload['video']['url']; image models:
+    payload['images'][0]['url']. Defensive on both per the docs' split."""
+    video = payload.get("video")
+    if isinstance(video, dict) and video.get("url"):
+        return video["url"]
+    images = payload.get("images")
+    if isinstance(images, list) and images:
+        first = images[0]
+        if isinstance(first, dict) and first.get("url"):
+            return first["url"]
+    return None
 
 
 async def submit_generation(
@@ -128,31 +178,36 @@ async def submit_generation(
     *,
     aspect_ratio: str = "16:9",
     duration_seconds: int = 6,
+    model: str | None = None,
 ) -> str:
-    """Submit a generation job; return the Higgsfield job id.
+    """Submit a generation; return the Higgsfield request_id.
 
-    Raises HiggsfieldUnavailable if no key, HiggsfieldError on HTTP failure.
+    Raises HiggsfieldUnavailable if the credential pair is missing,
+    HiggsfieldError on HTTP failure.
     """
     if aspect_ratio not in ASPECT_RATIOS:
         raise HiggsfieldError(
             f"Unsupported aspect_ratio {aspect_ratio!r}; use one of {ASPECT_RATIOS}"
         )
+    model = (model or DEFAULT_T2V_MODEL).strip("/")
     body = {
         "prompt": prompt,
         "aspect_ratio": aspect_ratio,
-        "duration": duration_seconds,
+        "duration": int(duration_seconds),
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
-            f"{HIGGSFIELD_API_BASE}{_SUBMIT_PATH}",
+            f"{HIGGSFIELD_API_BASE}/{model}",
             json=body,
             headers=_headers(),
         )
     if resp.status_code >= 400:
-        raise HiggsfieldError(
-            f"Higgsfield submit failed: {resp.status_code} {resp.text}"
-        )
-    return _extract_job_id(resp.json() or {})
+        raise _error_for_response(resp.status_code, resp.text, what="submit")
+    payload = resp.json() or {}
+    request_id = payload.get("request_id") or payload.get("id")
+    if not request_id:
+        raise HiggsfieldError(f"Higgsfield submit response had no request_id: {payload!r}")
+    return str(request_id)
 
 
 async def poll_generation(
@@ -161,42 +216,67 @@ async def poll_generation(
     poll_interval: float = _DEFAULT_POLL_INTERVAL,
     timeout: float = _DEFAULT_TIMEOUT,
 ) -> str:
-    """Poll a job until it completes; return the rendered clip URL.
+    """Poll a request until terminal; return the rendered clip URL.
 
-    Raises HiggsfieldError on a failed job or if `timeout` elapses first.
+    Transient poll failures (network blips, 5xx) are tolerated up to
+    _MAX_TRANSIENT_POLL_FAILURES consecutive times. Raises HiggsfieldError
+    on failed/nsfw/canceled or when `timeout` elapses.
     """
     deadline = asyncio.get_event_loop().time() + timeout
+    transient = 0
     async with httpx.AsyncClient(timeout=30) as client:
         while True:
-            resp = await client.get(
-                f"{HIGGSFIELD_API_BASE}{_STATUS_PATH.format(job_id=job_id)}",
-                headers=_headers(),
-            )
-            if resp.status_code >= 400:
-                raise HiggsfieldError(
-                    f"Higgsfield status check failed: {resp.status_code} {resp.text}"
+            try:
+                resp = await client.get(
+                    f"{HIGGSFIELD_API_BASE}{_STATUS_PATH.format(request_id=job_id)}",
+                    headers=_headers(),
                 )
+            except httpx.HTTPError as e:
+                transient += 1
+                if transient > _MAX_TRANSIENT_POLL_FAILURES:
+                    raise HiggsfieldError(f"Higgsfield status polling failed: {e!r}") from e
+                await asyncio.sleep(poll_interval)
+                continue
+            if resp.status_code >= 500 or resp.status_code in (408, 429):
+                transient += 1
+                if transient > _MAX_TRANSIENT_POLL_FAILURES:
+                    raise _error_for_response(resp.status_code, resp.text, what="status check")
+                await asyncio.sleep(poll_interval)
+                continue
+            if resp.status_code >= 400:
+                raise _error_for_response(resp.status_code, resp.text, what="status check")
+
+            transient = 0
             payload = resp.json() or {}
-            status = _extract_status(payload)
-            if status in _SUCCESS_STATES:
-                url = _extract_clip_url(payload)
+            status = str(payload.get("status") or "").lower()
+            outcome = classify_status(status)
+            if outcome == "success":
+                url = extract_result_url(payload)
                 if not url:
                     raise HiggsfieldError(
-                        f"Higgsfield job {job_id} completed without a clip URL: {payload!r}"
+                        f"Higgsfield request {job_id} completed without a media URL: {payload!r}"
                     )
                 return url
-            if status in _FAILURE_STATES:
-                err = payload.get("error") or payload.get("failure_reason") or status
-                raise HiggsfieldError(f"Higgsfield job {job_id} failed: {err}")
+            if outcome == "failure":
+                if status == "nsfw":
+                    # Moderation terminal state (auto-refunded). Retrying the
+                    # same prompt is pointless — the agent should reword.
+                    raise HiggsfieldError(
+                        f"Higgsfield request {job_id} was flagged by content "
+                        f"moderation (nsfw) — the prompt needs rewording, not a retry."
+                    )
+                err = payload.get("error") or status
+                raise HiggsfieldError(f"Higgsfield request {job_id} failed: {err}")
             if asyncio.get_event_loop().time() >= deadline:
                 raise HiggsfieldError(
-                    f"Higgsfield job {job_id} did not finish within {timeout:.0f}s"
+                    f"Higgsfield request {job_id} did not finish within {timeout:.0f}s"
                 )
             await asyncio.sleep(poll_interval)
 
 
 async def download_clip(url: str) -> bytes:
-    """Fetch the rendered clip bytes from its URL."""
+    """Fetch the rendered clip bytes. Result URLs are only guaranteed for
+    ~7 days — callers archive the bytes immediately (Dropbox deposit)."""
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
         resp = await client.get(url)
     if resp.status_code >= 400:
@@ -215,16 +295,13 @@ async def generate_clip(
 ) -> GeneratedClip:
     """End-to-end: submit a prompt, await the rendered clip, optionally download.
 
-    This is the agent-facing entry point. Returns a GeneratedClip with the
-    job id, clip URL, and (when download=True) the raw bytes ready to deposit
-    into Dropbox.
+    This is the agent-facing entry point — its signature and GeneratedClip
+    are the stable contract; everything above tracks Higgsfield's API.
 
-    Raises HiggsfieldUnavailable when no API key is configured (the agent
-    catches this and reports "not configured yet"), or HiggsfieldError on a
-    real generation failure / timeout. Re-running a bad clip is just calling
-    this again with the same (or a tweaked) prompt.
+    Raises HiggsfieldUnavailable when the key/secret pair isn't configured
+    (the agent reports "not configured yet"), or HiggsfieldError on a real
+    generation failure / moderation flag / timeout.
     """
-    # _api_key() inside the calls raises HiggsfieldUnavailable early if unset.
     job_id = await submit_generation(
         prompt, aspect_ratio=aspect_ratio, duration_seconds=duration_seconds
     )

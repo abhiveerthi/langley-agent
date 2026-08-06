@@ -51,6 +51,7 @@ def _scrub_content_integration_keys(monkeypatch):
     monkeypatch.delenv("INSTAGRAM_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("INSTAGRAM_BUSINESS_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("HIGGSFIELD_API_KEY", raising=False)
+    monkeypatch.delenv("HIGGSFIELD_API_SECRET", raising=False)
 
 
 # ── Mock Supabase client ──────────────────────────────────────────────────

@@ -86,7 +86,9 @@ services:
         value: openai
       - key: OPENAI_API_KEY          # Whisper transcription (voice + podcast chapters)
         sync: false
-      - key: HIGGSFIELD_API_KEY      # B-Roll clip generation
+      - key: HIGGSFIELD_API_KEY      # B-Roll clip generation (key + secret pair)
+        sync: false
+      - key: HIGGSFIELD_API_SECRET
         sync: false
       - key: OPUSCLIP_API_KEY        # Content Agent auto-clipping
         sync: false
@@ -104,3 +106,5 @@ services:
         value: "200"
       - key: CONTENT_CLIP_WAIT_SECONDS
         value: "1800"
+      - key: HIGGSFIELD_T2V_MODEL   # text-to-video model path; verify on the plan before a full batch
+        value: "bytedance/seedance/v1/lite/text-to-video"
