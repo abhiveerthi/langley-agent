@@ -137,6 +137,53 @@ def _resolve_agent_id(supabase: Any, org_id: str, agent_slug: str) -> str | None
 
 
 # ── Write ────────────────────────────────────────────────────────────────--
+async def save_fact(
+    org_id: str | None,
+    agent_slug: str,
+    thread_id: str | None,
+    content: str,
+    metadata: dict[str, Any] | None = None,
+) -> str | None:
+    """Embed `content` and insert one row into `agent_memory` — REPORTING
+    the outcome: returns None on a confirmed insert, otherwise a short
+    human-readable reason the save did not happen.
+
+    This is the backing for explicit "remember this" tools, which must never
+    claim success falsely (the failure mode that burned the client's old
+    system: "saving it" followed by a red-X). Automatic turn-summary memory
+    goes through `write_memory`, which discards the reason.
+
+    `agent_slug` is mapped to `agent_memory.agent_id` via a quick lookup so
+    call sites stay slug-friendly (matches core/tasks.py). `thread_id` is only
+    written when it's a real UUID — the column FKs to `threads(id)`.
+    """
+    supabase = current_supabase.get()
+    if supabase is None or not _is_real_uuid(org_id):
+        return "long-term memory isn't available in this environment (no workspace database)"
+    if not (content or "").strip():
+        return "the fact was empty"
+
+    embedding = await embed_text(content)
+    if embedding is None:
+        return "the memory backend isn't configured yet (needs OPENAI_API_KEY for embeddings)"
+
+    agent_id = _resolve_agent_id(supabase, org_id, agent_slug)
+    payload: dict[str, Any] = {
+        "org_id": org_id,
+        "agent_id": agent_id,
+        "thread_id": thread_id if _is_real_uuid(thread_id) else None,
+        "content": content.strip(),
+        "embedding": embedding,
+        "metadata": metadata or {},
+    }
+    try:
+        supabase.table("agent_memory").insert(payload).execute()
+    except Exception as e:
+        print(f"[memory] save_fact insert failed: {e!r}", flush=True)
+        return "the database write failed — try again in a moment"
+    return None
+
+
 async def write_memory(
     org_id: str | None,
     agent_slug: str,
@@ -153,31 +200,10 @@ async def write_memory(
       - no embedding backend is configured (embed_text → None),
       - the insert errors.
 
-    `agent_slug` is mapped to `agent_memory.agent_id` via a quick lookup so
-    call sites stay slug-friendly (matches core/tasks.py). `thread_id` is only
-    written when it's a real UUID — the column FKs to `threads(id)`.
+    Thin façade over `save_fact` that discards the reason — the auto-memory
+    path (turn summaries at run end) must stay fire-and-forget.
     """
-    supabase = current_supabase.get()
-    if supabase is None or not _is_real_uuid(org_id) or not (content or "").strip():
-        return
-
-    embedding = await embed_text(content)
-    if embedding is None:
-        return
-
-    agent_id = _resolve_agent_id(supabase, org_id, agent_slug)
-    payload: dict[str, Any] = {
-        "org_id": org_id,
-        "agent_id": agent_id,
-        "thread_id": thread_id if _is_real_uuid(thread_id) else None,
-        "content": content.strip(),
-        "embedding": embedding,
-        "metadata": metadata or {},
-    }
-    try:
-        supabase.table("agent_memory").insert(payload).execute()
-    except Exception as e:
-        print(f"[memory] write_memory failed: {e!r}", flush=True)
+    await save_fact(org_id, agent_slug, thread_id, content, metadata)
 
 
 # ── Recall ──────────────────────────────────────────────────────────────--─

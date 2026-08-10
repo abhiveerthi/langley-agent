@@ -52,6 +52,12 @@ def _scrub_content_integration_keys(monkeypatch):
     monkeypatch.delenv("INSTAGRAM_BUSINESS_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("HIGGSFIELD_API_KEY", raising=False)
     monkeypatch.delenv("HIGGSFIELD_API_SECRET", raising=False)
+    # Resend (ad-hoc email tool) + OpenAI (memory embeddings / whisper):
+    # a dev shell with these exported would flip is_configured()/embed_text
+    # to the live path mid-suite.
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    monkeypatch.delenv("EMAIL_FROM", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
 
 # ── Mock Supabase client ──────────────────────────────────────────────────

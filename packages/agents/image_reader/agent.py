@@ -117,6 +117,10 @@ class ImageReaderAgent(BaseAgent):
     # Sonnet for vision quality — OCR/analysis on dense analytics screenshots
     # needs the stronger model, not Haiku.
     model = "claude-sonnet-4-6"
+    # The DM front door remembers: auto-recall before each turn + a turn
+    # summary at run end, and the explicit remember_fact tool writes here
+    # too (all under this agent's slug — see core/memory.py).
+    memory_enabled = True
 
     def get_structured_outputs(self, state: dict, visited_nodes: list[str]) -> dict[str, dict]:
         """Surface the ImageAnalysis as a structured frontend card — but only
@@ -146,6 +150,9 @@ class ImageReaderAgent(BaseAgent):
         # peer_context: latest Strategist brief etc. — lets an analytics
         # screenshot be read against what the channel was already planning.
         graph.add_node("load_peer_context", self._load_peer_context_node)
+        # load_memory: recall relevant long-term notes (facts the creator
+        # asked us to remember, past reads) — hydrates metadata.memories.
+        graph.add_node("load_memory", self._load_memory_node)
         graph.add_node("classify_intent", self._classify_intent_node)
 
         graph.add_node("analyze_image", self._analyze_image_node)
@@ -157,7 +164,8 @@ class ImageReaderAgent(BaseAgent):
 
         graph.add_edge(START, "load_profile")
         graph.add_edge("load_profile", "load_peer_context")
-        graph.add_edge("load_peer_context", "classify_intent")
+        graph.add_edge("load_peer_context", "load_memory")
+        graph.add_edge("load_memory", "classify_intent")
 
         graph.add_conditional_edges(
             "classify_intent",
@@ -496,11 +504,12 @@ class ImageReaderAgent(BaseAgent):
             profile=profile,
             intent="general",
             peer_context=self._peer_context(state),
+            memories=(state.get("metadata") or {}).get("memories") or [],
         )
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
 
-        # One bounded tool round: the reader can delegate follow-up work to
-        # another agent (its "middle man" role), then finishes its answer.
+        # One bounded tool round: the reader can delegate follow-up work,
+        # send an ad-hoc email, or save a fact, then finishes its answer.
         llm_with_tools = self.llm.bind_tools(self.tools) if self.tools else self.llm
         response = await llm_with_tools.ainvoke(messages)
         if not getattr(response, "tool_calls", None):
@@ -509,15 +518,16 @@ class ImageReaderAgent(BaseAgent):
         from langchain_core.messages import ToolMessage
 
         # Cap executions per round: the transcript/screenshot content that
-        # reaches this node is external input, and delegate_task writes to
-        # other agents' boards — an injected "delegate 50 tasks" must not
-        # fan out unbounded.
+        # reaches this node is external input, and these tools act on the
+        # world (tasks on other agents' boards, outbound email, memory
+        # writes) — an injected "delegate 50 tasks" / "send 50 emails" must
+        # not fan out unbounded.
         MAX_TOOL_CALLS = 3
         tool_by_name = {t.name: t for t in self.tools}
         tool_msgs: list[ToolMessage] = []
         for i, call in enumerate(response.tool_calls):
             if i >= MAX_TOOL_CALLS:
-                result = f"Skipped: at most {MAX_TOOL_CALLS} delegations per message."
+                result = f"Skipped: at most {MAX_TOOL_CALLS} tool actions per message."
             else:
                 impl = tool_by_name.get(call["name"])
                 if impl is None:
@@ -544,20 +554,22 @@ class ImageReaderAgent(BaseAgent):
         # report after every later turn in the same thread.
         last = state["messages"][-1] if state["messages"] else None
         if isinstance(last, AIMessage) and last.content:
-            return {"messages": [AIMessage(content=last.content)]}
-
-        analysis = state.get("analysis")
-        if analysis:
+            content = last.content
+        elif state.get("analysis"):
             # Fresh analyze_image path (its nodes emit no AIMessage — the
             # last message is still the user's). Render the structured
             # analysis as Markdown; same render as the Storage export.
-            return {"messages": [AIMessage(content=self._render_report(state, analysis))]}
-
-        last_ai = next(
-            (m for m in reversed(state["messages"]) if isinstance(m, AIMessage) and m.content),
-            None,
-        )
-        content = (last_ai.content if last_ai else "") or "Done."
+            content = self._render_report(state, state["analysis"])
+        else:
+            last_ai = next(
+                (m for m in reversed(state["messages"]) if isinstance(m, AIMessage) and m.content),
+                None,
+            )
+            content = (last_ai.content if last_ai else "") or "Done."
+        # Persist a concise turn summary to long-term memory (truncated —
+        # a full analysis report doesn't belong in one memory row). Explicit
+        # remember_fact saves already happened in their tool call.
+        await self._persist_turn_memory(state, takeaway=str(content)[:2000])
         return {"messages": [AIMessage(content=content)]}
 
 

@@ -5,15 +5,25 @@
   "version": "0.2.0",
   "icon": "scan-eye",
   "tagline": "Reads your screenshots, hears your voice notes, briefs the team.",
-  "capabilities": ["vision", "ocr", "analysis", "trend-analysis", "research-reports", "transcription", "delegation"],
+  "capabilities": ["vision", "ocr", "analysis", "trend-analysis", "research-reports", "transcription", "delegation", "email-sending", "long-term-memory"],
   "required_integrations": [],
   "optional_integrations": ["slack"],
-  "tools": ["delegate_task"],
+  "tools": ["delegate_task", "send_email", "remember_fact"],
   "interrupt_before": [],
   "writes": [
     {
       "tool": "delegate_task",
       "description": "Creates a workspace task assigned to another agent (the reader's middle-man role). Internal task board only — nothing external is sent.",
+      "requires_approval": false
+    },
+    {
+      "tool": "send_email",
+      "description": "Sends an ad-hoc plain-text email via Resend from the workspace's own address, only when the creator asks, with exactly the content and recipients they gave (CC supported). Capped at 10 recipients and 3 tool actions per message.",
+      "requires_approval": false
+    },
+    {
+      "tool": "remember_fact",
+      "description": "Saves an explicitly-stated fact to the workspace's long-term memory (agent_memory). Confirms exactly what was saved, or reports precisely why it couldn't be — it never claims a save it didn't make.",
       "requires_approval": false
     }
   ],

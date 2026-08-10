@@ -33,6 +33,10 @@ Everything below happens in tools you already use: **Slack, Monday, and Dropbox.
 
 **Talk instead of type — anywhere.** DM the bot or post in any team channel from your phone or watch. **Voice memos work**: speak it, and the system handles it exactly as if you'd typed it. Post-gym, on the boat, on the treadmill.
 
+**Email straight from chat.** Work on something with the bot, then: *"send this to hunter@—.com and CC me."* Any address works — no address book needed — and CC is supported. You get back a confirmation naming exactly who it went to; if something can't send, it tells you precisely why (never a vague field error).
+
+**Say "remember this."** *"Remember that the sponsor call moved to Tuesday"* — it saves the fact to long-term memory and repeats back exactly what it stored. Future conversations recall it automatically. If a save ever can't happen, it says so plainly — it will never claim it saved something it didn't.
+
 **Send screenshots to the Image Reader.** Analytics, a competitor's channel page, a news article, a bill or lawsuit, your fish-tracking data — drop the screenshot in Slack and you get back the numbers extracted, the trends judged (real momentum vs. noise), where you stand against competitors, and recommended moves. Every read is filed; ask for **"the 30-day report"** (or 60) anytime and it compiles everything into a research document with a PDF you can quote in videos or send to your email list.
 
 **Steer the b-roll machine weekly.** Once a week (or whenever), tell the B-Roll channel: *"This week's direction: …themes, tone, stories…"* Every day after that, a fresh batch of original AI clips lands in Dropbox at **/B-Roll/(date)/(topic)/**, organized and ready to cut into videos. **You set the volume** — "make it 10 a day", "scale to 100" — and you can ask for clips on demand anytime: *"draft 4 clips on the debate, dark and cinematic."* If a batch comes out too dark or the wrong vibe, just say so in chat with the new direction — regenerating is a sentence, not a process.

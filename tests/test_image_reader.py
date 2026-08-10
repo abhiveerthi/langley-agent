@@ -51,9 +51,19 @@ class TestAgentInterface:
         assert ImageReaderAgent().interrupt_before_nodes == []
 
     def test_tools_roster(self):
-        # Vision is native and transcription is a node; the one LLM tool is
-        # the middle-man delegation to other agents.
-        assert {t.name for t in get_image_reader_tools()} == {"delegate_task"}
+        # Vision is native and transcription is a node; the LLM toolbelt is
+        # the DM front door's action set: delegation, ad-hoc email, and
+        # explicit memory saves.
+        assert {t.name for t in get_image_reader_tools()} == {
+            "delegate_task", "send_email", "remember_fact",
+        }
+
+    def test_front_door_remembers(self):
+        # The DM front door keeps long-term memory: auto-recall node wired
+        # in, turn summaries persisted, explicit remember_fact on top.
+        agent = ImageReaderAgent()
+        assert agent.memory_enabled is True
+        assert "load_memory" in agent.graph.nodes
 
 
 # ── Manifest truth ─────────────────────────────────────────────────────────
@@ -241,3 +251,132 @@ class TestTranscription:
         import packages.agents.core.transcription  # noqa: F401
 
         assert "faster_whisper" not in sys.modules
+
+
+# ── Front-door tools: send_email + remember_fact ───────────────────────────
+class TestParseAddressList:
+    def test_plain_and_separators(self):
+        from packages.agents.image_reader.tools import parse_address_list
+
+        valid, invalid = parse_address_list("a@x.com, b@y.org and c@z.io")
+        assert valid == ["a@x.com", "b@y.org", "c@z.io"]
+        assert invalid == []
+
+    def test_slack_mailto_markup_unwrapped(self):
+        # Slack rewrites typed addresses to link markup before the event
+        # reaches us — the old system passed this through and SMTP died.
+        from packages.agents.image_reader.tools import parse_address_list
+
+        valid, invalid = parse_address_list("<mailto:kaydi@x.com|kaydi@x.com>")
+        assert valid == ["kaydi@x.com"]
+        assert invalid == []
+
+    def test_invalid_named_and_deduped(self):
+        from packages.agents.image_reader.tools import parse_address_list
+
+        valid, invalid = parse_address_list("braden, a@x.com, a@x.com")
+        assert valid == ["a@x.com"]
+        assert invalid == ["braden"]
+
+
+class TestSendEmailTool:
+    async def test_invalid_address_is_named(self):
+        from packages.agents.image_reader.tools import send_email
+
+        reply = await send_email.ainvoke(
+            {"to": "not-an-address", "subject": "s", "body": "b"}
+        )
+        assert "Not sent" in reply and "not-an-address" in reply
+
+    async def test_empty_body_refused(self):
+        from packages.agents.image_reader.tools import send_email
+
+        reply = await send_email.ainvoke(
+            {"to": "a@x.com", "subject": "s", "body": "   "}
+        )
+        assert "Not sent" in reply and "body is empty" in reply
+
+    async def test_unconfigured_is_honest(self):
+        # conftest scrubs RESEND_API_KEY/EMAIL_FROM — the tool must say the
+        # feature isn't configured, never a vague field error.
+        from packages.agents.image_reader.tools import send_email
+
+        reply = await send_email.ainvoke(
+            {"to": "a@x.com", "subject": "s", "body": "hello"}
+        )
+        assert "Not sent" in reply and "RESEND_API_KEY" in reply
+
+    async def test_success_confirms_recipients_and_cc(self, monkeypatch):
+        from packages.integrations import resend
+        from packages.agents.image_reader.tools import send_email
+
+        sent = {}
+
+        async def fake_send(*, to, subject, text, cc=None):
+            sent.update({"to": to, "subject": subject, "text": text, "cc": cc})
+            return "msg_1"
+
+        monkeypatch.setattr(resend, "is_configured", lambda: True)
+        monkeypatch.setattr(resend, "send_email", fake_send)
+        reply = await send_email.ainvoke({
+            "to": "contractor@x.com",
+            "subject": "Range plan",
+            "body": "Full doc text",
+            "cc": "<mailto:braden@y.com|braden@y.com>",
+        })
+        assert sent["to"] == ["contractor@x.com"]
+        assert sent["cc"] == ["braden@y.com"]
+        assert sent["text"] == "Full doc text"
+        assert "Sent to contractor@x.com" in reply
+        assert "cc: braden@y.com" in reply
+
+    async def test_provider_rejection_surfaces(self, monkeypatch):
+        from packages.integrations import resend
+        from packages.agents.image_reader.tools import send_email
+
+        async def fake_send(**_k):
+            raise resend.ResendError("resend 422: domain not verified")
+
+        monkeypatch.setattr(resend, "is_configured", lambda: True)
+        monkeypatch.setattr(resend, "send_email", fake_send)
+        reply = await send_email.ainvoke(
+            {"to": "a@x.com", "subject": "s", "body": "hello"}
+        )
+        assert "Not sent" in reply and "domain not verified" in reply
+
+
+class TestRememberFactTool:
+    async def test_empty_fact_is_instructive(self):
+        # The old system's exact failure was a dead-end red X here; the
+        # reply must instead coach the model/user to restate the fact.
+        from packages.agents.image_reader.tools import remember_fact
+
+        reply = await remember_fact.ainvoke({"fact": "   "})
+        assert "Nothing was saved" in reply and "Restate" in reply
+
+    async def test_failure_reason_surfaced(self, monkeypatch):
+        import packages.agents.core.memory as memory
+        from packages.agents.image_reader.tools import remember_fact
+
+        async def fake_save(*_a, **_k):
+            return "the memory backend isn't configured yet (needs OPENAI_API_KEY for embeddings)"
+
+        monkeypatch.setattr(memory, "save_fact", fake_save)
+        reply = await remember_fact.ainvoke({"fact": "Ammo sponsor call is Tuesday"})
+        assert reply.startswith("Not saved") and "OPENAI_API_KEY" in reply
+
+    async def test_success_echoes_fact(self, monkeypatch):
+        import packages.agents.core.memory as memory
+        from packages.agents.image_reader.tools import remember_fact
+
+        saved = {}
+
+        async def fake_save(org_id, agent_slug, thread_id, content, metadata=None):
+            saved.update({"slug": agent_slug, "content": content, "metadata": metadata})
+            return None
+
+        monkeypatch.setattr(memory, "save_fact", fake_save)
+        reply = await remember_fact.ainvoke({"fact": "The archive lives in Dropbox"})
+        assert saved["slug"] == "image-reader"
+        assert saved["metadata"] == {"source": "remember_fact"}
+        assert reply.startswith("Saved to memory") and "The archive lives in Dropbox" in reply

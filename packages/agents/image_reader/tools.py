@@ -1,13 +1,23 @@
 """
 Image Reader tools + research-report helpers.
 
-`get_image_reader_tools()` now registers ONE LLM-callable tool:
+The Image Reader doubles as the Slack DM FRONT DOOR (slack_runner routes
+every bot DM here), so its toolbelt is the creator's everything-drawer.
+`get_image_reader_tools()` registers three LLM-callable tools:
 
   delegate_task — the "middle man" role from the product spec: after
       reading an image or hearing a voice note, the Image Reader can hand
       follow-up work to any other agent in the suite (a task lands on the
       workspace board attributed to that agent). Read-only analysis stays
       instant; the delegation is a lightweight task write, not an agent run.
+  send_email — ad-hoc email to ANY address with optional CC, via Resend
+      from the workspace's own sending address ("send this to my
+      contractor, CC me"). Plain text, sent verbatim. Old-system parity:
+      this exact request failed there; every failure path here says
+      precisely why instead of a vague field error.
+  remember_fact — explicit "remember this" into agent_memory, backed by
+      core.memory.save_fact which REPORTS the outcome. It never claims a
+      save it didn't make (the old system's red-X bug).
 
 The report-window helpers back the `compile_report` intent ("accumulate
 daily data, then generate a detailed report for a 30–60 day window"):
@@ -84,8 +94,129 @@ async def delegate_task(agent_slug: str, instruction: str) -> str:
     return "Couldn't create the task (no workspace context) — noted, but nothing was filed."
 
 
+# ── Front-door action tools (send_email / remember_fact) ───────────────────
+
+# Deliberately permissive shape check — the mail provider is the real
+# validator; this only catches obvious non-addresses so the reply can name
+# them instead of a provider 4xx.
+_EMAIL_RE = re.compile(r"^[^@\s<>|]+@[^@\s<>|]+\.[^@\s<>|]+$")
+# Slack wraps typed addresses in link markup before the event reaches us:
+# "email a@b.com" arrives as "email <mailto:a@b.com|a@b.com>". Unwrap it —
+# the old system passed the markup through to SMTP and external sends died.
+_MAILTO_RE = re.compile(r"^<mailto:([^|>]+)(?:\|[^>]*)?>$", re.IGNORECASE)
+
+MAX_EMAIL_RECIPIENTS = 10
+
+
+def _normalize_address(raw: str) -> str:
+    s = (raw or "").strip().strip(",;").strip()
+    m = _MAILTO_RE.match(s)
+    if m:
+        s = m.group(1).strip()
+    if s.startswith("<") and s.endswith(">"):
+        s = s[1:-1].strip()
+    return s
+
+
+def parse_address_list(raw: str) -> tuple[list[str], list[str]]:
+    """Split a free-form recipient string into (valid, invalid) addresses.
+
+    Tolerates commas/semicolons/whitespace/'and' as separators and Slack
+    mailto markup around each address. Deduplicates, order-preserving.
+    """
+    valid: list[str] = []
+    invalid: list[str] = []
+    for part in re.split(r"[,;\s]+", raw or ""):
+        if not part or part.lower() == "and":
+            continue
+        addr = _normalize_address(part)
+        if not addr:
+            continue
+        bucket = valid if _EMAIL_RE.match(addr) else invalid
+        if addr not in bucket:
+            bucket.append(addr)
+    return valid, invalid
+
+
+@tool
+async def send_email(to: str, subject: str, body: str, cc: str = "") -> str:
+    """Send an email on the creator's behalf to any address — a drafted
+    document, a summary, a follow-up. `to` and `cc` take one or more email
+    addresses (comma-separated); `cc` is optional. The body is sent as plain
+    text EXACTLY as given, so put the full content the creator wants sent in
+    `body` — never a placeholder or summary of it. Returns a confirmation
+    naming every recipient, or the precise reason nothing was sent."""
+    from packages.integrations import resend
+
+    to_valid, to_invalid = parse_address_list(to)
+    cc_valid, cc_invalid = parse_address_list(cc)
+    bad = to_invalid + cc_invalid
+    if bad:
+        return (
+            "Not sent — these don't look like valid email addresses: "
+            + ", ".join(bad)
+            + ". Give me the exact address(es) and I'll send it right away."
+        )
+    if not to_valid:
+        return "Not sent — I need at least one recipient address in `to`."
+    if len(to_valid) + len(cc_valid) > MAX_EMAIL_RECIPIENTS:
+        return (
+            f"Not sent — {len(to_valid) + len(cc_valid)} recipients is over the "
+            f"safety cap of {MAX_EMAIL_RECIPIENTS}. Split it into smaller sends."
+        )
+    if not (body or "").strip():
+        return "Not sent — the email body is empty. Tell me what to send."
+    if not resend.is_configured():
+        return (
+            "Not sent — email isn't configured yet (RESEND_API_KEY / EMAIL_FROM "
+            "aren't set). The moment they are, I can send this."
+        )
+
+    subject = (subject or "").strip() or "Message from your AI team"
+    try:
+        await resend.send_email(
+            to=to_valid, subject=subject, text=body, cc=cc_valid or None
+        )
+    except resend.ResendError as e:
+        return f"Not sent — the email service rejected it: {e}"
+
+    confirmation = f"Sent to {', '.join(to_valid)}"
+    if cc_valid:
+        confirmation += f" (cc: {', '.join(cc_valid)})"
+    return confirmation + f" — subject: “{subject}”."
+
+
+@tool
+async def remember_fact(fact: str) -> str:
+    """Save a fact to the team's long-term memory so future conversations
+    recall it — use whenever the creator says "remember this", "save that",
+    or shares something worth keeping. Pass the COMPLETE fact as one
+    self-contained statement (restate it from the conversation yourself —
+    never call this with an empty or vague `fact`). Returns confirmation of
+    exactly what was saved, or the reason it couldn't be."""
+    from packages.agents.core.memory import save_fact
+
+    text = (fact or "").strip()
+    if not text:
+        return (
+            "Nothing was saved — I need the fact spelled out. Restate it in a "
+            "sentence or two and I'll store it."
+        )
+    reason = await save_fact(
+        current_org_id.get(),
+        "image-reader",
+        None,
+        text,
+        metadata={"source": "remember_fact"},
+    )
+    if reason:
+        return f"Not saved — {reason}."
+    preview = text if len(text) <= 140 else text[:137] + "…"
+    return f"Saved to memory: “{preview}”"
+
+
 def get_image_reader_tools():
-    return [delegate_task]
+    return [delegate_task, send_email, remember_fact]
 
 
 # ── Research-report archive helpers (compile_report intent) ────────────────

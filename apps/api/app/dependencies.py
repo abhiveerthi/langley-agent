@@ -232,12 +232,21 @@ def _provision_personal_workspace(supabase: Client, user) -> dict:
     # these rows, @mention autocomplete returns empty, mention parsing
     # drops `@strategist`, and channel dispatch posts "isn't registered
     # for this workspace" (see channel_dispatch._resolve_agent_id).
+    # ignore_duplicates=True → ON CONFLICT DO NOTHING: `active` is LIVE
+    # STATE (the Content Agent's dark-launch go-live is flipping it true);
+    # a default DO-UPDATE upsert here would silently reset it to the seed
+    # value if provisioning ever re-runs for an existing org. Metadata
+    # refresh for existing rows is migrations' job, not this hook's.
     # Late import to keep the dependency graph one-way (apps → packages).
     from packages.agents.registry import default_agent_seeds
 
     (
         supabase.table("agents")
-        .upsert(default_agent_seeds(org_row["id"]), on_conflict="org_id,slug")
+        .upsert(
+            default_agent_seeds(org_row["id"]),
+            on_conflict="org_id,slug",
+            ignore_duplicates=True,
+        )
         .execute()
     )
 
