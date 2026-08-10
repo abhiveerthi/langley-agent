@@ -8,6 +8,11 @@ Everything below happens in tools you already use: **Slack, Monday, and Dropbox.
 
 ## The daily rhythm
 
+> **Status:** this content pipeline is fully built and sitting ready, but
+> **switched off until Braden says go** (per the Aug 6 call — podcast plans are
+> on hold while the PR strategy comes together). Turning it on is a switch
+> flip, not a project. Everything below describes how it runs once live.
+
 **8 PM — you go live.** That's it. That's your whole job in the pipeline.
 
 **Overnight — the system works.** When the stream (or any upload) lands on the channel, it's detected automatically:
@@ -20,7 +25,7 @@ Everything below happens in tools you already use: **Slack, Monday, and Dropbox.
 
 **Braden's one flip.** Each video drop has a single **[FINAL] Publish drop** item. When Kaydi's pass looks good, flip it to **Approved** — that *is* the publish button. Everything Kaydi approved goes out: clips to YouTube Shorts (and Instagram once connected), the announcement to X. Changed your mind? Flip it to **Rejected** and nothing ships.
 
-**The podcast — you stay in control.** The finished episode is *not* auto-published. It's packaged into Dropbox at **/Podcast/(date)/** — the audio file plus a show-notes file with the title, description, and chapters ready to paste. Upload to Podbean whenever you want, exactly as you asked.
+**The podcast — you stay in control.** The podcast lane has its own switch and stays **paused until your podcast strategy is set** — flip it on and the finished episode is packaged (never auto-published) into Dropbox at **/Podcast/(date)/**: the audio file plus a show-notes file with the title, description, and chapters ready to paste. Upload to Podbean whenever you want, exactly as you asked.
 
 ---
 
@@ -30,7 +35,7 @@ Everything below happens in tools you already use: **Slack, Monday, and Dropbox.
 
 **Send screenshots to the Image Reader.** Analytics, a competitor's channel page, a news article, a bill or lawsuit, your fish-tracking data — drop the screenshot in Slack and you get back the numbers extracted, the trends judged (real momentum vs. noise), where you stand against competitors, and recommended moves. Every read is filed; ask for **"the 30-day report"** (or 60) anytime and it compiles everything into a research document with a PDF you can quote in videos or send to your email list.
 
-**Steer the b-roll machine weekly.** Once a week (or whenever), tell the B-Roll channel: *"This week's direction: …themes, tone, stories…"* Every day after that, ~100 original AI clips land in Dropbox at **/B-Roll/(date)/(topic)/**, organized and ready to cut into videos. If a batch comes out too dark or the wrong vibe, just say so in chat with the new direction — regenerating is a sentence, not a process.
+**Steer the b-roll machine weekly.** Once a week (or whenever), tell the B-Roll channel: *"This week's direction: …themes, tone, stories…"* Every day after that, a fresh batch of original AI clips lands in Dropbox at **/B-Roll/(date)/(topic)/**, organized and ready to cut into videos. **You set the volume** — "make it 10 a day", "scale to 100" — and you can ask for clips on demand anytime: *"draft 4 clips on the debate, dark and cinematic."* If a batch comes out too dark or the wrong vibe, just say so in chat with the new direction — regenerating is a sentence, not a process.
 
 **If something breaks, you'll know.** Any outage (Higgsfield, Opus, etc.) pings **you** directly in Slack — not Kaydi — so you can fix or flag it from your phone.
 

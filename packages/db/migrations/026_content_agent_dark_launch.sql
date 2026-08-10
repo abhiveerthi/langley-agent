@@ -1,0 +1,12 @@
+-- Content Agent goes dark-launch (2026-08-06 client call).
+--
+-- Braden's direction: "build Agent 5, don't plug it in" — podcast strategy
+-- is paused pending his PR consultant, Opus stays manual with Kaydi, so the
+-- automated upload→pipeline dispatch must not fire yet. 023 originally
+-- seeded the agent active; this flips any already-seeded rows off so every
+-- environment matches the new default (023 itself now seeds inactive for
+-- fresh databases).
+--
+-- Turning the agent ON later is a per-org data change, not a migration:
+--   update agents set active = true where slug = 'content' and org_id = ...;
+update agents set active = false where slug = 'content' and is_system;

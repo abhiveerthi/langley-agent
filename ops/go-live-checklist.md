@@ -81,13 +81,21 @@ Podbean manually (`podcast_publish_mode` defaults to `manual`).
 
 ## 5. Per-org enablement (in-app, once the org exists)
 
-- [ ] Content Agent config → `escalation_slack_channel_id` = Braden's Slack
-      channel ID (failure alerts go to him, not Kaydi).
-- [ ] Content Agent config → `podcast_brand` = "Positively American with Braden
-      Langley".
+- [ ] **Content Agent (Agent #5) ships DARK — leave it off at launch.** Per the
+      8/6 client call ("build it, don't plug it in"): the agent seeds with
+      `agents.active = false`, so the upload poller never dispatches it. When
+      Braden gives the word, flipping the org's `agents.active` row to true is
+      the entire go-live — no deploy. At that point also set:
+      - `escalation_slack_channel_id` = Braden's Slack channel (failure alerts
+        go to him, not Kaydi).
+      - `podcast_brand` = "Positively American with Braden Langley".
+      - `podcast_enabled = true` **only when the podcast strategy is settled**
+        (paused pending his PR consultant) — until then even the nightly live
+        stream routes to clips only.
 - [ ] B-Roll config → `daily_production_enabled = true` **and** a
       `weekly_direction` — the sweep skips any org missing either (no direction =
-      no spend, by design). Optionally set `daily_clip_target` (default 100).
+      no spend, by design). `daily_clip_target` defaults to **20**; Braden
+      scales it on request ("create 10 / 20 / 100 clips") up to the 150 cap.
 - [ ] Connect the org's integrations in-app: YouTube, Slack, Monday, Dropbox, X.
 
 ## 6. Smoke test (before telling the client it's live)
@@ -96,8 +104,10 @@ Podbean manually (`podcast_publish_mode` defaults to `manual`).
 - [ ] Post in a Slack agent channel → get a reply. DM the bot → get a reply.
 - [ ] Drop a screenshot in Slack → Image Reader analyzes it.
 - [ ] Send a voice memo → transcribed and answered.
-- [ ] Manually trigger a Content run on a test video → items appear on the Monday
-      board **with playable media links**; flip the FINAL item → publish fan-out
-      runs (targets that have keys publish; others record "skipped").
+- [ ] Manually trigger a Content run on a test video (works even while the
+      agent is dark — only the automatic upload dispatch is gated) → items
+      appear on the Monday board **with playable media links**; flip the FINAL
+      item → publish fan-out runs (targets that have keys publish; others
+      record "skipped").
 - [ ] Confirm a b-roll batch lands in Dropbox (needs Higgsfield + Dropbox).
 - [ ] Hand Mike `docs/client-guide-langley.md` for Braden & Kaydi.

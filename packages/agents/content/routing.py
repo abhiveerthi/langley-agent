@@ -14,6 +14,11 @@ Pure decision logic (unit-tested, no I/O) implementing the client's rules:
 init_pipeline via youtube.get_video_details. When the lookup fails we
 route CONSERVATIVELY (clips yes, podcast no) — a mis-routed podcast is
 worse than a missed one, because the podcast feed is public.
+
+The whole podcast lane additionally sits behind `podcast_enabled`
+(default OFF): per the 2026-08-06 client call, podcast production is
+paused while Braden's PR consultant shapes the strategy. Infrastructure
+stays in place; no episodes are drafted until the flag flips.
 """
 from __future__ import annotations
 
@@ -31,6 +36,16 @@ def podcast_min_seconds(config: dict | None) -> int:
     except (TypeError, ValueError):
         minutes = DEFAULT_PODCAST_MIN_MINUTES
     return int(max(1.0, minutes) * 60)
+
+
+def podcast_lane_enabled(config: dict | None) -> bool:
+    """Master switch for the podcast lane — agents.config `podcast_enabled`.
+
+    Defaults OFF: the client paused podcast production (2026-08-06 call)
+    until his PR consultant sets the strategy. Everything downstream of
+    routing (draft, package, RSS) is built and waiting on this flag.
+    """
+    return bool((config or {}).get("podcast_enabled"))
 
 
 def classify_video(
@@ -66,16 +81,19 @@ def classify_video(
         }
 
     if is_live:
-        eligible = duration_seconds >= threshold
+        long_enough = duration_seconds >= threshold
+        enabled = podcast_lane_enabled(config)
+        if not long_enough:
+            reason = f"live stream under {threshold // 60}min — clips only"
+        elif not enabled:
+            reason = "podcast lane paused (podcast_enabled off) — clips only"
+        else:
+            reason = f"live stream ≥ {threshold // 60}min — podcast + clips"
         return {
             "video_kind": "live",
-            "podcast_eligible": eligible,
+            "podcast_eligible": long_enough and enabled,
             "clips_eligible": True,
-            "reason": (
-                f"live stream ≥ {threshold // 60}min — podcast + clips"
-                if eligible
-                else f"live stream under {threshold // 60}min — clips only"
-            ),
+            "reason": reason,
         }
 
     return {

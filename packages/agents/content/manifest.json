@@ -11,7 +11,7 @@
   "tools": ["get_pipeline_status"],
   "interrupt_before": [],
   "writes": [],
-  "status": "active",
+  "status": "dark-launch",
   "approval_policy": { "approvers": ["reviewer", "owner"] },
   "config_schema": {
     "podcast_brand": {

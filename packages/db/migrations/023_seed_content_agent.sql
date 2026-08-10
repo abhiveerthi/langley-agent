@@ -5,10 +5,11 @@
 -- read. New orgs get the agent from registry.default_agent_seeds() via the
 -- signup hook; this is the one-time backfill for orgs that already exist.
 --
--- Metadata mirrors packages/agents/content/manifest.json. `active = true`:
--- the chat surface (pipeline status, manual runs) is live immediately; the
--- automated stages light up as their integrations are configured, same
--- degrade-gracefully posture as B-Roll's Higgsfield gating.
+-- Metadata mirrors packages/agents/content/manifest.json. `active = false`:
+-- the agent ships DARK per the 2026-08-06 client call ("build it, don't
+-- plug it in") — the upload poller checks this flag before dispatching, so
+-- nothing automated runs until the org's row is flipped to active. That
+-- flip (plus config like podcast_enabled) is the go-live switch.
 --
 -- on conflict (org_id, slug) do nothing keeps this idempotent.
 do $$
@@ -27,7 +28,7 @@ begin
         '["repurposing","clip-generation","podcast-production","auto-publishing"]'::jsonb,
         '["get_pipeline_status"]'::jsonb,
         true,
-        true
+        false
       )
     on conflict (org_id, slug) do nothing;
   end loop;

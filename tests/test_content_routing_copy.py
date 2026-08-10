@@ -41,11 +41,28 @@ class TestRouting:
         ],
     )
     def test_matrix(self, duration_s, is_live, kind, podcast, clips):
-        got = classify_video(duration_seconds=duration_s, is_live=is_live)
+        # podcast_enabled on: the matrix expresses the length/kind rules.
+        got = classify_video(
+            duration_seconds=duration_s, is_live=is_live,
+            config={"podcast_enabled": True},
+        )
         assert got["video_kind"] == kind
         assert got["podcast_eligible"] is podcast
         assert got["clips_eligible"] is clips
         assert got["reason"]
+
+    def test_podcast_lane_paused_by_default(self):
+        # 2026-08-06 client call: podcast production paused until his PR
+        # consultant sets strategy — without podcast_enabled, even the
+        # nightly 55-min live stream must NOT enter the podcast lane.
+        got = classify_video(duration_seconds=55 * 60, is_live=True)
+        assert got["podcast_eligible"] is False
+        assert got["clips_eligible"] is True
+        assert "paused" in got["reason"]
+        got = classify_video(
+            duration_seconds=55 * 60, is_live=True, config={"podcast_enabled": False}
+        )
+        assert got["podcast_eligible"] is False
 
     def test_threshold_configurable(self):
         assert podcast_min_seconds({"podcast_min_minutes": 45}) == 45 * 60

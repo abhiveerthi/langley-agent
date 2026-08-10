@@ -68,7 +68,10 @@ class TestManifest:
 
     def test_basics(self, manifest):
         assert manifest["slug"] == "content"
-        assert manifest["status"] == "active"
+        # dark-launch: fully built, deliberately seeded inactive (2026-08-06
+        # client call — "build it, don't plug it in"). registry seeds
+        # active=false for this status; flipping agents.active is go-live.
+        assert manifest["status"] == "dark-launch"
         assert "youtube" in manifest["required_integrations"]
 
     def test_declares_two_step_approval_chain(self, manifest):

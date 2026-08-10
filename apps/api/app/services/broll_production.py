@@ -9,11 +9,13 @@ interrupt-style prompts from the creator's WEEKLY DIRECTION (agents.config
 config), renders them through Higgsfield, and files every clip into
 Dropbox under /B-Roll/<date>/<topic>/ — no human kickoff.
 
-Volume: `daily_clip_target` (default 100, the product target) drafted in
-LLM batches (~12 prompts each so variety stays high), rendered with
-bounded concurrency. Per-clip failures are counted, never fatal; a mostly-
-failed day escalates to the owner's Slack. A workspace task summarizing
-the batch is filed so the day's output is visible outside Dropbox.
+Volume: `daily_clip_target` (default 20; the client scales it up to ~100+
+per the 2026-08-06 call — "I just want to be able to scale up to that")
+drafted in LLM batches (~12 prompts each so variety stays high), rendered
+with bounded concurrency. Per-clip failures are counted, never fatal; a
+mostly-failed day escalates to the owner's Slack. A workspace task
+summarizing the batch is filed so the day's output is visible outside
+Dropbox.
 
 Once-per-day bookkeeping lives in the scheduled_jobs registry
 (kind='broll_daily_production', one row per org — the table 017 laid down
@@ -32,7 +34,7 @@ log = logging.getLogger("broll_production")
 
 JOB_KIND = "broll_daily_production"
 
-DEFAULT_DAILY_TARGET = 100
+DEFAULT_DAILY_TARGET = 20
 MAX_DAILY_TARGET = 150
 DRAFT_BATCH_SIZE = 12
 GENERATION_CONCURRENCY = 3

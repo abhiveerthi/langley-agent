@@ -64,6 +64,12 @@ def default_agent_seeds(org_id: str) -> list[dict]:
     `status: coming-soon` — that keeps it out of @mention autocomplete
     (which filters `active=true`) while still letting direct dispatch
     invoke its "not yet wired" stub system prompt.
+
+    `status: dark-launch` seeds inactive the same way but means the
+    OPPOSITE build state: fully built, deliberately not switched on. The
+    Content Agent ships dark per the 2026-08-06 client call ("build it,
+    don't plug it in") — flipping the org's agents.active row is the
+    go-live switch; no deploy needed.
     """
     rows: list[dict] = []
     base = Path(__file__).resolve().parent
@@ -80,6 +86,6 @@ def default_agent_seeds(org_id: str) -> list[dict]:
             "capabilities": m.get("capabilities", []),
             "tools": m.get("tools", []),
             "is_system": True,
-            "active": m.get("status") != "coming-soon",
+            "active": m.get("status") not in ("coming-soon", "dark-launch"),
         })
     return rows
