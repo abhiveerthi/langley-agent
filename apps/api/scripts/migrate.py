@@ -37,11 +37,15 @@ def main() -> int:
     #   - dev:        apps/api/scripts/migrate.py → repo-root is parents[3]
     #   - container:  /app/scripts/migrate.py    → /app is parents[1]
     # The Dockerfile copies `packages/` to /app/packages, so the second
-    # form lands at /app/packages/db/migrations.
+    # form lands at /app/packages/db/migrations. Guard each parents[] index:
+    # in the container the path only has TWO ancestors, so an eager
+    # parents[3] raises IndexError before any candidate is checked (this
+    # exact crash failed the first staging pre-deploy).
     here = Path(__file__).resolve()
     candidates = [
-        here.parents[3] / "packages" / "db" / "migrations",  # dev (repo root)
-        here.parents[1] / "packages" / "db" / "migrations",  # container (/app)
+        here.parents[i] / "packages" / "db" / "migrations"
+        for i in (3, 1)
+        if i < len(here.parents)
     ]
     migrations_dir = next((p for p in candidates if p.is_dir()), None)
     if migrations_dir is None:
