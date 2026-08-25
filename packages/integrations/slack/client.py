@@ -140,6 +140,23 @@ async def _slack_get(access_token: str, method: str, params: dict) -> dict:
 
 # ── Posting ────────────────────────────────────────────────────────────────
 
+async def add_reaction(
+    access_token: str, channel: str, message_ts: str, name: str = "eyes"
+) -> None:
+    """Add an emoji reaction to a message (needs the `reactions:write`
+    scope). The instant-ack signal for the phone surface: 👀 lands within
+    ~1s of the user's message, long before the agent's reply. Best-effort —
+    `already_reacted` and a missing scope must never fail a run."""
+    try:
+        await _slack_post(
+            access_token,
+            "reactions.add",
+            {"channel": channel, "timestamp": message_ts, "name": name},
+        )
+    except Exception:
+        pass
+
+
 async def post_message_in_thread(
     access_token: str,
     channel: str,

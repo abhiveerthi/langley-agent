@@ -45,7 +45,8 @@ URL** (`https://<web>/auth/<provider>/callback`):
       config, enable Event Subscriptions → request URL `https://<api>/api/slack/events`,
       subscribe to **`message.groups`** and **`message.im`** (DMs), and add the
       **`im:history`** scope. Without `message.im` + `im:history`, DMs to the bot
-      go nowhere.
+      go nowhere. Also add **`reactions:write`** — the bot 👀-reacts to every
+      message as an instant "heard you" ack (degrades silently without it).
 - [ ] **Monday**: `MONDAY_CLIENT_ID/SECRET`. The review-board webhook
       self-registers on first pipeline run — it just needs `API_URL` publicly
       reachable (it retries every run until it sticks).

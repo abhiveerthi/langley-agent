@@ -429,5 +429,5 @@ class StrategistAgent(BaseAgent):
         # Persist a concise summary of this turn to long-term memory so the
         # next session can build on it. Best-effort — no-ops without Supabase /
         # an embedding backend (see core/memory.py).
-        await self._persist_turn_memory(state, takeaway=content)
+        self._persist_turn_memory_background(state, takeaway=content)
         return {"messages": [AIMessage(content=content)]}

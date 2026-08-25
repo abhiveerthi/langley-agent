@@ -13,7 +13,7 @@
   "writes": [
     {
       "tool": "delegate_task",
-      "description": "Creates a workspace task assigned to another agent (the reader's middle-man role). Internal task board only — nothing external is sent.",
+      "description": "Hands work to another agent (the reader's middle-man role). On Slack the specialist actually runs and replies in the same thread (capped at 3 per message, coalesced per agent); elsewhere it files a workspace task. Approval-gated agents (Publisher, Brand Manager, Community Manager) still pause for human approval; ungated paid work (b-roll rendering) is hard-capped per run.",
       "requires_approval": false
     },
     {

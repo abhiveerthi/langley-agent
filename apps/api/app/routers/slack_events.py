@@ -29,6 +29,37 @@ from packages.integrations.slack.events import verify_signing_secret
 router = APIRouter(tags=["slack-events"])
 log = logging.getLogger(__name__)
 
+# ── Event dedup + dispatch-task tracking ────────────────────────────────────
+# Slack RETRIES any event not acked within 3s — with a fresh, valid
+# signature. Without dedup a slow ack (busy event loop) reruns the whole
+# message: duplicate agent runs, duplicate delegated fan-out, duplicate
+# paid renders. In-memory TTL set is enough for the single-instance
+# deploy (render.yaml pins numInstances: 1).
+_SEEN_EVENT_TTL_SECONDS = 15 * 60
+_SEEN_EVENT_MAX = 4096
+_seen_events: dict[str, float] = {}
+
+# Strong refs to in-flight dispatch tasks — asyncio holds only weak refs,
+# and a GC'd task silently drops the user's message mid-run.
+_dispatch_tasks: set[asyncio.Task] = set()
+
+
+def _already_seen(event_id: str | None) -> bool:
+    """True when this event_id was already dispatched (Slack retry)."""
+    if not event_id:
+        return False  # no id → can't dedupe; dispatch rather than drop
+    import time
+
+    now = time.monotonic()
+    if len(_seen_events) > _SEEN_EVENT_MAX:
+        cutoff = now - _SEEN_EVENT_TTL_SECONDS
+        for k in [k for k, ts in _seen_events.items() if ts < cutoff]:
+            _seen_events.pop(k, None)
+    if event_id in _seen_events:
+        return True
+    _seen_events[event_id] = now
+    return False
+
 
 @router.post("/slack/events")
 async def slack_events(request: Request) -> Response:
@@ -63,8 +94,15 @@ async def slack_events(request: Request) -> Response:
     if not _is_user_message(event):
         return Response(status_code=200)
 
+    # Slack retries un-acked events with valid signatures — ack duplicates
+    # without dispatching so a slow ack can't double-run the message.
+    if _already_seen(body.get("event_id")):
+        return Response(status_code=200)
+
     # Slack times the webhook out at 3s; Publisher runs are slow. Dispatch.
-    asyncio.create_task(_dispatch(body, event))
+    task = asyncio.create_task(_dispatch(body, event))
+    _dispatch_tasks.add(task)
+    task.add_done_callback(_dispatch_tasks.discard)
     return Response(status_code=200)
 
 
@@ -103,10 +141,12 @@ async def _dispatch(body: dict, event: dict) -> None:
 
     # Service-role client: cross-tenant routing, no per-request user. RLS
     # is bypassed; we authorise via the email-match resolver inside the
-    # runner instead.
-    supabase: Any = create_client(
-        settings.supabase_url, settings.supabase_service_key
-    )
+    # runner instead. Reuse the process-wide cached client — constructing
+    # a fresh Client per event builds four sub-clients and their httpx
+    # pools (~100-250ms of pure overhead on every message).
+    from app.dependencies import get_supabase
+
+    supabase: Any = get_supabase(settings)
 
     try:
         await slack_runner.handle_message(

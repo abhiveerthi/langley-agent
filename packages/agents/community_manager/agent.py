@@ -708,5 +708,5 @@ class CommunityManagerAgent(BaseAgent):
 
         # Persist a concise summary of this turn to long-term memory. Best-
         # effort — no-ops without Supabase / an embedding backend.
-        await self._persist_turn_memory(state, takeaway=content)
+        self._persist_turn_memory_background(state, takeaway=content)
         return {"messages": [AIMessage(content=content)]}

@@ -58,6 +58,10 @@ MAX_AUDIO_BYTES = 25 * 1024 * 1024
 # specialist. This is the on-the-go surface (phone/watch DMs to the bot).
 DM_AGENT_SLUG = "image-reader"
 
+# Post one "still working" heartbeat when a run outlives this many seconds
+# (see _run_and_post) — rendering/research jobs legitimately take minutes.
+SLOW_RUN_NOTE_SECONDS = 45
+
 
 def resolve_route(
     chan: dict | None, channel_type: str | None, install: dict | None
@@ -84,6 +88,41 @@ SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 import asyncio as _asyncio
 
 _download_sem = _asyncio.Semaphore(4)
+
+# Fire-and-forget side effects (emoji acks) — strong refs so asyncio can't
+# GC them mid-flight; failures are already swallowed inside the coroutines.
+_side_tasks: set[_asyncio.Task] = set()
+
+
+def _spawn_side_task(coro) -> None:
+    task = _asyncio.create_task(coro)
+    _side_tasks.add(task)
+    task.add_done_callback(_side_tasks.discard)
+
+
+# resolve_marcus_user costs a Slack users.info call + 3 DB queries; the
+# result (org/user for a Slack account) almost never changes. Short TTL
+# cache keyed per (team, user) — in-memory is correct on the pinned
+# single-instance deploy.
+_IDENTITY_TTL_SECONDS = 300.0
+_identity_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+
+
+def _cached_identity(slack_team_id: str, slack_user_id: str) -> dict | None:
+    import time
+
+    hit = _identity_cache.get((slack_team_id, slack_user_id))
+    if hit and (time.monotonic() - hit[0]) < _IDENTITY_TTL_SECONDS:
+        return hit[1]
+    return None
+
+
+def _cache_identity(slack_team_id: str, slack_user_id: str, ident: dict) -> None:
+    import time
+
+    if len(_identity_cache) > 512:
+        _identity_cache.clear()  # tiny cache; wholesale reset is fine
+    _identity_cache[(slack_team_id, slack_user_id)] = (time.monotonic(), ident)
 
 
 async def _bounded_download(bot_token: str, url: str, *, max_bytes: int) -> bytes:
@@ -170,9 +209,13 @@ async def _image_content_blocks(
         "text": text or "Read and analyze the attached screenshot(s).",
     }]
     skipped: list[str] = []
-    attached = 0
+
+    # Validate first, then fetch the survivors CONCURRENTLY (bounded by the
+    # global _download_sem): four multi-MB screenshots downloaded serially
+    # cost up to ~6s of dead time before the vision run can start.
+    eligible: list[tuple[dict, str]] = []
     for f in images:
-        if attached >= MAX_IMAGES_PER_MESSAGE:
+        if len(eligible) >= MAX_IMAGES_PER_MESSAGE:
             skipped.append(f"{f.get('name') or 'image'}: over the {MAX_IMAGES_PER_MESSAGE}-image limit")
             continue
         mimetype = (f.get("mimetype") or "").lower()
@@ -186,19 +229,27 @@ async def _image_content_blocks(
         if not url:
             skipped.append(f"{f.get('name') or 'image'}: no download URL")
             continue
-        try:
-            img_bytes = await _bounded_download(
-                bot_token, url, max_bytes=MAX_IMAGE_BYTES
-            )
-        except Exception as e:
-            skipped.append(f"{f.get('name') or 'image'}: {e}")
+        eligible.append((f, url))
+
+    results = await _asyncio.gather(
+        *(
+            _bounded_download(bot_token, url, max_bytes=MAX_IMAGE_BYTES)
+            for _f, url in eligible
+        ),
+        return_exceptions=True,
+    )
+
+    attached = 0
+    for (f, _url), result in zip(eligible, results):
+        if isinstance(result, BaseException):
+            skipped.append(f"{f.get('name') or 'image'}: {result}")
             continue
         blocks.append({
             "type": "image",
             "source": {
                 "type": "base64",
                 "media_type": f.get("mimetype") or "image/png",
-                "data": base64.b64encode(img_bytes).decode(),
+                "data": base64.b64encode(result).decode(),
             },
         })
         attached += 1
@@ -233,8 +284,17 @@ async def handle_message(
     DMs (`channel_type == "im"`) have no channel mapping and route to the
     Image Reader front door — see resolve_route().
     """
-    chan = _lookup_channel_mapping(supabase, slack_channel_id)
-    install = _lookup_install(supabase, slack_team_id)
+    # DMs have no channel mapping by design — skip the guaranteed-miss
+    # lookup. All sync supabase-py calls run off-loop (to_thread) so bursts
+    # of events can't stall the loop and push webhook acks past Slack's 3s.
+    chan = (
+        None
+        if channel_type == "im"
+        else await _asyncio.to_thread(
+            _lookup_channel_mapping, supabase, slack_channel_id
+        )
+    )
+    install = await _asyncio.to_thread(_lookup_install, supabase, slack_team_id)
     if install is None:
         # Workspace's Slack install was deleted; nothing to do.
         return
@@ -246,6 +306,12 @@ async def handle_message(
     org_id, agent_slug = route
     bot_token = install["access_token"]
     persona = persona_for(agent_slug, install.get("scopes") or [])
+
+    # Instant ack for the phone surface: 👀 lands ~1s after the message,
+    # long before the run finishes. Best-effort (needs reactions:write).
+    _spawn_side_task(
+        slack_client.add_reaction(bot_token, slack_channel_id, slack_message_ts)
+    )
 
     images, audios = _split_files(files or [])
     voice_prefix = ""
@@ -320,12 +386,19 @@ async def handle_message(
         )
         return
 
-    ident = await resolve_marcus_user(
-        supabase=supabase,
-        slack_team_id=slack_team_id,
-        slack_user_id=slack_user_id,
-        slack_bot_token=bot_token,
-    )
+    ident = _cached_identity(slack_team_id, slack_user_id)
+    if ident is None:
+        ident = await resolve_marcus_user(
+            supabase=supabase,
+            slack_team_id=slack_team_id,
+            slack_user_id=slack_user_id,
+            slack_bot_token=bot_token,
+            # The install lookup above already resolved the org — skip the
+            # resolver's duplicate integrations query.
+            known_org_id=org_id,
+        )
+        if ident is not None:
+            _cache_identity(slack_team_id, slack_user_id, ident)
     if ident is None:
         await slack_client.post_message_in_thread(
             bot_token,
@@ -339,7 +412,8 @@ async def handle_message(
     # Top-level Slack message → root_ts is the user's own ts.
     # Reply in an existing Slack thread → root_ts is the parent's thread_ts.
     root_ts = slack_thread_ts or slack_message_ts
-    marcus_thread_id = _resolve_marcus_thread(
+    marcus_thread_id = await _asyncio.to_thread(
+        _resolve_marcus_thread,
         supabase,
         org_id=org_id,
         agent_slug=agent_slug,
@@ -348,7 +422,8 @@ async def handle_message(
         slack_thread_root_ts=root_ts,
     )
 
-    _ensure_thread(
+    await _asyncio.to_thread(
+        _ensure_thread,
         supabase,
         thread_id=marcus_thread_id,
         org_id=org_id,
@@ -356,7 +431,8 @@ async def handle_message(
         title=f"#backroom-{agent_slug} (Slack)",
     )
 
-    _insert_message(
+    await _asyncio.to_thread(
+        _insert_message,
         supabase,
         thread_id=marcus_thread_id,
         role="user",
@@ -371,28 +447,106 @@ async def handle_message(
         },
     )
 
-    stream = with_tool_context(
-        stream_new_run(
-            agent_slug=agent_slug,
-            message=text,
-            thread_id=marcus_thread_id,
+    # Arm the delegation collector: if this run's agent calls delegate_task
+    # (the DM front door's middle-man move), the delegations queue up here
+    # and are dispatched AFTER the agent's own reply posts — so the thread
+    # reads user → front door ("handing to broll…") → specialist's answer.
+    from packages.agents.core.delegation import (
+        activate_collector,
+        deactivate_collector,
+    )
+
+    delegations, delegation_token = activate_collector()
+    try:
+        stream = with_tool_context(
+            stream_new_run(
+                agent_slug=agent_slug,
+                message=text,
+                thread_id=marcus_thread_id,
+                org_id=org_id,
+                user_id=ident["user_id"],
+                extra_state=extra_state,
+            ),
             org_id=org_id,
             user_id=ident["user_id"],
-            extra_state=extra_state,
-        ),
-        org_id=org_id,
-        user_id=ident["user_id"],
-        supabase=supabase,
-    )
-    await _run_and_post(
-        stream=stream,
-        supabase=supabase,
-        bot_token=bot_token,
-        slack_channel_id=slack_channel_id,
-        root_ts=root_ts,
-        persona=persona,
-        marcus_thread_id=marcus_thread_id,
-    )
+            supabase=supabase,
+        )
+        await _run_and_post(
+            stream=stream,
+            supabase=supabase,
+            bot_token=bot_token,
+            slack_channel_id=slack_channel_id,
+            root_ts=root_ts,
+            persona=persona,
+            marcus_thread_id=marcus_thread_id,
+        )
+    finally:
+        # Dispatch INSIDE the finally: delegations were queued by a tool
+        # call that DID run, and the model already told the user "it's on
+        # it" — they must dispatch even when posting the front door's own
+        # reply fails (Slack 429/5xx raises out of _run_and_post; review
+        # finding: the queue silently vanished otherwise).
+        deactivate_collector(delegation_token)
+        _dispatch_delegations(
+            delegations,
+            supabase=supabase,
+            org_id=org_id,
+            user_id=ident["user_id"],
+            bot_token=bot_token,
+            scopes=install.get("scopes") or [],
+            slack_team_id=slack_team_id,
+            slack_channel_id=slack_channel_id,
+            root_ts=root_ts,
+        )
+
+
+def _dispatch_delegations(
+    delegations: list[dict],
+    *,
+    supabase: Any,
+    org_id: str,
+    user_id: str,
+    bot_token: str,
+    scopes: list,
+    slack_team_id: str,
+    slack_channel_id: str,
+    root_ts: str,
+) -> None:
+    """Spawn background runs for queued delegations, COALESCED per target
+    agent: two delegations to the same slug in one message would otherwise
+    race `_resolve_marcus_thread` for the same (channel, root_ts, slug) and
+    run one graph concurrently on one checkpointer thread_id — the exact
+    state corruption the per-agent thread keying exists to prevent. One
+    run per slug, instructions merged into a numbered list."""
+    if not delegations:
+        return
+    # Late import: slack_delegation imports this module's helpers at module
+    # level; importing it lazily here keeps the dependency acyclic.
+    from app.services.slack_delegation import spawn_delegated_run
+
+    merged: dict[str, list[str]] = {}
+    for d in delegations:
+        merged.setdefault(d["agent_slug"], []).append(d["instruction"])
+
+    for slug, instructions in merged.items():
+        if len(instructions) == 1:
+            instruction = instructions[0]
+        else:
+            instruction = "Handle each of these:\n" + "\n".join(
+                f"{i + 1}. {inst}" for i, inst in enumerate(instructions)
+            )
+        spawn_delegated_run(
+            supabase=supabase,
+            org_id=org_id,
+            user_id=user_id,
+            bot_token=bot_token,
+            scopes=scopes,
+            slack_team_id=slack_team_id,
+            slack_channel_id=slack_channel_id,
+            root_ts=root_ts,
+            agent_slug=slug,
+            instruction=instruction,
+        )
 
 
 async def handle_resume(
@@ -503,29 +657,51 @@ async def _run_and_post(
     error_msg: str | None = None
     paused: dict | None = None
 
-    async for sse in stream:
-        ev = _parse_sse(sse)
-        if ev is None:
-            continue
-        kind = ev["type"]
-        data = ev.get("data") or {}
-        if kind == "token":
-            content = data.get("content") or ""
-            # The orchestrator emits a `token` event per AIMessage, per
-            # node update (stream_mode="updates"). When the same final
-            # AIMessage is seen by multiple node updates (e.g. the
-            # `agent` and `respond` nodes both surface it), we get the
-            # exact same content back-to-back — which would render in
-            # Slack as the message twice in a row. Dedupe.
-            if content and content != last_token:
-                accumulated.append(content)
-                last_token = content
-        elif kind == "error":
-            error_msg = data.get("message") or "unknown error"
-        elif kind == "waiting_approval":
-            paused = data
-            break  # the run is paused; stop draining
-        # tool_call_*, approval_recorded, done are no-ops here.
+    # Slow-run heartbeat: one "still working" note if the run outlives 45s
+    # — a rendering/research job can take minutes, and a silent DM on a
+    # phone reads as "broken, send it again". Cancelled on any exit.
+    async def _slow_note():
+        try:
+            await _asyncio.sleep(SLOW_RUN_NOTE_SECONDS)
+            await slack_client.post_message_in_thread(
+                bot_token,
+                slack_channel_id,
+                "⏳ Still on it — bigger jobs (rendering, research, "
+                "publishing) can take a few minutes. The result will land "
+                "right here.",
+                thread_ts=root_ts,
+                **persona,
+            )
+        except Exception:
+            pass  # the note is pure best-effort (cancellation just ends it)
+
+    watchdog = _asyncio.create_task(_slow_note())
+    try:
+        async for sse in stream:
+            ev = _parse_sse(sse)
+            if ev is None:
+                continue
+            kind = ev["type"]
+            data = ev.get("data") or {}
+            if kind == "token":
+                content = data.get("content") or ""
+                # The orchestrator emits a `token` event per AIMessage, per
+                # node update (stream_mode="updates"). When the same final
+                # AIMessage is seen by multiple node updates (e.g. the
+                # `agent` and `respond` nodes both surface it), we get the
+                # exact same content back-to-back — which would render in
+                # Slack as the message twice in a row. Dedupe.
+                if content and content != last_token:
+                    accumulated.append(content)
+                    last_token = content
+            elif kind == "error":
+                error_msg = data.get("message") or "unknown error"
+            elif kind == "waiting_approval":
+                paused = data
+                break  # the run is paused; stop draining
+            # tool_call_*, approval_recorded, done are no-ops here.
+    finally:
+        watchdog.cancel()
 
     preamble = "".join(accumulated).strip()
 

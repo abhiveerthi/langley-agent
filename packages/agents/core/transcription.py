@@ -34,8 +34,19 @@ like "the user said nothing" rather than "we couldn't hear them".
 """
 from __future__ import annotations
 
+import functools
 import os
 import tempfile
+
+
+@functools.lru_cache(maxsize=2)
+def _cached_whisper_model(model_name: str, device: str, compute_type: str):
+    """Process-wide faster-whisper model cache. Construction loads a
+    multi-hundred-MB checkpoint (and downloads it on first ever use) —
+    rebuilding per voice note put 1-2s+ on every transcription."""
+    from faster_whisper import WhisperModel  # type: ignore
+
+    return WhisperModel(model_name, device=device, compute_type=compute_type)
 
 
 # Default backend is the free/local one. Override with TRANSCRIPTION_PROVIDER.
@@ -156,12 +167,14 @@ async def _transcribe_local(audio_bytes: bytes, content_type: str | None) -> str
     with tempfile.NamedTemporaryFile(suffix=suffix) as tmp:
         tmp.write(audio_bytes)
         tmp.flush()
-        # WhisperModel construction + transcription are CPU/IO-bound and
-        # blocking. Offload to a thread so we don't stall the event loop.
+        # Transcription is CPU/IO-bound and blocking. Offload to a thread so
+        # we don't stall the event loop; the model itself is cached — a cold
+        # WhisperModel build costs ~1-2s (plus a ~145MB download on the very
+        # first call), all of it user-visible voice-note latency.
         import asyncio
 
         def _run() -> str:
-            model = WhisperModel(model_name, device=device, compute_type=compute_type)
+            model = _cached_whisper_model(model_name, device, compute_type)
             segments, _info = model.transcribe(tmp.name)
             return " ".join(seg.text.strip() for seg in segments).strip()
 
@@ -193,7 +206,7 @@ async def _transcribe_local_segments(
         import asyncio
 
         def _run() -> list[dict]:
-            model = WhisperModel(model_name, device=device, compute_type=compute_type)
+            model = _cached_whisper_model(model_name, device, compute_type)
             segments, _info = model.transcribe(tmp.name)
             return [
                 {"start": float(seg.start), "end": float(seg.end), "text": seg.text.strip()}

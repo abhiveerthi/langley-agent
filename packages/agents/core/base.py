@@ -6,9 +6,15 @@ import json
 import os
 from pathlib import Path
 
+import asyncio
+
 from packages.agents.core.peer_context import load_peer_context
 from packages.agents.core.memory import recall_memories, write_memory
 from packages.integrations.context import current_supabase
+
+# Strong refs to fire-and-forget turn-memory writes (asyncio keeps only
+# weak refs). See BaseAgent._persist_turn_memory_background.
+_memory_tasks: set[asyncio.Task] = set()
 
 
 # Default single-step approval chain. One role labelled "approver" preserves
@@ -217,6 +223,23 @@ class BaseAgent:
             )
         except Exception as e:  # pragma: no cover - belt-and-suspenders
             print(f"[memory] _persist_turn_memory failed: {e!r}", flush=True)
+
+    def _persist_turn_memory_background(
+        self, state: dict, takeaway: str | None = None
+    ) -> None:
+        """Fire-and-forget `_persist_turn_memory` — for respond nodes.
+
+        Awaiting the write inline puts an OpenAI embed + two Supabase
+        round-trips (~0.4-1s) BETWEEN the finished answer and the
+        user-visible reply (Slack posts only after the stream completes).
+        The write is documented best-effort and reads its Supabase handle
+        from a ContextVar the spawned task snapshots at creation, so
+        detaching it is safe; the strong-ref set stops asyncio GC'ing it."""
+        task = asyncio.create_task(
+            self._persist_turn_memory(state, takeaway=takeaway)
+        )
+        _memory_tasks.add(task)
+        task.add_done_callback(_memory_tasks.discard)
 
     def _last_assistant_text_for_memory(self, state: dict) -> str:
         """Latest assistant/AI message text — the fallback turn takeaway."""

@@ -38,6 +38,8 @@ read-only, and generation/Dropbox deposit are creator-initiated.
 """
 from __future__ import annotations
 
+import asyncio
+
 from langgraph.graph import StateGraph, END, START
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
@@ -52,6 +54,13 @@ from packages.agents.broll.tools import (
     get_broll_tools,
 )
 from packages.integrations.context import current_supabase
+
+# Chat-path render limits. The daily production machine has its own target
+# dial + circuit breaker (services/broll_production.py); the CHAT lane —
+# reachable via DM delegation, whose instructions can embed external
+# content — gets a hard per-request cap and the same bounded concurrency.
+MAX_CLIPS_PER_CHAT_RUN = 40
+GENERATION_CONCURRENCY = 3
 
 
 # ── Structured output schema ──────────────────────────────────────────────
@@ -94,7 +103,7 @@ class BRollPlan(BaseModel):
 # ── Extended state ────────────────────────────────────────────────────────
 class BRollState(BaseAgentState):
     """Extends BaseAgentState with intent routing + the structured plan."""
-    intent: str | None        # "draft_broll" | "generate_broll" | "general"
+    intent: str | None        # draft_broll | generate_broll | draft_and_generate | set_direction | general
     plan: dict | None          # BRollPlan.model_dump(), surfaced for the frontend
 
 
@@ -152,15 +161,29 @@ class BRollAgent(BaseAgent):
             {
                 "draft_broll": "draft_scripts",
                 "generate_broll": "generate_clips",
+                # One-shot "draft and generate 10 clips": draft lane first,
+                # then persist_script routes on into generate_clips below.
+                "draft_and_generate": "draft_scripts",
                 "set_direction": "set_direction",
                 "general": "general_answer",
             },
         )
         graph.add_edge("set_direction", "respond")
 
-        # Drafting path: write the plan, file it, reply.
+        # Drafting path: write the plan, file it, reply — unless the user
+        # asked for draft AND render in one message, in which case the
+        # freshly-drafted plan flows straight into generation (previously
+        # "draft and generate 10 clips" silently stopped after the draft).
         graph.add_edge("draft_scripts", "persist_script")
-        graph.add_edge("persist_script", "respond")
+        graph.add_conditional_edges(
+            "persist_script",
+            lambda s: (
+                "generate_clips"
+                if (s.get("intent") or "").lower() == "draft_and_generate"
+                else "respond"
+            ),
+            {"generate_clips": "generate_clips", "respond": "respond"},
+        )
         # Generation path: render the clips, deposit to Dropbox, reply.
         graph.add_edge("generate_clips", "organize_dropbox")
         graph.add_edge("organize_dropbox", "respond")
@@ -205,7 +228,7 @@ class BRollAgent(BaseAgent):
     # ── Routers ────────────────────────────────────────────────────────────
     def _route_by_intent(self, state: BRollState) -> str:
         intent = (state.get("intent") or "general").lower()
-        if intent not in {"draft_broll", "generate_broll", "set_direction", "general"}:
+        if intent not in {"draft_broll", "generate_broll", "draft_and_generate", "set_direction", "general"}:
             return "general"
         return intent
 
@@ -229,7 +252,7 @@ class BRollAgent(BaseAgent):
             HumanMessage(content=self._last_user_text(state)),
         ])
         raw = response.content.strip().strip("`").lower()
-        intent = raw if raw in {"draft_broll", "generate_broll", "set_direction", "general"} else "general"
+        intent = raw if raw in {"draft_broll", "generate_broll", "draft_and_generate", "set_direction", "general"} else "general"
         return {"intent": intent}
 
     async def _draft_scripts_node(self, state: BRollState):
@@ -324,31 +347,58 @@ class BRollAgent(BaseAgent):
                 ))]
             }
 
-        rendered: list[dict] = []
         errors: list[str] = []
-        for spec in clips_spec:
-            try:
-                clip = await generate_clip(
-                    spec.get("prompt", ""),
-                    aspect_ratio=spec.get("aspect_ratio", "16:9"),
-                    duration_seconds=int(spec.get("duration_seconds", 6)),
-                    download=True,
-                )
-            except HiggsfieldUnavailable as e:
-                # Lost the key mid-batch (or env changed) — stop cleanly.
-                errors.append(str(e))
-                break
-            except HiggsfieldError as e:
-                errors.append(f"{spec.get('prompt', '')[:40]}…: {e}")
-                continue
-            import base64
-            rendered.append({
-                "topic": spec.get("topic", "misc"),
-                "aspect_ratio": clip.aspect_ratio,
-                "duration_seconds": clip.duration_seconds,
-                "url": clip.url,
-                "bytes_b64": base64.b64encode(clip.bytes_).decode() if clip.bytes_ else None,
-            })
+
+        # Hard spend cap per CHAT run: this path is reachable via DM
+        # delegation, and the instruction can embed content from external
+        # input (screenshots, transcripts) — an injected "generate 150
+        # clips" must not burn 150 paid renders. Bigger volumes belong to
+        # the daily production machine (its own target + circuit breaker).
+        if len(clips_spec) > MAX_CLIPS_PER_CHAT_RUN:
+            errors.append(
+                f"Plan had {len(clips_spec)} clips; rendering the first "
+                f"{MAX_CLIPS_PER_CHAT_RUN} (per-request cap — for bigger "
+                f"volumes, raise the daily production target instead)."
+            )
+            clips_spec = clips_spec[:MAX_CLIPS_PER_CHAT_RUN]
+
+        # Bounded-concurrency rendering, mirroring the daily pipeline's
+        # Semaphore(3): sequential renders made a 10-clip ask wait ~10-15
+        # minutes wall-clock for ~60-90s clips. HiggsfieldUnavailable (key
+        # lost mid-batch) flips a flag that stops UNSTARTED clips cleanly.
+        sem = asyncio.Semaphore(GENERATION_CONCURRENCY)
+        unavailable = asyncio.Event()
+
+        async def _render(spec: dict) -> dict | None:
+            async with sem:
+                if unavailable.is_set():
+                    return None
+                try:
+                    clip = await generate_clip(
+                        spec.get("prompt", ""),
+                        aspect_ratio=spec.get("aspect_ratio", "16:9"),
+                        duration_seconds=int(spec.get("duration_seconds", 6)),
+                        download=True,
+                    )
+                except HiggsfieldUnavailable as e:
+                    if not unavailable.is_set():
+                        unavailable.set()
+                        errors.append(str(e))
+                    return None
+                except HiggsfieldError as e:
+                    errors.append(f"{spec.get('prompt', '')[:40]}…: {e}")
+                    return None
+                import base64
+                return {
+                    "topic": spec.get("topic", "misc"),
+                    "aspect_ratio": clip.aspect_ratio,
+                    "duration_seconds": clip.duration_seconds,
+                    "url": clip.url,
+                    "bytes_b64": base64.b64encode(clip.bytes_).decode() if clip.bytes_ else None,
+                }
+
+        results = await asyncio.gather(*(_render(s) for s in clips_spec))
+        rendered = [r for r in results if r is not None]
 
         return {
             "metadata": {
@@ -399,7 +449,15 @@ class BRollAgent(BaseAgent):
                 "didn't go through), so they weren't filed — connect Dropbox to "
                 "auto-organize them by date and topic."
             )
-        return {"messages": [AIMessage(content=msg)]}
+        # Strip the raw video bytes out of state before this super-step is
+        # checkpointed: 10 clips × 3-8MB of base64 would otherwise be
+        # serialized into Postgres and reloaded on EVERY later turn of this
+        # thread. Keep the light fields (url/topic/ratio) for follow-ups.
+        slim = [{k: v for k, v in c.items() if k != "bytes_b64"} for c in rendered]
+        return {
+            "metadata": {**meta, "clips": slim},
+            "messages": [AIMessage(content=msg)],
+        }
 
     async def _set_direction_node(self, state: BRollState):
         """Save the week's creative direction for the automated daily batches.

@@ -33,6 +33,8 @@ Everything below happens in tools you already use: **Slack, Monday, and Dropbox.
 
 **Talk instead of type — anywhere.** DM the bot or post in any team channel from your phone or watch. **Voice memos work**: speak it, and the system handles it exactly as if you'd typed it. Post-gym, on the boat, on the treadmill.
 
+**One DM does everything.** You don't have to find the right channel — ask the bot directly: *"have the b-roll producer draft 10 clips on the debate"* and the specialist itself picks up the job and replies right there in your DM thread. Every specialist also has its own channel if you'd rather go direct.
+
 **Email straight from chat.** Work on something with the bot, then: *"send this to hunter@—.com and CC me."* Any address works — no address book needed — and CC is supported. You get back a confirmation naming exactly who it went to; if something can't send, it tells you precisely why (never a vague field error).
 
 **Say "remember this."** *"Remember that the sponsor call moved to Tuesday"* — it saves the fact to long-term memory and repeats back exactly what it stored. Future conversations recall it automatically. If a save ever can't happen, it says so plainly — it will never claim it saved something it didn't.

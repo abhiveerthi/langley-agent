@@ -28,6 +28,7 @@ async def resolve_marcus_user(
     slack_team_id: str,
     slack_user_id: str,
     slack_bot_token: str,
+    known_org_id: str | None = None,
 ) -> dict | None:
     """Resolve a Slack user to a Marcus (org_id, user_id) pair.
 
@@ -60,19 +61,24 @@ async def resolve_marcus_user(
         return None
     user_id = user_resp.data[0]["id"]
 
-    # Find the org that installed this Slack workspace. integrations.metadata
+    # Find the org that installed this Slack workspace. Callers that already
+    # looked the install up (slack_runner does, two steps earlier) pass
+    # known_org_id and skip this duplicate round-trip. integrations.metadata
     # is jsonb; postgrest's `->>team_id` operator extracts as text.
-    integ_resp = (
-        supabase.table("integrations")
-        .select("org_id, metadata")
-        .eq("provider", "slack")
-        .filter("metadata->>team_id", "eq", slack_team_id)
-        .limit(1)
-        .execute()
-    )
-    if not integ_resp.data:
-        return None
-    org_id = integ_resp.data[0]["org_id"]
+    if known_org_id:
+        org_id = known_org_id
+    else:
+        integ_resp = (
+            supabase.table("integrations")
+            .select("org_id, metadata")
+            .eq("provider", "slack")
+            .filter("metadata->>team_id", "eq", slack_team_id)
+            .limit(1)
+            .execute()
+        )
+        if not integ_resp.data:
+            return None
+        org_id = integ_resp.data[0]["org_id"]
 
     # Confirm the user is a member of that org. If not, the email matched
     # someone in a different workspace and we should NOT route here.

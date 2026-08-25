@@ -138,6 +138,13 @@ class ImageReaderAgent(BaseAgent):
         # and free-form answers. The general lane additionally binds
         # `delegate_task` so the reader can act as the suite's middle man.
         self.llm = ChatAnthropic(model=self.model)
+        # Intent classification picks one of four labels from TEXT — it
+        # needs neither vision nor Sonnet reasoning, and on the DM front
+        # door it sits on every turn's critical path. Haiku with a tight
+        # token cap shaves ~0.7-1.5s off every text/voice message.
+        self.classifier_llm = ChatAnthropic(
+            model="claude-haiku-4-5-20251001", max_tokens=8
+        )
         from packages.agents.image_reader.tools import get_image_reader_tools
 
         self.tools = get_image_reader_tools()
@@ -267,7 +274,7 @@ class ImageReaderAgent(BaseAgent):
         profile = self._profile(state)
         prompt = render("image_reader", "classify.j2", profile=profile)
         # `marcus:silent` keeps the bare-slug classifier response out of chat.
-        response = await self.llm.with_config(tags=["marcus:silent"]).ainvoke([
+        response = await self.classifier_llm.with_config(tags=["marcus:silent"]).ainvoke([
             SystemMessage(content=prompt),
             HumanMessage(content=self._last_user_text(state)),
         ])
@@ -567,9 +574,11 @@ class ImageReaderAgent(BaseAgent):
             )
             content = (last_ai.content if last_ai else "") or "Done."
         # Persist a concise turn summary to long-term memory (truncated —
-        # a full analysis report doesn't belong in one memory row). Explicit
-        # remember_fact saves already happened in their tool call.
-        await self._persist_turn_memory(state, takeaway=str(content)[:2000])
+        # a full analysis report doesn't belong in one memory row) in the
+        # BACKGROUND: awaiting it would hold the user-visible reply hostage
+        # to an embedding round-trip. Explicit remember_fact saves already
+        # happened (and were confirmed) in their tool call.
+        self._persist_turn_memory_background(state, takeaway=str(content)[:2000])
         return {"messages": [AIMessage(content=content)]}
 
 
