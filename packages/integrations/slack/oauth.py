@@ -57,6 +57,12 @@ SLACK_AGENT_CHANNELS: list[tuple[str, str]] = [
     ("publisher", "backroom-publisher"),
     ("brand-manager", "backroom-brand-manager"),
     ("community-manager", "backroom-community-manager"),
+    # Agent #7 — the b-roll direction/draft/generate channel ("this week's
+    # direction: …", "draft 10 clips on X"). Added when the roster was
+    # found stale at the first real workspace connect (Aug 2026).
+    ("broll", "backroom-broll"),
+    # image-reader is deliberately absent: it's the DM front door — every
+    # DM to the bot routes there, and screenshots/voice work in ANY channel.
 ]
 
 
