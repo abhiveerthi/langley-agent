@@ -35,6 +35,15 @@ SLACK_BOT_SCOPES = [
     "users:read",
     "users:read.email",
     "im:write",
+    # DM front door: without im:history, message.im events carry no readable
+    # history context and DMs to the bot go nowhere (see slack_events).
+    "im:history",
+    # Agent #6's Slack surface: screenshots + voice notes are downloaded
+    # from url_private with the bot token — that download 403s without this.
+    "files:read",
+    # The 👀 instant-ack reaction (slack_runner). Degrades silently if the
+    # workspace's install predates this scope.
+    "reactions:write",
 ]
 
 

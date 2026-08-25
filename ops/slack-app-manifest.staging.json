@@ -1,0 +1,49 @@
+{
+  "display_information": {
+    "name": "Backroom Staging",
+    "description": "AI back office for the channel — staging instance",
+    "background_color": "#1a1a2e"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "backroom-staging",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://langley-web-staging.onrender.com/auth/slack/callback"
+    ],
+    "scopes": {
+      "bot": [
+        "chat:write",
+        "chat:write.public",
+        "chat:write.customize",
+        "channels:read",
+        "groups:read",
+        "groups:write",
+        "groups:history",
+        "team:read",
+        "users:read",
+        "users:read.email",
+        "im:write",
+        "im:history",
+        "files:read",
+        "reactions:write"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://langley-api-staging.onrender.com/api/slack/events",
+      "bot_events": ["message.groups", "message.im"]
+    },
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://langley-api-staging.onrender.com/api/slack/interactive"
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
