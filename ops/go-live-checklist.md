@@ -31,7 +31,9 @@ moment its key is in the environment; no redeploy needed for key changes.
       transaction pooler (breaks prepared statements).
 - [ ] `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`
 - [ ] `ANTHROPIC_API_KEY`, `JWT_SECRET`, `ENCRYPTION_KEY`
-- [ ] `API_URL` = this service's public URL · `NEXT_PUBLIC_APP_URL` = the web URL.
+- [ ] `API_URL` = this service's public URL · `APP_URL` = the web URL (this is
+      the var the API's CORS allowlist reads — `NEXT_PUBLIC_*` vars belong to
+      the web service, not the API).
 
 ## 3. OAuth apps (our side — one-time)
 

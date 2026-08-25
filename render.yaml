@@ -50,8 +50,10 @@ services:
         sync: false
       - key: API_URL              # this service's public URL (webhook base)
         sync: false
-      - key: NEXT_PUBLIC_APP_URL   # the web frontend URL (CORS + OAuth redirects)
-        sync: false
+      - key: APP_URL              # the web frontend URL — this is the var the
+        sync: false               # API's CORS allowlist actually reads
+                                  # (config.py `app_url`); NEXT_PUBLIC_APP_URL
+                                  # is a web-service-only variable.
 
       # ── OAuth providers (client id/secret + redirect URIs point at the web app) ──
       - key: GOOGLE_CLIENT_ID
