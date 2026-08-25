@@ -106,5 +106,10 @@ services:
         value: "200"
       - key: CONTENT_CLIP_WAIT_SECONDS
         value: "1800"
-      - key: HIGGSFIELD_T2V_MODEL   # text-to-video model path; verify on the plan before a full batch
-        value: "bytedance/seedance/v1/lite/text-to-video"
+      # Higgsfield has NO text2video on this plan (verified live) — clips
+      # render as a text2image → image2video chain. Slugs must exist in the
+      # account's GET /models roster.
+      - key: HIGGSFIELD_T2I_MODEL
+        value: "higgsfield-ai/soul/v2/standard"
+      - key: HIGGSFIELD_I2V_MODEL
+        value: "higgsfield-ai/dop/lite/first-last-frame"

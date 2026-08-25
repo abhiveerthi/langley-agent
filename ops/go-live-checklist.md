@@ -63,12 +63,16 @@ Each is independent; set it and its feature turns on:
       for Braden's accuracy requirement (~$0.33/day for the episode; local
       Whisper fallback works but is noticeably worse on mobile audio).
 - [ ] `HIGGSFIELD_API_KEY` + `HIGGSFIELD_API_SECRET` — issued as a PAIR
-      (cloud.higgsfield.ai/api-keys); both required. Unlocks the daily
-      ~100-clip b-roll pipeline. ⚠️ API credits are a SEPARATE pool from the
-      web subscription — top up at cloud.higgsfield.ai/credits (a 403 from
-      Higgsfield means the pool is empty). Before the first full batch, run
-      ONE clip through chat ("generate one test clip") to verify the
-      configured model (`HIGGSFIELD_T2V_MODEL`) is enabled on the plan.
+      (cloud.higgsfield.ai/api-keys); both required. **Live-verified 8/25:
+      the pair authenticates**, and the platform API has NO text2video —
+      clips render as a two-step chain, text2image (Soul) → image2video
+      (DoP), models set by `HIGGSFIELD_T2I_MODEL` / `HIGGSFIELD_I2V_MODEL`
+      (defaults verified against the account's GET /models roster; DoP lite
+      = 2 credits/clip, so the default 20-clip day ≈ 40 credits).
+      ⚠️ **BLOCKER: the API credit pool is currently EMPTY** (submits return
+      403 not_enough_credits — it's a separate pool from Braden's web
+      subscription). Braden must add API credits at cloud.higgsfield.ai,
+      then run ONE clip through chat as the end-to-end check.
 - [ ] `OPUSCLIP_API_KEY` — auto-clipping (check the client's plan tier includes
       API access; until then Opus stays manual and the stage records "skipped").
 - [ ] `RIVERSIDE_API_KEY` — **optional.** Audio is auto-extracted from the

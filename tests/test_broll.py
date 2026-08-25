@@ -228,6 +228,112 @@ class TestHiggsfieldContract:
         assert "credits" in str(h._error_for_response(403, "", what="submit"))
         assert "credentials" in str(h._error_for_response(401, "", what="submit"))
         assert "422" in str(h._error_for_response(422, "detail", what="submit"))
+        # Live-verified shapes: 404 model_not_found names the env overrides;
+        # a plain 404 (bad path) stays generic.
+        wrong_model = str(h._error_for_response(
+            404, '{"detail":"model_not_found"}', what="submit"
+        ))
+        assert "HIGGSFIELD_T2I_MODEL" in wrong_model
+        assert "model_not_found" in wrong_model
+
+    def test_optional_only_422_detection(self):
+        from packages.integrations.higgsfield import client as h
+
+        rejects_optional = (
+            '{"detail":[{"type":"extra_forbidden","loc":["body","aspect_ratio"],'
+            '"msg":"Extra inputs are not permitted"}]}'
+        )
+        missing_required = (
+            '{"detail":[{"type":"missing","loc":["body","prompt"],'
+            '"msg":"Field required"}]}'
+        )
+        assert h._optional_only_422(rejects_optional, {"aspect_ratio", "duration"}) is True
+        assert h._optional_only_422(missing_required, {"aspect_ratio"}) is False
+        assert h._optional_only_422("not json", {"aspect_ratio"}) is False
+
+    @pytest.mark.asyncio
+    async def test_submit_adaptive_drops_rejected_optionals(self, monkeypatch):
+        """A 422 naming ONLY optional keys triggers one required-only retry
+        — the schema-probing behavior the unverified optional params need."""
+        from packages.integrations.higgsfield import client as h
+
+        bodies = []
+
+        async def fake_submit(model, body, *, what="submit"):
+            bodies.append(dict(body))
+            if "aspect_ratio" in body:
+                raise h.HiggsfieldError(
+                    'Higgsfield submit failed: 422 {"detail":[{"type":"extra_forbidden",'
+                    '"loc":["body","aspect_ratio"],"msg":"Extra inputs are not permitted"}]}'
+                )
+            return "req-1"
+
+        monkeypatch.setattr(h, "submit_request", fake_submit)
+        job = await h.submit_adaptive(
+            "higgsfield-ai/soul/v2/standard",
+            {"prompt": "eagle"},
+            {"aspect_ratio": "16:9"},
+        )
+        assert job == "req-1"
+        assert bodies == [
+            {"prompt": "eagle", "aspect_ratio": "16:9"},
+            {"prompt": "eagle"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_generate_clip_runs_the_two_step_chain(self, monkeypatch):
+        """No text2video exists on the platform (live-verified): a clip is
+        t2i (Soul) then i2v (DoP) with the frame URL threaded through."""
+        from packages.integrations.higgsfield import client as h
+
+        monkeypatch.setenv("HIGGSFIELD_API_KEY", "k")
+        monkeypatch.setenv("HIGGSFIELD_API_SECRET", "s")
+        submits = []
+        polls = []
+
+        async def fake_adaptive(model, required, optional, *, what="submit"):
+            submits.append((model, dict(required), dict(optional)))
+            return f"req-{len(submits)}"
+
+        async def fake_poll(job_id, *, poll_interval=5.0, timeout=600.0):
+            polls.append(job_id)
+            return "https://cdn/img.png" if job_id == "req-1" else "https://cdn/clip.mp4"
+
+        monkeypatch.setattr(h, "submit_adaptive", fake_adaptive)
+        monkeypatch.setattr(h, "poll_generation", fake_poll)
+
+        clip = await h.generate_clip(
+            "eagle on a fence", aspect_ratio="9:16", duration_seconds=5, download=False
+        )
+        assert submits[0][0] == h.DEFAULT_T2I_MODEL
+        assert submits[0][1] == {"prompt": "eagle on a fence"}
+        assert submits[0][2] == {"aspect_ratio": "9:16"}
+        assert submits[1][0] == h.DEFAULT_I2V_MODEL
+        # The rendered frame feeds the video step.
+        assert submits[1][1] == {"prompt": "eagle on a fence", "image_url": "https://cdn/img.png"}
+        assert submits[1][2] == {"duration": 5}
+        assert clip.url == "https://cdn/clip.mp4"
+        assert clip.job_id == "req-2"
+
+    @pytest.mark.asyncio
+    async def test_generate_image_exposes_the_t2i_step(self, monkeypatch):
+        from packages.integrations.higgsfield import client as h
+
+        monkeypatch.setenv("HIGGSFIELD_API_KEY", "k")
+        monkeypatch.setenv("HIGGSFIELD_API_SECRET", "s")
+
+        async def fake_adaptive(model, required, optional, *, what="submit"):
+            assert model == h.DEFAULT_T2I_MODEL
+            return "req-img"
+
+        async def fake_poll(job_id, *, poll_interval=5.0, timeout=600.0):
+            return "https://cdn/thumb.png"
+
+        monkeypatch.setattr(h, "submit_adaptive", fake_adaptive)
+        monkeypatch.setattr(h, "poll_generation", fake_poll)
+        img = await h.generate_image("thumbnail: eagle, bold text")
+        assert img.url == "https://cdn/thumb.png"
+        assert img.job_id == "req-img"
 
 
 # ── Higgsfield graceful degradation (no network) ───────────────────────────
