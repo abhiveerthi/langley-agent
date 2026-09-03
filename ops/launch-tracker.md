@@ -24,7 +24,7 @@ Slack app "Backroom Staging" (A0BSKDBKF53). Secrets live in `.env.staging`.
 
 | # | Item | Owner | Status | Notes |
 |---|------|-------|--------|-------|
-| 1 | **OpenAI API key** | You → Me | 🔵 NEXT | Powers Whisper-grade voice **and** the memory feature (embeddings). Create at platform.openai.com, paste it; I set `OPENAI_API_KEY` + `TRANSCRIPTION_PROVIDER=openai`. ~$5 lasts months. |
+| 1 | **OpenAI API key** | Braden → You → Me | ⏳ WAITING ON BRADEN | Braden creates it on his own OpenAI account (instructions sent 8/29). Powers Whisper-grade voice **and** the memory feature (embeddings). When it arrives I set `OPENAI_API_KEY` + `TRANSCRIPTION_PROVIDER=openai` and redeploy. |
 | 2 | **Google OAuth test user** | You → Me | ⏳ WAITING | Google shows an "unverified app" wall to anyone not listed as a test user. Tell me which Google Cloud project owns the OAuth client; I add `braden@langleyfirearmsacademy.com` (or you add him under OAuth consent screen → Test users). |
 | 3 | **Rotate Braden's temp password** | Me | 🕒 AT CALL TIME | Set to a random value nobody holds, right before the magic link is minted. |
 | 4 | **Rename Slack app** "Backroom Staging" → "Backroom" | You → Me | ⚪ OPTIONAL | Cosmetic. Needs a fresh app-config token (api.slack.com/apps → Your App Configuration Tokens); the previous one expired. |
