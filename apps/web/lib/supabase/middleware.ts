@@ -2,7 +2,6 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
 const PROTECTED_PREFIX = "/app";
-const PUBLIC_ROUTES = ["/login", "/auth"];
 
 export async function updateSession(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -39,9 +38,6 @@ export async function updateSession(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const isProtected = pathname === PROTECTED_PREFIX || pathname.startsWith(`${PROTECTED_PREFIX}/`);
-  const isPublicAuth = PUBLIC_ROUTES.some(
-    (p) => pathname === p || pathname.startsWith(`${p}/`)
-  );
 
   if (isProtected && !user) {
     const redirectUrl = request.nextUrl.clone();
@@ -50,13 +46,11 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(redirectUrl);
   }
 
-  // If a logged-in user hits /login, send them to the app.
-  if (isPublicAuth && user && pathname.startsWith("/login")) {
-    const redirectUrl = request.nextUrl.clone();
-    redirectUrl.pathname = "/app/chat";
-    redirectUrl.search = "";
-    return NextResponse.redirect(redirectUrl);
-  }
+  // A signed-in user visiting /login is NOT bounced into the app: the login
+  // page shows who they're signed in as and offers "continue" or "sign out
+  // and use a different account". Auto-forwarding made "Sign in" on the
+  // landing page silently drop people into whatever session was lying
+  // around — no way to switch accounts.
 
   return response;
 }

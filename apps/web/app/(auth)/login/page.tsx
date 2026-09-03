@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Zap, Loader2 } from "lucide-react";
@@ -15,6 +15,27 @@ function LoginForm() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  // undefined = still checking; null = no session; string = signed-in email.
+  const [sessionEmail, setSessionEmail] = useState<string | null | undefined>(
+    undefined
+  );
+
+  useEffect(() => {
+    const supabase = createClient();
+    supabase.auth
+      .getUser()
+      .then(({ data }) => setSessionEmail(data.user?.email ?? null))
+      .catch(() => setSessionEmail(null));
+  }, []);
+
+  const safeNext = /^\/[^/\\]/.test(next) ? next : "/app/chat";
+
+  async function handleSwitchAccount() {
+    const supabase = createClient();
+    await supabase.auth.signOut();
+    setSessionEmail(null);
+    router.refresh();
+  }
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -37,7 +58,7 @@ function LoginForm() {
       // Open-redirect guard: `next.startsWith("/")` alone allows
       // protocol-relative URLs like `//attacker.com`. Require single
       // slash + non-slash + non-backslash to keep the redirect on-site.
-      router.push(/^\/[^/\\]/.test(next) ? next : "/app/chat");
+      router.push(safeNext);
       router.refresh();
     } catch {
       setError("Unable to sign in right now. Please try again.");
@@ -60,6 +81,38 @@ function LoginForm() {
       </Link>
 
       <div className="w-full max-w-sm rounded-xl border border-border bg-card p-6 shadow-xl shadow-black/20 sm:p-8">
+        {sessionEmail === undefined ? (
+          <div className="flex justify-center py-8">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : sessionEmail ? (
+          <div className="text-center">
+            <h1 className="text-xl font-semibold text-foreground sm:text-2xl">
+              You&apos;re already signed in
+            </h1>
+            <p className="mt-1.5 text-sm text-muted-foreground">
+              as <span className="font-medium text-foreground">{sessionEmail}</span>
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                router.push(safeNext);
+                router.refresh();
+              }}
+              className="mt-6 inline-flex h-10 w-full items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary-hover"
+            >
+              Continue to workspace
+            </button>
+            <button
+              type="button"
+              onClick={handleSwitchAccount}
+              className="mt-3 inline-flex h-10 w-full items-center justify-center rounded-md border border-border px-4 text-sm font-medium text-foreground transition-colors hover:bg-muted"
+            >
+              Sign out and use a different account
+            </button>
+          </div>
+        ) : (
+        <>
         <div className="text-center">
           <h1 className="text-xl font-semibold text-foreground sm:text-2xl">
             Welcome back
@@ -130,6 +183,8 @@ function LoginForm() {
             Request access
           </Link>
         </p>
+        </>
+        )}
       </div>
     </div>
   );
