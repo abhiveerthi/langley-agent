@@ -25,7 +25,7 @@ Slack app "Backroom Staging" (A0BSKDBKF53). Secrets live in `.env.staging`.
 | # | Item | Owner | Status | Notes |
 |---|------|-------|--------|-------|
 | 1 | **OpenAI API key** | Braden → You → Me | ⏳ WAITING ON BRADEN | Braden creates it on his own OpenAI account (instructions sent 8/29). Powers Whisper-grade voice **and** the memory feature (embeddings). When it arrives I set `OPENAI_API_KEY` + `TRANSCRIPTION_PROVIDER=openai` and redeploy. |
-| 2 | **Google OAuth test user** | You → Me | ⏳ WAITING | Google shows an "unverified app" wall to anyone not listed as a test user. Tell me which Google Cloud project owns the OAuth client; I add `braden@langleyfirearmsacademy.com` (or you add him under OAuth consent screen → Test users). |
+| 2 | **Publish the Google OAuth app** (Testing → In production) | You | 🔵 NEXT | In the Google Cloud project that owns `GOOGLE_CLIENT_ID`: APIs & Services → OAuth consent screen → **Publish app**. Why not just add a test user: apps in *Testing* get refresh tokens that expire every **7 days** — Braden's YouTube would silently disconnect weekly. Unverified-in-production shows a one-time "Google hasn't verified this app" screen (Advanced → Go to Backroom) and then persists. Keep only the YouTube scopes declared; Gmail's `gmail.send` is a *restricted* scope (phase 2). Nobody needs Braden's login for any of this. |
 | 3 | **Rotate Braden's temp password** | Me | 🕒 AT CALL TIME | Set to a random value nobody holds, right before the magic link is minted. |
 | 4 | **Rename Slack app** "Backroom Staging" → "Backroom" | You → Me | ⚪ OPTIONAL | Cosmetic. Needs a fresh app-config token (api.slack.com/apps → Your App Configuration Tokens); the previous one expired. |
 
